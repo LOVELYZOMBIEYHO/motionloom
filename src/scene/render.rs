@@ -1,14 +1,18 @@
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::animation::{AnimationFrameRenderer, parse_animation_graph_script};
 use crate::{
-    CameraNode, CharacterNode, CircleNode, FaceJawNode, GradientDef, GradientStop, GraphScope,
-    GraphScript, GroupNode, ImageNode, LineNode, MaskNode, PartNode, PassNode, PathNode,
-    PolylineNode, RectNode, RepeatNode, SceneNode, ShadowNode, SvgNode, TextNode, eval_time_expr,
+    ActionNode, ApplyActionNode, CameraNode, CharacterNode, CircleNode, EffectNode, FaceJawNode,
+    GradientDef, GradientStop, GraphScript, GroupNode, ImageNode, LayerNode, LineNode, MaskNode,
+    PaletteNode, PartNode, PassNode, PathNode, PixelGridNode, PolylineNode, PrecomposeNode,
+    RectNode, RepeatNode, SceneLayerNode, SceneNode, ShadowNode, SkeletonNode, SvgNode, TextNode,
+    eval_time_expr,
 };
 use base64::Engine;
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
@@ -17,10 +21,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MotionLoomSceneRenderError {
-    #[error("MotionLoom scene render requires <Graph scope=\"scene\">.")]
-    NotSceneGraph,
     #[error(
-        "MotionLoom scene graph requires at least one scene node such as <Scene>, <Solid>, <Text>, <Image>, <Svg>, <Rect>, <Circle>, <Line>, <Polyline>, <Path>, <FaceJaw>, <Camera>, <Group>, <Mask>, or <Character>."
+        "MotionLoom scene graph requires at least one node such as <Background>, <Scene>, <Text>, <Image>, <Svg>, <Rect>, <Circle>, <Line>, <Polyline>, <Path>, <FaceJaw>, <Camera>, <Group>, <Mask>, or <Character>."
     )]
     EmptyScene,
     #[error("failed to read system time: {source}")]
@@ -51,6 +53,8 @@ pub enum MotionLoomSceneRenderError {
     InvalidExpression { expr: String, message: String },
     #[error("invalid scene path data '{value}': {message}")]
     InvalidPathData { value: String, message: String },
+    #[error("invalid scene deform grid '{value}': {message}")]
+    InvalidDeformGrid { value: String, message: String },
     #[error("failed to open image asset ({path}): {source}")]
     OpenImage {
         path: PathBuf,
@@ -79,6 +83,8 @@ pub enum MotionLoomSceneRenderError {
     InvalidSvgDataUri { source_ref: String, message: String },
     #[error("GPU scene render failed: {message}")]
     GpuRender { message: String },
+    #[error("animation source render failed: {message}")]
+    AnimationSource { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,9 +385,6 @@ fn gpu_h264_encoder_args() -> Vec<String> {
 }
 
 fn validate_scene_graph(graph: &GraphScript) -> Result<(), MotionLoomSceneRenderError> {
-    if graph.scope != GraphScope::Scene {
-        return Err(MotionLoomSceneRenderError::NotSceneGraph);
-    }
     if !graph.has_scene_nodes() {
         return Err(MotionLoomSceneRenderError::EmptyScene);
     }
@@ -438,8 +441,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-const WGPU_AFFINE_TEXTURE_SHADER: &str = r#"
-struct TextureParams {
+const WGPU_MATTE_TEXTURE_SHADER: &str = r#"
+struct TextureMatteParams {
     canvas: vec4<f32>,
     bounds: vec4<f32>,
     image: vec4<f32>,
@@ -450,19 +453,68 @@ struct TextureParams {
 
 @group(0) @binding(0) var base_tex: texture_2d<f32>;
 @group(0) @binding(1) var image_tex: texture_2d<f32>;
-@group(0) @binding(2) var image_sampler: sampler;
-@group(0) @binding(3) var out_tex: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(4) var<uniform> params: TextureParams;
+@group(0) @binding(2) var matte_tex: texture_2d<f32>;
+@group(0) @binding(3) var image_sampler: sampler;
+@group(0) @binding(4) var out_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(5) var<uniform> params: TextureMatteParams;
 
-fn over(base: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
-    let src_a = clamp(src.a * params.opacity.x, 0.0, 1.0);
-    let dst_a = base.a;
-    let out_a = src_a + dst_a * (1.0 - src_a);
+fn over(base: vec4<f32>, src_rgb: vec3<f32>, src_a: f32) -> vec4<f32> {
+    let a = clamp(src_a, 0.0, 1.0);
+    let out_a = a + base.a * (1.0 - a);
     if (out_a <= 0.000001) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    let rgb = (src.rgb * src_a + base.rgb * dst_a * (1.0 - src_a)) / out_a;
+    let rgb = (src_rgb * a + base.rgb * base.a * (1.0 - a)) / out_a;
     return vec4<f32>(rgb, out_a);
+}
+
+fn blend_over(base: vec4<f32>, src_rgb: vec3<f32>, src_a: f32, mode: f32) -> vec4<f32> {
+    let blend_mode = i32(round(mode));
+    if (blend_mode == 0) {
+        return over(base, src_rgb, src_a);
+    }
+
+    let a = clamp(src_a, 0.0, 1.0);
+    if (a <= 0.0) {
+        return base;
+    }
+
+    var blended = src_rgb;
+    if (blend_mode == 1) {
+        blended = src_rgb * base.rgb;
+    } else if (blend_mode == 2) {
+        let one = vec3<f32>(1.0, 1.0, 1.0);
+        blended = one - (one - src_rgb) * (one - base.rgb);
+    } else if (blend_mode == 3) {
+        blended = min(src_rgb + base.rgb, vec3<f32>(1.0, 1.0, 1.0));
+    }
+
+    let out_a = a + base.a * (1.0 - a);
+    if (out_a <= 0.000001) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let rgb = (blended * a + base.rgb * base.a * (1.0 - a)) / out_a;
+    return vec4<f32>(rgb, out_a);
+}
+
+fn sample_source(local: vec2<f32>) -> vec4<f32> {
+    if (params.canvas.z > 0.5) {
+        let tx = clamp(i32(floor(local.x)), 0, i32(params.image.x) - 1);
+        let ty = clamp(i32(floor(local.y)), 0, i32(params.image.y) - 1);
+        return textureLoad(image_tex, vec2<i32>(tx, ty), 0);
+    }
+    let uv = vec2<f32>(local.x / params.image.x, local.y / params.image.y);
+    return textureSampleLevel(image_tex, image_sampler, uv, 0.0);
+}
+
+fn sample_matte(local: vec2<f32>) -> vec4<f32> {
+    if (params.canvas.w > 0.5) {
+        let tx = clamp(i32(floor(local.x)), 0, i32(params.image.z) - 1);
+        let ty = clamp(i32(floor(local.y)), 0, i32(params.image.w) - 1);
+        return textureLoad(matte_tex, vec2<i32>(tx, ty), 0);
+    }
+    let matte_uv = vec2<f32>(local.x / params.image.z, local.y / params.image.w);
+    return textureSampleLevel(matte_tex, image_sampler, matte_uv, 0.0);
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -489,9 +541,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var out_color = base;
 
     if (local.x >= 0.0 && local.y >= 0.0 && local.x < params.image.x && local.y < params.image.y) {
-        let uv = vec2<f32>(local.x / params.image.x, local.y / params.image.y);
-        let src = textureSampleLevel(image_tex, image_sampler, uv, 0.0);
-        out_color = over(base, src);
+        let src = sample_source(local);
+        var matte_factor = 1.0;
+        let matte_mode = i32(round(params.opacity.z));
+        if (matte_mode != 0) {
+            if (local.x >= 0.0 && local.y >= 0.0 && local.x < params.image.z && local.y < params.image.w) {
+                let matte = sample_matte(local);
+                if (matte_mode == 2) {
+                    matte_factor = dot(matte.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)) * matte.a;
+                } else {
+                    matte_factor = matte.a;
+                }
+            } else {
+                matte_factor = 0.0;
+            }
+            if (params.opacity.w > 0.5) {
+                matte_factor = 1.0 - matte_factor;
+            }
+        }
+        let src_a = src.a * params.opacity.x * clamp(matte_factor, 0.0, 1.0);
+        out_color = blend_over(base, src.rgb, src_a, params.opacity.y);
     }
 
     textureStore(out_tex, pos, out_color);
@@ -581,6 +650,35 @@ fn over(base: vec4<f32>, src_rgb: vec3<f32>, src_a: f32) -> vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     let rgb = (src_rgb * a + base.rgb * base.a * (1.0 - a)) / out_a;
+    return vec4<f32>(rgb, out_a);
+}
+
+fn blend_over(base: vec4<f32>, src_rgb: vec3<f32>, src_a: f32, mode: f32) -> vec4<f32> {
+    let blend_mode = i32(round(mode));
+    if (blend_mode == 0) {
+        return over(base, src_rgb, src_a);
+    }
+
+    let a = clamp(src_a, 0.0, 1.0);
+    if (a <= 0.0) {
+        return base;
+    }
+
+    var blended = src_rgb;
+    if (blend_mode == 1) {
+        blended = src_rgb * base.rgb;
+    } else if (blend_mode == 2) {
+        let one = vec3<f32>(1.0, 1.0, 1.0);
+        blended = one - (one - src_rgb) * (one - base.rgb);
+    } else if (blend_mode == 3) {
+        blended = min(src_rgb + base.rgb, vec3<f32>(1.0, 1.0, 1.0));
+    }
+
+    let out_a = a + base.a * (1.0 - a);
+    if (out_a <= 0.000001) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let rgb = (blended * a + base.rgb * base.a * (1.0 - a)) / out_a;
     return vec4<f32>(rgb, out_a);
 }
 
@@ -864,6 +962,35 @@ fn over(base: vec4<f32>, src_rgb: vec3<f32>, src_a: f32) -> vec4<f32> {
     return vec4<f32>(rgb, out_a);
 }
 
+fn blend_over(base: vec4<f32>, src_rgb: vec3<f32>, src_a: f32, mode: f32) -> vec4<f32> {
+    let blend_mode = i32(round(mode));
+    if (blend_mode == 0) {
+        return over(base, src_rgb, src_a);
+    }
+
+    let a = clamp(src_a, 0.0, 1.0);
+    if (a <= 0.0) {
+        return base;
+    }
+
+    var blended = src_rgb;
+    if (blend_mode == 1) {
+        blended = src_rgb * base.rgb;
+    } else if (blend_mode == 2) {
+        let one = vec3<f32>(1.0, 1.0, 1.0);
+        blended = one - (one - src_rgb) * (one - base.rgb);
+    } else if (blend_mode == 3) {
+        blended = min(src_rgb + base.rgb, vec3<f32>(1.0, 1.0, 1.0));
+    }
+
+    let out_a = a + base.a * (1.0 - a);
+    if (out_a <= 0.000001) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let rgb = (blended * a + base.rgb * base.a * (1.0 - a)) / out_a;
+    return vec4<f32>(rgb, out_a);
+}
+
 fn stop_offset(p: Primitive, index: i32) -> f32 {
     if (index == 0) { return p.stop_offsets0.x; }
     if (index == 1) { return p.stop_offsets0.y; }
@@ -1058,7 +1185,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (cover_replace.y > 0.5) {
             out_color = vec4<f32>(paint_color.rgb, paint_color.a * p.style.w);
         } else {
-            out_color = over(out_color, paint_color.rgb, paint_color.a * p.style.w * coverage);
+            out_color = blend_over(out_color, paint_color.rgb, paint_color.a * p.style.w * coverage, p.info.y);
         }
     }
 
@@ -1120,7 +1247,8 @@ struct WgpuSceneCompositor {
     queue: wgpu::Queue,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
-    texture_pipeline: wgpu::ComputePipeline,
+    matte_texture_bind_group_layout: wgpu::BindGroupLayout,
+    matte_texture_pipeline: wgpu::ComputePipeline,
     shape_bind_group_layout: wgpu::BindGroupLayout,
     shape_pipeline: wgpu::ComputePipeline,
     post_bind_group_layout: wgpu::BindGroupLayout,
@@ -1172,11 +1300,9 @@ impl WgpuSceneCompositor {
             label: Some("anica-motionloom-scene-gpu-shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WGPU_SCENE_SHADER)),
         });
-        let texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("anica-motionloom-scene-affine-texture-gpu-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                WGPU_AFFINE_TEXTURE_SHADER,
-            )),
+        let matte_texture_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("anica-motionloom-scene-matte-texture-gpu-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WGPU_MATTE_TEXTURE_SHADER)),
         });
         let shape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("anica-motionloom-scene-shape-gpu-shader"),
@@ -1304,6 +1430,68 @@ impl WgpuSceneCompositor {
                     },
                 ],
             });
+        let matte_texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("anica-motionloom-scene-matte-texture-gpu-bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
         let post_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("anica-motionloom-scene-post-gpu-bgl"),
@@ -1354,14 +1542,21 @@ impl WgpuSceneCompositor {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
-        let texture_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("anica-motionloom-scene-affine-texture-gpu-pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &texture_shader,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let matte_texture_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("anica-motionloom-scene-matte-texture-gpu-pipeline-layout"),
+                bind_group_layouts: &[&matte_texture_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let matte_texture_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("anica-motionloom-scene-matte-texture-gpu-pipeline"),
+                layout: Some(&matte_texture_pipeline_layout),
+                module: &matte_texture_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
         let shape_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("anica-motionloom-scene-shape-gpu-pipeline-layout"),
@@ -1411,7 +1606,8 @@ impl WgpuSceneCompositor {
             queue,
             bind_group_layout,
             pipeline,
-            texture_pipeline,
+            matte_texture_bind_group_layout,
+            matte_texture_pipeline,
             shape_bind_group_layout,
             shape_pipeline,
             post_bind_group_layout,
@@ -1650,12 +1846,37 @@ impl WgpuSceneCompositor {
         primitives: &[GpuScenePrimitive],
         texture_layers: &[GpuSceneTextureLayer],
     ) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+        let final_texture =
+            self.render_scene_content_to_texture(primitives, texture_layers, [0, 0, 0, 0])?;
+        self.readback_texture_rgba(&final_texture.texture)
+    }
+
+    fn render_scene_content_to_texture(
+        &mut self,
+        primitives: &[GpuScenePrimitive],
+        texture_layers: &[GpuSceneTextureLayer],
+        clear: [u8; 4],
+    ) -> Result<GpuSceneNativeTexture, MotionLoomSceneRenderError> {
         let canvas_len = (self.width as usize)
             .saturating_mul(self.height as usize)
             .saturating_mul(4);
-        let base = vec![0u8; canvas_len];
-        self.write_texture_rgba(&self.tex_a, self.width, self.height, &base);
-        self.write_texture_rgba(&self.tex_b, self.width, self.height, &base);
+        let mut base = vec![0u8; canvas_len];
+        for pixel in base.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&clear);
+        }
+
+        let tex_a = std::sync::Arc::new(Self::make_canvas_texture(
+            &self.device,
+            self.width,
+            self.height,
+        ));
+        let tex_b = std::sync::Arc::new(Self::make_canvas_texture(
+            &self.device,
+            self.width,
+            self.height,
+        ));
+        self.write_texture_rgba(&tex_a, self.width, self.height, &base);
+        self.write_texture_rgba(&tex_b, self.width, self.height, &base);
 
         let mut current_is_a = true;
         let mut dirty_a: Option<TextureRect> = None;
@@ -1666,7 +1887,8 @@ impl WgpuSceneCompositor {
                 label: Some("anica-motionloom-scene-shape-gpu-encoder"),
             });
         let mut uniform_buffers = Vec::with_capacity(texture_layers.len() + 2);
-        let mut texture_sources = Vec::<wgpu::Texture>::with_capacity(texture_layers.len());
+        let mut texture_sources =
+            Vec::<std::sync::Arc<wgpu::Texture>>::with_capacity(texture_layers.len());
 
         let shape_batch = batch_shape_storage_bytes(primitives, self.width, self.height)?;
         if shape_batch.primitive_count > 0 {
@@ -1693,8 +1915,8 @@ impl WgpuSceneCompositor {
             );
             self.dispatch_batched_shape_pass(
                 &mut encoder,
-                &self.tex_a,
-                &self.tex_b,
+                &tex_a,
+                &tex_b,
                 &uniform_buffer,
                 &storage_buffer,
                 &tile_range_buffer,
@@ -1715,31 +1937,55 @@ impl WgpuSceneCompositor {
         }
 
         for layer in texture_layers {
-            if layer.opacity <= 0.0001 || layer.image.width() == 0 || layer.image.height() == 0 {
+            let layer_w = layer.source.width();
+            let layer_h = layer.source.height();
+            if layer.opacity <= 0.0001 || layer_w == 0 || layer_h == 0 {
                 continue;
             }
-            let Some((bounds_x, bounds_y, bounds_w, bounds_h)) = texture_layer_bounds(
-                layer.transform,
-                layer.image.width(),
-                layer.image.height(),
-                self.width,
-                self.height,
-            ) else {
+            let Some((bounds_x, bounds_y, bounds_w, bounds_h)) =
+                texture_layer_bounds(layer.transform, layer_w, layer_h, self.width, self.height)
+            else {
                 continue;
             };
             if bounds_w == 0 || bounds_h == 0 {
                 continue;
             }
 
-            let source_texture =
-                self.make_source_texture(layer.image.width().max(1), layer.image.height().max(1));
-            self.write_texture_rgba(
-                &source_texture,
-                layer.image.width().max(1),
-                layer.image.height().max(1),
-                layer.image.as_raw(),
-            );
-            let uniform = affine_texture_uniform(
+            let source_texture = match &layer.source {
+                GpuSceneTextureSource::Cpu(image) => {
+                    let texture = std::sync::Arc::new(
+                        self.make_source_texture(image.width().max(1), image.height().max(1)),
+                    );
+                    self.write_texture_rgba(
+                        &texture,
+                        image.width().max(1),
+                        image.height().max(1),
+                        image.as_raw(),
+                    );
+                    texture_sources.push(texture.clone());
+                    texture
+                }
+                GpuSceneTextureSource::Gpu(texture) => texture.texture.clone(),
+            };
+            let (matte_texture, matte_w, matte_h, matte_mode, invert_matte) =
+                if let Some(matte) = layer.matte.as_ref() {
+                    (
+                        matte.texture.texture.clone(),
+                        matte.texture.width,
+                        matte.texture.height,
+                        matte.mode,
+                        matte.invert,
+                    )
+                } else {
+                    (
+                        source_texture.clone(),
+                        layer_w,
+                        layer_h,
+                        GpuSceneMatteMode::None,
+                        false,
+                    )
+                };
+            let uniform = matte_texture_uniform(
                 layer,
                 self.width,
                 self.height,
@@ -1747,28 +1993,34 @@ impl WgpuSceneCompositor {
                 bounds_y,
                 bounds_w,
                 bounds_h,
+                layer_w,
+                layer_h,
+                matte_w,
+                matte_h,
+                matte_mode,
+                invert_matte,
             )?;
-            let uniform_buffer = self.make_texture_uniform_buffer(&uniform);
+            let uniform_buffer = self.make_matte_texture_uniform_buffer(&uniform);
             let (src_canvas, dst_canvas) = if current_is_a {
-                (&self.tex_a, &self.tex_b)
+                (&tex_a, &tex_b)
             } else {
-                (&self.tex_b, &self.tex_a)
+                (&tex_b, &tex_a)
             };
             let dst_dirty = if current_is_a { dirty_b } else { dirty_a };
             if let Some(rect) = dst_dirty {
                 self.copy_texture_rect(&mut encoder, src_canvas, dst_canvas, rect);
             }
-            self.dispatch_affine_texture_pass(
+            self.dispatch_matte_texture_pass(
                 &mut encoder,
                 src_canvas,
                 &source_texture,
+                &matte_texture,
                 dst_canvas,
                 &uniform_buffer,
                 bounds_w,
                 bounds_h,
             );
             uniform_buffers.push(uniform_buffer);
-            texture_sources.push(source_texture);
             let changed = TextureRect {
                 x: bounds_x,
                 y: bounds_y,
@@ -1785,37 +2037,15 @@ impl WgpuSceneCompositor {
             current_is_a = !current_is_a;
         }
 
-        let final_texture = if current_is_a {
-            &self.tex_a
-        } else {
-            &self.tex_b
-        };
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: final_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.readback_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let final_texture = if current_is_a { tex_a } else { tex_b };
         self.queue.submit([encoder.finish()]);
-        let rendered = self.readback_rgba();
         drop(uniform_buffers);
         drop(texture_sources);
-        rendered
+        Ok(GpuSceneNativeTexture {
+            texture: final_texture,
+            width: self.width,
+            height: self.height,
+        })
     }
 
     fn apply_gpu_blur_passes(
@@ -1893,6 +2123,55 @@ impl WgpuSceneCompositor {
         rendered
     }
 
+    fn apply_gpu_blur_texture(
+        &mut self,
+        input: &GpuSceneNativeTexture,
+        passes: &[(bool, f32)],
+    ) -> Result<GpuSceneNativeTexture, MotionLoomSceneRenderError> {
+        if passes.is_empty() {
+            return Ok(input.clone());
+        }
+        if input.width != self.width || input.height != self.height {
+            return Err(MotionLoomSceneRenderError::GpuRender {
+                message: format!(
+                    "texture blur input size {}x{} does not match GPU compositor {}x{}",
+                    input.width, input.height, self.width, self.height
+                ),
+            });
+        }
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("anica-motionloom-scene-post-texture-gpu-encoder"),
+            });
+        let mut uniform_buffers = Vec::with_capacity(passes.len());
+        let mut temp_textures = Vec::<std::sync::Arc<wgpu::Texture>>::with_capacity(passes.len());
+        let mut current = input.texture.clone();
+
+        for (horizontal, sigma) in passes {
+            let uniform = post_blur_uniform(self.width, self.height, *horizontal, *sigma);
+            let uniform_buffer = self.make_post_uniform_buffer(&uniform);
+            let dst = std::sync::Arc::new(Self::make_canvas_texture(
+                &self.device,
+                self.width,
+                self.height,
+            ));
+            self.dispatch_post_pass(&mut encoder, &current, &dst, &uniform_buffer);
+            uniform_buffers.push(uniform_buffer);
+            current = dst.clone();
+            temp_textures.push(dst);
+        }
+
+        self.queue.submit([encoder.finish()]);
+        drop(uniform_buffers);
+        Ok(GpuSceneNativeTexture {
+            texture: current,
+            width: self.width,
+            height: self.height,
+        })
+    }
+
     fn make_uniform_buffer(&self, uniform: &[u8; 48]) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("anica-motionloom-scene-gpu-uniform"),
@@ -1908,9 +2187,9 @@ impl WgpuSceneCompositor {
         buffer
     }
 
-    fn make_texture_uniform_buffer(&self, uniform: &[u8; 96]) -> wgpu::Buffer {
+    fn make_matte_texture_uniform_buffer(&self, uniform: &[u8; 96]) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("anica-motionloom-scene-affine-texture-gpu-uniform"),
+            label: Some("anica-motionloom-scene-matte-texture-gpu-uniform"),
             size: uniform.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: true,
@@ -2136,11 +2415,12 @@ impl WgpuSceneCompositor {
         );
     }
 
-    fn dispatch_affine_texture_pass(
+    fn dispatch_matte_texture_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         base_texture: &wgpu::Texture,
         image_texture: &wgpu::Texture,
+        matte_texture: &wgpu::Texture,
         out_texture: &wgpu::Texture,
         uniform_buffer: &wgpu::Buffer,
         bounds_w: u32,
@@ -2148,10 +2428,11 @@ impl WgpuSceneCompositor {
     ) {
         let base_view = base_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let image_view = image_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let matte_view = matte_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let out_view = out_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("anica-motionloom-scene-affine-texture-gpu-bg"),
-            layout: &self.bind_group_layout,
+            label: Some("anica-motionloom-scene-matte-texture-gpu-bg"),
+            layout: &self.matte_texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -2163,24 +2444,28 @@ impl WgpuSceneCompositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::TextureView(&matte_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&out_view),
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&out_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         });
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("anica-motionloom-scene-affine-texture-gpu-pass"),
+            label: Some("anica-motionloom-scene-matte-texture-gpu-pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.texture_pipeline);
+        pass.set_pipeline(&self.matte_texture_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(
             bounds_w.div_ceil(16).max(1),
@@ -2281,6 +2566,40 @@ impl WgpuSceneCompositor {
         Ok((source.width, source.height, source.texture.clone()))
     }
 
+    fn readback_texture_rgba(
+        &self,
+        texture: &wgpu::Texture,
+    ) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("anica-motionloom-scene-gpu-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.readback_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        self.readback_rgba()
+    }
+
     fn readback_rgba(&self) -> Result<RgbaImage, MotionLoomSceneRenderError> {
         let slice = self.readback_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2359,6 +2678,10 @@ struct SceneFrameRenderer {
     path_cache: HashMap<String, Vec<Vec<Point2>>>,
     polyline_cache: HashMap<String, Vec<Point2>>,
     gradient_defs: HashMap<String, GradientDef>,
+    palette_defs: HashMap<String, PaletteNode>,
+    scene_precomposes: HashMap<String, RgbaImage>,
+    scene_masks: HashMap<String, MaskNode>,
+    animation_renderer: AnimationFrameRenderer,
     gpu_compositor: Option<WgpuSceneCompositor>,
 }
 
@@ -2415,6 +2738,17 @@ enum SceneBlendMode {
     Multiply,
     Screen,
     Add,
+}
+
+impl SceneBlendMode {
+    fn gpu_code(self) -> f32 {
+        match self {
+            Self::Normal => 0.0,
+            Self::Multiply => 1.0,
+            Self::Screen => 2.0,
+            Self::Add => 3.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2508,6 +2842,30 @@ impl Affine2 {
         }
     }
 
+    const fn scale_xy(scale_x: f32, scale_y: f32) -> Self {
+        Self {
+            m00: scale_x,
+            m01: 0.0,
+            m02: 0.0,
+            m10: 0.0,
+            m11: scale_y,
+            m12: 0.0,
+        }
+    }
+
+    fn skew_deg(skew_x: f32, skew_y: f32) -> Self {
+        let tx = skew_x.clamp(-89.9, 89.9).to_radians().tan();
+        let ty = skew_y.clamp(-89.9, 89.9).to_radians().tan();
+        Self {
+            m00: 1.0,
+            m01: tx,
+            m02: 0.0,
+            m10: ty,
+            m11: 1.0,
+            m12: 0.0,
+        }
+    }
+
     fn mul(self, rhs: Self) -> Self {
         Self {
             m00: self.m00 * rhs.m00 + self.m01 * rhs.m10,
@@ -2545,15 +2903,873 @@ impl Affine2 {
             self.m10 * x + self.m11 * y + self.m12,
         )
     }
+}
 
-    fn is_identity(self) -> bool {
-        (self.m00 - 1.0).abs() <= 0.000001
-            && self.m01.abs() <= 0.000001
-            && self.m02.abs() <= 0.000001
-            && self.m10.abs() <= 0.000001
-            && (self.m11 - 1.0).abs() <= 0.000001
-            && self.m12.abs() <= 0.000001
+fn clamp_nonzero_signed_scale(value: f32) -> f32 {
+    if value.abs() < 0.001 {
+        if value.is_sign_negative() {
+            -0.001
+        } else {
+            0.001
+        }
+    } else {
+        value.clamp(-64.0, 64.0)
     }
+}
+
+fn scene_local_transform(
+    x_value: &str,
+    y_value: &str,
+    rotation_value: &str,
+    scale_value: &str,
+    scale_x_value: &str,
+    scale_y_value: &str,
+    skew_x_value: &str,
+    skew_y_value: &str,
+    transform_origin_x_value: &str,
+    transform_origin_y_value: &str,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    let x = eval_scene_number(x_value, time_norm, time_sec)?;
+    let y = eval_scene_number(y_value, time_norm, time_sec)?;
+    let rotation = eval_scene_number(rotation_value, time_norm, time_sec)?;
+    let scale = eval_scene_number(scale_value, time_norm, time_sec)?.clamp(0.001, 64.0);
+    let scale_x =
+        clamp_nonzero_signed_scale(scale * eval_scene_number(scale_x_value, time_norm, time_sec)?);
+    let scale_y =
+        clamp_nonzero_signed_scale(scale * eval_scene_number(scale_y_value, time_norm, time_sec)?);
+    let skew_x = eval_scene_number(skew_x_value, time_norm, time_sec)?;
+    let skew_y = eval_scene_number(skew_y_value, time_norm, time_sec)?;
+    let origin_x = eval_scene_number(transform_origin_x_value, time_norm, time_sec)?;
+    let origin_y = eval_scene_number(transform_origin_y_value, time_norm, time_sec)?;
+
+    Ok(Affine2::translate(x, y)
+        .mul(Affine2::translate(origin_x, origin_y))
+        .mul(Affine2::rotate_deg(rotation))
+        .mul(Affine2::skew_deg(skew_x, skew_y))
+        .mul(Affine2::scale_xy(scale_x, scale_y))
+        .mul(Affine2::translate(-origin_x, -origin_y)))
+}
+
+fn scene_group_local_transform(
+    group: &GroupNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        &group.x,
+        &group.y,
+        &group.rotation,
+        &group.scale,
+        &group.scale_x,
+        &group.scale_y,
+        &group.skew_x,
+        &group.skew_y,
+        &group.transform_origin_x,
+        &group.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_group_local_transform_opt(
+    group: &GroupNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Option<Affine2> {
+    scene_group_local_transform(group, time_norm, time_sec).ok()
+}
+
+fn scene_layer_local_transform(
+    layer: &SceneLayerNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        &layer.x,
+        &layer.y,
+        &layer.rotation,
+        &layer.scale,
+        &layer.scale_x,
+        &layer.scale_y,
+        &layer.skew_x,
+        &layer.skew_y,
+        &layer.transform_origin_x,
+        &layer.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_character_local_transform(
+    character: &CharacterNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        &character.x,
+        &character.y,
+        &character.rotation,
+        &character.scale,
+        &character.scale_x,
+        &character.scale_y,
+        &character.skew_x,
+        &character.skew_y,
+        &character.transform_origin_x,
+        &character.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_character_local_transform_opt(
+    character: &CharacterNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Option<Affine2> {
+    scene_character_local_transform(character, time_norm, time_sec).ok()
+}
+
+fn scene_rect_local_transform(
+    rect: &RectNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        "0",
+        "0",
+        &rect.rotation,
+        &rect.scale,
+        &rect.scale_x,
+        &rect.scale_y,
+        &rect.skew_x,
+        &rect.skew_y,
+        &rect.transform_origin_x,
+        &rect.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_circle_local_transform(
+    circle: &CircleNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        "0",
+        "0",
+        &circle.rotation,
+        &circle.scale,
+        &circle.scale_x,
+        &circle.scale_y,
+        &circle.skew_x,
+        &circle.skew_y,
+        &circle.transform_origin_x,
+        &circle.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_line_local_transform(
+    line: &LineNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        &line.x,
+        &line.y,
+        &line.rotation,
+        &line.scale,
+        &line.scale_x,
+        &line.scale_y,
+        &line.skew_x,
+        &line.skew_y,
+        &line.transform_origin_x,
+        &line.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_polyline_local_transform(
+    polyline: &PolylineNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        &polyline.x,
+        &polyline.y,
+        &polyline.rotation,
+        &polyline.scale,
+        &polyline.scale_x,
+        &polyline.scale_y,
+        &polyline.skew_x,
+        &polyline.skew_y,
+        &polyline.transform_origin_x,
+        &polyline.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_path_local_transform(
+    path: &PathNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        &path.x,
+        &path.y,
+        &path.rotation,
+        &path.scale,
+        &path.scale_x,
+        &path.scale_y,
+        &path.skew_x,
+        &path.skew_y,
+        &path.transform_origin_x,
+        &path.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn scene_text_local_transform(
+    text: &TextNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Affine2, MotionLoomSceneRenderError> {
+    scene_local_transform(
+        "0",
+        "0",
+        &text.rotation,
+        &text.scale,
+        &text.scale_x,
+        &text.scale_y,
+        &text.skew_x,
+        &text.skew_y,
+        &text.transform_origin_x,
+        &text.transform_origin_y,
+        time_norm,
+        time_sec,
+    )
+}
+
+fn affine_is_identity(transform: Affine2) -> bool {
+    (transform.m00 - 1.0).abs() <= 0.0001
+        && transform.m01.abs() <= 0.0001
+        && transform.m02.abs() <= 0.0001
+        && transform.m10.abs() <= 0.0001
+        && (transform.m11 - 1.0).abs() <= 0.0001
+        && transform.m12.abs() <= 0.0001
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ActionBoneSample {
+    x: Option<f32>,
+    y: Option<f32>,
+    rotation: Option<f32>,
+    scale: Option<f32>,
+    opacity: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoneWorldSample {
+    transform: Affine2,
+    rotation: f32,
+    scale: f32,
+    opacity: f32,
+}
+
+fn apply_action_graph_at_time(
+    graph: &GraphScript,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Option<GraphScript>, MotionLoomSceneRenderError> {
+    if graph.actions.is_empty() || graph.apply_actions.is_empty() {
+        return Ok(None);
+    }
+
+    let action_map = graph
+        .actions
+        .iter()
+        .map(|action| (action.id.as_str(), action))
+        .collect::<HashMap<_, _>>();
+    let skeleton_map = graph
+        .skeletons
+        .iter()
+        .map(|skeleton| (skeleton.id.as_str(), skeleton))
+        .collect::<HashMap<_, _>>();
+    let mut next = graph.clone();
+
+    for apply in &graph.apply_actions {
+        let action = action_map.get(apply.action.as_str()).ok_or_else(|| {
+            MotionLoomSceneRenderError::InvalidExpression {
+                expr: apply.action.clone(),
+                message: "ApplyAction references an unknown Action".to_string(),
+            }
+        })?;
+        let samples = sample_action_bones(action, apply, time_norm, time_sec)?;
+        if samples.is_empty() {
+            continue;
+        }
+        apply_action_to_nodes(
+            &mut next.scene_nodes,
+            &apply.target,
+            action.skeleton.as_deref(),
+            &skeleton_map,
+            &samples,
+            time_norm,
+            time_sec,
+        )?;
+        for scene in &mut next.scenes {
+            apply_action_to_nodes(
+                &mut scene.children,
+                &apply.target,
+                action.skeleton.as_deref(),
+                &skeleton_map,
+                &samples,
+                time_norm,
+                time_sec,
+            )?;
+        }
+    }
+
+    Ok(Some(next))
+}
+
+fn sample_action_bones(
+    action: &ActionNode,
+    apply: &ApplyActionNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<HashMap<String, ActionBoneSample>, MotionLoomSceneRenderError> {
+    let local_sec = time_sec - apply.at_ms as f32 / 1000.0;
+    let duration_sec = (action.duration_ms as f32 / 1000.0).max(0.0001);
+    if local_sec < -0.0001 || local_sec > duration_sec + 0.0001 || action.poses.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let local_sec = local_sec.clamp(0.0, duration_sec);
+
+    let mut prev_ix = 0usize;
+    let mut next_ix = action.poses.len().saturating_sub(1);
+    for (ix, pose) in action.poses.iter().enumerate() {
+        if pose.t <= local_sec {
+            prev_ix = ix;
+        }
+        if pose.t >= local_sec {
+            next_ix = ix;
+            break;
+        }
+    }
+    if action.poses[prev_ix].t > local_sec {
+        prev_ix = next_ix;
+    }
+
+    let prev_pose = &action.poses[prev_ix];
+    let next_pose = &action.poses[next_ix];
+    let span = (next_pose.t - prev_pose.t).abs();
+    let mix = if span <= 0.0001 {
+        0.0
+    } else {
+        ((local_sec - prev_pose.t) / span).clamp(0.0, 1.0)
+    };
+
+    let mut bone_ids = Vec::<String>::new();
+    for bone in &prev_pose.bones {
+        if !bone_ids.iter().any(|id| id == &bone.id) {
+            bone_ids.push(bone.id.clone());
+        }
+    }
+    for bone in &next_pose.bones {
+        if !bone_ids.iter().any(|id| id == &bone.id) {
+            bone_ids.push(bone.id.clone());
+        }
+    }
+
+    let mut samples = HashMap::<String, ActionBoneSample>::new();
+    for bone_id in bone_ids {
+        let prev = prev_pose.bones.iter().find(|bone| bone.id == bone_id);
+        let next = next_pose.bones.iter().find(|bone| bone.id == bone_id);
+        let sample = ActionBoneSample {
+            x: interpolate_action_attr(
+                prev.and_then(|bone| bone.x.as_ref()),
+                next.and_then(|bone| bone.x.as_ref()),
+                mix,
+                time_norm,
+                time_sec,
+            )?,
+            y: interpolate_action_attr(
+                prev.and_then(|bone| bone.y.as_ref()),
+                next.and_then(|bone| bone.y.as_ref()),
+                mix,
+                time_norm,
+                time_sec,
+            )?,
+            rotation: interpolate_action_attr(
+                prev.and_then(|bone| bone.rotation.as_ref()),
+                next.and_then(|bone| bone.rotation.as_ref()),
+                mix,
+                time_norm,
+                time_sec,
+            )?,
+            scale: interpolate_action_attr(
+                prev.and_then(|bone| bone.scale.as_ref()),
+                next.and_then(|bone| bone.scale.as_ref()),
+                mix,
+                time_norm,
+                time_sec,
+            )?,
+            opacity: interpolate_action_attr(
+                prev.and_then(|bone| bone.opacity.as_ref()),
+                next.and_then(|bone| bone.opacity.as_ref()),
+                mix,
+                time_norm,
+                time_sec,
+            )?,
+        };
+        samples.insert(bone_id, sample);
+    }
+
+    Ok(samples)
+}
+
+fn interpolate_action_attr(
+    prev: Option<&String>,
+    next: Option<&String>,
+    mix: f32,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Option<f32>, MotionLoomSceneRenderError> {
+    let prev = prev
+        .map(|value| eval_scene_number(value, time_norm, time_sec))
+        .transpose()?;
+    let next = next
+        .map(|value| eval_scene_number(value, time_norm, time_sec))
+        .transpose()?;
+    Ok(match (prev, next) {
+        (Some(a), Some(b)) => Some(a + (b - a) * mix),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    })
+}
+
+fn apply_action_to_nodes(
+    nodes: &mut [SceneNode],
+    target: &str,
+    action_skeleton: Option<&str>,
+    skeleton_map: &HashMap<&str, &SkeletonNode>,
+    samples: &HashMap<String, ActionBoneSample>,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<(), MotionLoomSceneRenderError> {
+    for node in nodes {
+        match node {
+            SceneNode::Character(character) => {
+                if character.id.as_deref() == Some(target) {
+                    let skeleton_id = action_skeleton.or(character.rig.as_deref());
+                    if let Some(skeleton) = skeleton_id.and_then(|id| skeleton_map.get(id).copied())
+                    {
+                        let bone_world =
+                            sample_skeleton_bones(skeleton, samples, time_norm, time_sec)?;
+                        apply_skeleton_action_to_character_children(
+                            &mut character.children,
+                            &bone_world,
+                            samples,
+                            time_norm,
+                            time_sec,
+                        )?;
+                    } else {
+                        apply_action_to_character_children(
+                            &mut character.children,
+                            samples,
+                            time_norm,
+                            time_sec,
+                        )?;
+                    }
+                } else {
+                    apply_action_to_nodes(
+                        &mut character.children,
+                        target,
+                        action_skeleton,
+                        skeleton_map,
+                        samples,
+                        time_norm,
+                        time_sec,
+                    )?;
+                }
+            }
+            SceneNode::Group(group) => apply_action_to_nodes(
+                &mut group.children,
+                target,
+                action_skeleton,
+                skeleton_map,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Part(part) => apply_action_to_nodes(
+                &mut part.children,
+                target,
+                action_skeleton,
+                skeleton_map,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Repeat(repeat) => apply_action_to_nodes(
+                &mut repeat.children,
+                target,
+                action_skeleton,
+                skeleton_map,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Mask(mask) => apply_action_to_nodes(
+                &mut mask.children,
+                target,
+                action_skeleton,
+                skeleton_map,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Precompose(precompose) => apply_action_to_nodes(
+                &mut precompose.children,
+                target,
+                action_skeleton,
+                skeleton_map,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Camera(camera) => apply_action_to_nodes(
+                &mut camera.children,
+                target,
+                action_skeleton,
+                skeleton_map,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn sample_skeleton_bones(
+    skeleton: &SkeletonNode,
+    samples: &HashMap<String, ActionBoneSample>,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<HashMap<String, BoneWorldSample>, MotionLoomSceneRenderError> {
+    let bone_ids = skeleton
+        .bones
+        .iter()
+        .map(|bone| bone.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut out = HashMap::<String, BoneWorldSample>::new();
+    let mut visiting = HashSet::<String>::new();
+    for bone in &skeleton.bones {
+        sample_skeleton_bone(
+            skeleton,
+            &bone_ids,
+            &bone.id,
+            samples,
+            time_norm,
+            time_sec,
+            &mut visiting,
+            &mut out,
+        )?;
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_skeleton_bone(
+    skeleton: &SkeletonNode,
+    bone_ids: &HashSet<&str>,
+    bone_id: &str,
+    samples: &HashMap<String, ActionBoneSample>,
+    time_norm: f32,
+    time_sec: f32,
+    visiting: &mut HashSet<String>,
+    out: &mut HashMap<String, BoneWorldSample>,
+) -> Result<BoneWorldSample, MotionLoomSceneRenderError> {
+    if let Some(existing) = out.get(bone_id).copied() {
+        return Ok(existing);
+    }
+    if !visiting.insert(bone_id.to_string()) {
+        return Err(MotionLoomSceneRenderError::InvalidExpression {
+            expr: bone_id.to_string(),
+            message: format!("Skeleton {} contains a cyclic bone hierarchy.", skeleton.id),
+        });
+    }
+
+    let bone = skeleton
+        .bones
+        .iter()
+        .find(|bone| bone.id == bone_id)
+        .ok_or_else(|| MotionLoomSceneRenderError::InvalidExpression {
+            expr: bone_id.to_string(),
+            message: format!("Skeleton {} bone not found.", skeleton.id),
+        })?;
+    let parent = if let Some(parent_id) = bone.parent.as_deref() {
+        if !bone_ids.contains(parent_id) {
+            return Err(MotionLoomSceneRenderError::InvalidExpression {
+                expr: parent_id.to_string(),
+                message: format!(
+                    "Skeleton {} bone {} references an unknown parent.",
+                    skeleton.id, bone.id
+                ),
+            });
+        }
+        sample_skeleton_bone(
+            skeleton, bone_ids, parent_id, samples, time_norm, time_sec, visiting, out,
+        )?
+    } else {
+        BoneWorldSample {
+            transform: Affine2::identity(),
+            rotation: 0.0,
+            scale: 1.0,
+            opacity: 1.0,
+        }
+    };
+
+    let sample = samples.get(&bone.id).copied().unwrap_or_default();
+    let x = eval_scene_number(&bone.x, time_norm, time_sec)? + sample.x.unwrap_or(0.0);
+    let y = eval_scene_number(&bone.y, time_norm, time_sec)? + sample.y.unwrap_or(0.0);
+    let rotation =
+        eval_scene_number(&bone.rotation, time_norm, time_sec)? + sample.rotation.unwrap_or(0.0);
+    let scale = (eval_scene_number(&bone.scale, time_norm, time_sec)?
+        * sample.scale.unwrap_or(1.0))
+    .clamp(0.001, 64.0);
+    let opacity = sample.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+    let transform = parent
+        .transform
+        .mul(Affine2::translate(x, y))
+        .mul(Affine2::rotate_deg(rotation))
+        .mul(Affine2::scale(scale));
+    let world = BoneWorldSample {
+        transform,
+        rotation: parent.rotation + rotation,
+        scale: parent.scale * scale,
+        opacity: parent.opacity * opacity,
+    };
+
+    visiting.remove(bone_id);
+    out.insert(bone.id.clone(), world);
+    Ok(world)
+}
+
+fn apply_skeleton_action_to_character_children(
+    nodes: &mut [SceneNode],
+    bone_world: &HashMap<String, BoneWorldSample>,
+    samples: &HashMap<String, ActionBoneSample>,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<(), MotionLoomSceneRenderError> {
+    for node in nodes {
+        match node {
+            SceneNode::Part(part) => {
+                if let Some(attach_to) = part.attach_to.as_deref()
+                    && let Some(bone) = bone_world.get(attach_to).copied()
+                {
+                    apply_bone_world_to_part(part, bone, time_norm, time_sec)?;
+                } else if let Some(id) = part.id.as_deref()
+                    && let Some(sample) = samples.get(id)
+                {
+                    apply_action_sample_to_part(part, *sample, time_norm, time_sec)?;
+                }
+                apply_skeleton_action_to_character_children(
+                    &mut part.children,
+                    bone_world,
+                    samples,
+                    time_norm,
+                    time_sec,
+                )?;
+            }
+            SceneNode::Group(group) => apply_skeleton_action_to_character_children(
+                &mut group.children,
+                bone_world,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Repeat(repeat) => apply_skeleton_action_to_character_children(
+                &mut repeat.children,
+                bone_world,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Mask(mask) => apply_skeleton_action_to_character_children(
+                &mut mask.children,
+                bone_world,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Precompose(precompose) => apply_skeleton_action_to_character_children(
+                &mut precompose.children,
+                bone_world,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Camera(camera) => apply_skeleton_action_to_character_children(
+                &mut camera.children,
+                bone_world,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Character(character) => apply_skeleton_action_to_character_children(
+                &mut character.children,
+                bone_world,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn apply_bone_world_to_part(
+    part: &mut PartNode,
+    bone: BoneWorldSample,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<(), MotionLoomSceneRenderError> {
+    let local_x = eval_scene_number(&part.x, time_norm, time_sec)?;
+    let local_y = eval_scene_number(&part.y, time_norm, time_sec)?;
+    let local_rotation = eval_scene_number(&part.rotation, time_norm, time_sec)?;
+    let local_scale = eval_scene_number(&part.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+    let local_opacity = eval_scene_number(&part.opacity, time_norm, time_sec)?.clamp(0.0, 1.0);
+    let (world_x, world_y) = bone.transform.transform_point(local_x, local_y);
+
+    part.x = format_scene_number(world_x);
+    part.y = format_scene_number(world_y);
+    part.rotation = format_scene_number(bone.rotation + local_rotation);
+    part.scale = format_scene_number((bone.scale * local_scale).clamp(0.001, 64.0));
+    part.opacity = format_scene_number((bone.opacity * local_opacity).clamp(0.0, 1.0));
+    Ok(())
+}
+
+fn apply_action_to_character_children(
+    nodes: &mut [SceneNode],
+    samples: &HashMap<String, ActionBoneSample>,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<(), MotionLoomSceneRenderError> {
+    for node in nodes {
+        match node {
+            SceneNode::Part(part) => {
+                if let Some(id) = part.id.as_deref()
+                    && let Some(sample) = samples.get(id)
+                {
+                    apply_action_sample_to_part(part, *sample, time_norm, time_sec)?;
+                }
+                apply_action_to_character_children(
+                    &mut part.children,
+                    samples,
+                    time_norm,
+                    time_sec,
+                )?;
+            }
+            SceneNode::Group(group) => apply_action_to_character_children(
+                &mut group.children,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Repeat(repeat) => apply_action_to_character_children(
+                &mut repeat.children,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Mask(mask) => apply_action_to_character_children(
+                &mut mask.children,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Precompose(precompose) => apply_action_to_character_children(
+                &mut precompose.children,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Camera(camera) => apply_action_to_character_children(
+                &mut camera.children,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            SceneNode::Character(character) => apply_action_to_character_children(
+                &mut character.children,
+                samples,
+                time_norm,
+                time_sec,
+            )?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn apply_action_sample_to_part(
+    part: &mut PartNode,
+    sample: ActionBoneSample,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<(), MotionLoomSceneRenderError> {
+    if let Some(x) = sample.x {
+        part.x = format_scene_number(eval_scene_number(&part.x, time_norm, time_sec)? + x);
+    }
+    if let Some(y) = sample.y {
+        part.y = format_scene_number(eval_scene_number(&part.y, time_norm, time_sec)? + y);
+    }
+    if let Some(rotation) = sample.rotation {
+        part.rotation =
+            format_scene_number(eval_scene_number(&part.rotation, time_norm, time_sec)? + rotation);
+    }
+    if let Some(scale) = sample.scale {
+        part.scale = format_scene_number(
+            eval_scene_number(&part.scale, time_norm, time_sec)? * scale.max(0.001),
+        );
+    }
+    if let Some(opacity) = sample.opacity {
+        part.opacity = format_scene_number(
+            eval_scene_number(&part.opacity, time_norm, time_sec)? * opacity.clamp(0.0, 1.0),
+        );
+    }
+    Ok(())
+}
+
+fn format_scene_number(value: f32) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let mut text = format!("{value:.4}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    if text == "-0" {
+        text = "0".to_string();
+    }
+    text
 }
 
 fn graph_logical_render_size(graph: &GraphScript) -> (u32, u32) {
@@ -2615,6 +3831,7 @@ struct GpuScenePrimitive {
     blur: f32,
     color: [u8; 4],
     opacity: f32,
+    blend: SceneBlendMode,
     gradient: Option<GpuSceneGradientPaint>,
     line_t0: f32,
     line_t1: f32,
@@ -2636,15 +3853,99 @@ struct GpuSceneTextRequest {
 }
 
 #[derive(Debug, Clone)]
+struct GpuSceneNativeTexture {
+    texture: std::sync::Arc<wgpu::Texture>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone)]
+enum GpuSceneTextureSource {
+    Cpu(RgbaImage),
+    Gpu(GpuSceneNativeTexture),
+}
+
+impl GpuSceneTextureSource {
+    fn width(&self) -> u32 {
+        match self {
+            Self::Cpu(image) => image.width(),
+            Self::Gpu(texture) => texture.width,
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Self::Cpu(image) => image.height(),
+            Self::Gpu(texture) => texture.height,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuSceneMatteMode {
+    None,
+    Alpha,
+    Luma,
+}
+
+impl GpuSceneMatteMode {
+    fn gpu_code(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Alpha => 1.0,
+            Self::Luma => 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GpuSceneTextureMatte {
+    texture: GpuSceneNativeTexture,
+    mode: GpuSceneMatteMode,
+    invert: bool,
+}
+
+#[derive(Debug, Clone)]
 struct GpuSceneTextureLayer {
-    image: RgbaImage,
+    source: GpuSceneTextureSource,
     transform: Affine2,
     opacity: f32,
+    blend: SceneBlendMode,
+    matte: Option<GpuSceneTextureMatte>,
 }
 
 #[derive(Debug, Clone)]
 enum CpuSceneOverlay {
     Vector { nodes: Vec<SceneNode> },
+}
+
+#[derive(Debug, Default)]
+struct GpuSceneNativeAssets {
+    precomposes: HashMap<String, GpuSceneNativeTexture>,
+    masks: HashMap<String, GpuSceneNativeTexture>,
+}
+
+fn gpu_solid_primitive(color: [u8; 4]) -> GpuScenePrimitive {
+    GpuScenePrimitive {
+        kind: GPU_SHAPE_SOLID,
+        transform: Affine2::identity(),
+        shape: [0.0, 0.0, 0.0, 0.0],
+        radius: 0.0,
+        stroke_width: 0.0,
+        blur: 0.0,
+        color,
+        opacity: 1.0,
+        blend: SceneBlendMode::Normal,
+        gradient: None,
+        line_t0: 0.0,
+        line_t1: 1.0,
+        taper_start: 0.0,
+        taper_end: 0.0,
+    }
+}
+
+fn solid_canvas(size: (u32, u32), color: [u8; 4]) -> RgbaImage {
+    RgbaImage::from_pixel(size.0.max(1), size.1.max(1), Rgba(color))
 }
 
 fn describe_cpu_scene_overlays(overlays: &[CpuSceneOverlay]) -> String {
@@ -2671,7 +3972,8 @@ fn describe_cpu_scene_overlay(overlay: &CpuSceneOverlay) -> String {
 fn describe_scene_node_for_gpu(node: &SceneNode) -> String {
     match node {
         SceneNode::Defs(_) => "Defs".to_string(),
-        SceneNode::Solid(_) => "Solid".to_string(),
+        SceneNode::Palette(palette) => format!("Palette#{}", palette.id),
+        SceneNode::PixelGrid(grid) => format!("PixelGrid{}", id_suffix(grid.id.as_deref())),
         SceneNode::Text(text) => format!("Text{}", id_suffix(text.id.as_deref())),
         SceneNode::Image(image) => format!("Image{}", id_suffix(image.id.as_deref())),
         SceneNode::Svg(svg) => format!("Svg{}", id_suffix(svg.id.as_deref())),
@@ -2688,6 +3990,12 @@ fn describe_scene_node_for_gpu(node: &SceneNode) -> String {
         SceneNode::Part(part) => format!("Part{}", id_suffix(part.id.as_deref())),
         SceneNode::Repeat(repeat) => format!("Repeat{}", id_suffix(repeat.id.as_deref())),
         SceneNode::Mask(mask) => format!("Mask{}", id_suffix(mask.id.as_deref())),
+        SceneNode::Precompose(precompose) => format!("Precompose#{}", precompose.id),
+        SceneNode::Layer(layer) => layer
+            .id
+            .as_deref()
+            .map(|id| format!("Layer#{id}"))
+            .unwrap_or_else(|| format!("Layer(source={})", layer.source)),
         SceneNode::Camera(camera) => format!("Camera{}", id_suffix(camera.id.as_deref())),
         SceneNode::Character(character) => {
             format!("Character{}", id_suffix(character.id.as_deref()))
@@ -2717,6 +4025,10 @@ impl SceneFrameRenderer {
             path_cache: HashMap::new(),
             polyline_cache: HashMap::new(),
             gradient_defs: HashMap::new(),
+            palette_defs: HashMap::new(),
+            scene_precomposes: HashMap::new(),
+            scene_masks: HashMap::new(),
+            animation_renderer: AnimationFrameRenderer::new(),
             gpu_compositor: None,
         }
     }
@@ -2730,15 +4042,19 @@ impl SceneFrameRenderer {
         let duration_sec = (graph.duration_ms as f32 / 1000.0).max(1.0 / fps);
         let time_sec = frame as f32 / fps;
         let time_norm = (time_sec / duration_sec).clamp(0.0, 1.0);
+        let applied_graph = apply_action_graph_at_time(graph, time_norm, time_sec)?;
+        let graph = applied_graph.as_ref().unwrap_or(graph);
         self.gradient_defs.clear();
+        self.palette_defs.clear();
+        self.scene_precomposes.clear();
+        self.scene_masks.clear();
         collect_graph_gradient_defs(graph, &mut self.gradient_defs);
+        collect_graph_palette_defs(graph, &mut self.palette_defs);
         if graph_has_rich_scene_tree(graph) {
             return self.render_scene_tree_frame(graph, time_norm, time_sec);
         }
 
-        let mut canvas = if self.profile.uses_gpu_compositor()
-            && (!graph.images.is_empty() || !graph.svgs.is_empty())
-        {
+        let mut canvas = if self.profile.uses_gpu_compositor() {
             self.render_gpu_base_frame(graph, time_norm, time_sec)?
         } else {
             self.render_cpu_base_frame(graph, time_norm, time_sec)?
@@ -2761,8 +4077,25 @@ impl SceneFrameRenderer {
         time_norm: f32,
         time_sec: f32,
     ) -> Result<RgbaImage, MotionLoomSceneRenderError> {
-        if let Some(image) = self.try_render_gpu_scene_tree_frame(graph, time_norm, time_sec)? {
-            return Ok(image);
+        let has_composition = !graph.textures.is_empty()
+            || !graph.passes.is_empty()
+            || !graph.outputs.is_empty()
+            || !graph.layers.is_empty()
+            || !graph.animation_sources.is_empty();
+        let cpu_scene_compositing_required = scene_nodes_for_present(graph)
+            .map(scene_nodes_require_cpu_scene_compositing)
+            .unwrap_or(false);
+        if !has_composition && !cpu_scene_compositing_required {
+            if let Some(image) = self.try_render_gpu_scene_tree_frame(graph, time_norm, time_sec)? {
+                return Ok(image);
+            }
+            if self.profile.uses_gpu_compositor() {
+                return Err(MotionLoomSceneRenderError::GpuRender {
+                    message:
+                        "GPU preview is strict: scene graph requires CPU fallback, which is disabled."
+                            .to_string(),
+                });
+            }
         }
 
         let (w, h) = graph_output_size(graph);
@@ -2770,6 +4103,54 @@ impl SceneFrameRenderer {
         let logical_size = graph_logical_render_size(graph);
         let root_transform = render_size_root_transform(output_size, logical_size);
         let mut resources = HashMap::<String, RgbaImage>::new();
+        let background = graph
+            .backgrounds
+            .last()
+            .map(|background| parse_color(&background.color))
+            .transpose()?
+            .unwrap_or([0, 0, 0, 0]);
+        let background_canvas = if self.profile.uses_gpu_compositor() {
+            self.render_gpu_background_frame(output_size, background)?
+        } else {
+            solid_canvas(output_size, background)
+        };
+        resources.insert("scene".to_string(), background_canvas.clone());
+        resources.insert("background".to_string(), background_canvas.clone());
+        for background_node in &graph.backgrounds {
+            if let Some(id) = background_node.id.as_deref() {
+                resources.insert(id.to_string(), background_canvas.clone());
+            }
+        }
+
+        if !graph.animation_sources.is_empty() {
+            let raw_script = graph.raw_script.as_deref().ok_or_else(|| {
+                MotionLoomSceneRenderError::AnimationSource {
+                    message:
+                        "unified graph is missing raw DSL needed to render <Animation> sources"
+                            .to_string(),
+                }
+            })?;
+            let animation_frame = (time_sec * graph.fps.max(1.0)).round().max(0.0) as u32;
+            let animation_asset_root = default_animation_asset_root();
+            let base_animation_graph = parse_animation_graph_script(raw_script).map_err(|err| {
+                MotionLoomSceneRenderError::AnimationSource {
+                    message: format!("parse error at line {}: {}", err.line, err.message),
+                }
+            })?;
+            for animation in &graph.animation_sources {
+                let mut animation_graph = base_animation_graph.clone();
+                animation_graph.present.from = animation.id.clone();
+                animation_graph.render_size = Some(output_size);
+                let image = self
+                    .animation_renderer
+                    .render_frame_gpu(&animation_graph, animation_frame, &animation_asset_root)
+                    .map_err(|err| MotionLoomSceneRenderError::AnimationSource {
+                        message: err.to_string(),
+                    })?;
+                resources.insert(animation.id.clone(), image.clone());
+                resources.insert(format!("animation:{}", animation.id), image);
+            }
+        }
 
         if !graph.scene_nodes.is_empty() {
             let canvas = if let Some(image) = self.try_render_gpu_scene_nodes(
@@ -2824,7 +4205,20 @@ impl SceneFrameRenderer {
         }
 
         for tex in &graph.textures {
-            let image = if let Some(from) = tex.from.as_deref() {
+            let image = if let (Some(layer_id), Some(input_id)) =
+                (tex.from.as_deref(), tex.input.as_deref())
+            {
+                if let Some(layer) = graph.layers.iter().find(|layer| layer.id == layer_id) {
+                    let base = resources.get(input_id).cloned().unwrap_or_else(|| {
+                        RgbaImage::from_pixel(w.max(1), h.max(1), Rgba([0, 0, 0, 0]))
+                    });
+                    apply_layer_effects(&base, layer, time_norm, time_sec)?
+                } else {
+                    resources.get(layer_id).cloned().unwrap_or_else(|| {
+                        RgbaImage::from_pixel(w.max(1), h.max(1), Rgba([0, 0, 0, 0]))
+                    })
+                }
+            } else if let Some(from) = tex.from.as_deref() {
                 resources.get(from).cloned().unwrap_or_else(|| {
                     RgbaImage::from_pixel(w.max(1), h.max(1), Rgba([0, 0, 0, 0]))
                 })
@@ -2836,19 +4230,30 @@ impl SceneFrameRenderer {
         }
 
         for pass in &graph.passes {
-            let Some(input_id) = pass
+            let inputs = pass
                 .inputs
-                .first()
-                .map(|input| input.resource_id().to_string())
-            else {
+                .iter()
+                .filter_map(|input| resources.get(input.resource_id()).cloned())
+                .collect::<Vec<_>>();
+            if inputs.is_empty() {
                 continue;
-            };
-            let Some(input) = resources.get(&input_id).cloned() else {
-                continue;
-            };
-            let output = self.apply_scene_post_pass(&input, pass, time_norm, time_sec)?;
+            }
+            let output = self.apply_scene_post_pass_multi(&inputs, pass, time_norm, time_sec)?;
             for output_ref in &pass.outputs {
                 resources.insert(output_ref.resource_id().to_string(), output.clone());
+            }
+        }
+
+        // Layer Tex nodes can depend on Pass outputs declared later in the DSL.
+        // Re-resolve them after passes so <Tex from="layer" input="comp" /> uses
+        // the final upstream resource instead of a transparent placeholder.
+        for tex in graph.textures.iter().filter(|tex| tex.input.is_some()) {
+            if let (Some(layer_id), Some(input_id)) = (tex.from.as_deref(), tex.input.as_deref())
+                && let Some(layer) = graph.layers.iter().find(|layer| layer.id == layer_id)
+                && let Some(base) = resources.get(input_id).cloned()
+            {
+                let image = apply_layer_effects(&base, layer, time_norm, time_sec)?;
+                resources.insert(tex.id.clone(), image);
             }
         }
 
@@ -2887,28 +4292,42 @@ impl SceneFrameRenderer {
         time_norm: f32,
         time_sec: f32,
     ) -> Result<Option<RgbaImage>, MotionLoomSceneRenderError> {
-        if !self.profile.uses_gpu_compositor()
-            || !graph.textures.is_empty()
-            || !graph.passes.is_empty()
-            || !graph.outputs.is_empty()
-        {
+        if !self.profile.uses_gpu_compositor() {
             return Ok(None);
+        }
+        if !graph.textures.is_empty() || !graph.passes.is_empty() || !graph.outputs.is_empty() {
+            return Err(MotionLoomSceneRenderError::GpuRender {
+                message:
+                    "GPU preview is strict: Tex/Pass/Output composition is not GPU-native in scene preview yet."
+                        .to_string(),
+            });
         }
 
         let Some(nodes) = scene_nodes_for_present(graph) else {
             return Ok(None);
         };
         if scene_nodes_contain_image_or_svg(nodes) {
-            return Ok(None);
+            return Err(MotionLoomSceneRenderError::GpuRender {
+                message: "GPU preview is strict: Image/Svg scene nodes are not GPU-native yet."
+                    .to_string(),
+            });
         }
 
-        self.try_render_gpu_scene_nodes(
+        let background = graph
+            .backgrounds
+            .last()
+            .map(|background| parse_color(&background.color))
+            .transpose()?
+            .unwrap_or([0, 0, 0, 0]);
+
+        self.try_render_gpu_scene_nodes_with_background(
             nodes,
             graph_output_size(graph),
             graph_logical_render_size(graph),
             render_size_root_transform(graph_output_size(graph), graph_logical_render_size(graph)),
             time_norm,
             time_sec,
+            Some(background),
         )
     }
 
@@ -2921,7 +4340,43 @@ impl SceneFrameRenderer {
         time_norm: f32,
         time_sec: f32,
     ) -> Result<Option<RgbaImage>, MotionLoomSceneRenderError> {
+        self.try_render_gpu_scene_nodes_with_background(
+            nodes,
+            output_size,
+            logical_size,
+            root_transform,
+            time_norm,
+            time_sec,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_render_gpu_scene_nodes_with_background(
+        &mut self,
+        nodes: &[SceneNode],
+        output_size: (u32, u32),
+        logical_size: (u32, u32),
+        root_transform: Affine2,
+        time_norm: f32,
+        time_sec: f32,
+        background: Option<[u8; 4]>,
+    ) -> Result<Option<RgbaImage>, MotionLoomSceneRenderError> {
         if !self.profile.uses_gpu_compositor() {
+            return Ok(None);
+        }
+        if scene_nodes_require_cpu_scene_compositing(nodes) {
+            if let Some(image) = self.try_render_gpu_scene_nodes_composited(
+                nodes,
+                output_size,
+                logical_size,
+                root_transform,
+                time_norm,
+                time_sec,
+                background,
+            )? {
+                return Ok(Some(image));
+            }
             return Ok(None);
         }
         if scene_nodes_contain_image_or_svg(nodes) {
@@ -2931,16 +4386,21 @@ impl SceneFrameRenderer {
         }
 
         let mut primitives = Vec::<GpuScenePrimitive>::new();
+        if let Some(color) = background {
+            primitives.push(gpu_solid_primitive(color));
+        }
         let mut scene_overlays = Vec::<CpuSceneOverlay>::new();
         let mut text_requests = Vec::<GpuSceneTextRequest>::new();
         collect_gpu_scene_commands(
             nodes,
             root_transform,
+            None,
             1.0,
             time_norm,
             time_sec,
             logical_size,
             &self.gradient_defs,
+            &self.palette_defs,
             &mut primitives,
             &mut text_requests,
             &mut scene_overlays,
@@ -2997,6 +4457,559 @@ impl SceneFrameRenderer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn try_render_gpu_scene_nodes_composited(
+        &mut self,
+        nodes: &[SceneNode],
+        output_size: (u32, u32),
+        logical_size: (u32, u32),
+        root_transform: Affine2,
+        time_norm: f32,
+        time_sec: f32,
+        background: Option<[u8; 4]>,
+    ) -> Result<Option<RgbaImage>, MotionLoomSceneRenderError> {
+        // First native scope: keep this strict and predictable. Non-identity
+        // renderSize scaling is still handled by the older CPU-compatible path.
+        if output_size != logical_size || !affine_is_identity(root_transform) {
+            return Ok(None);
+        }
+        if scene_nodes_contain_image_or_svg(nodes) {
+            return Err(MotionLoomSceneRenderError::GpuRender {
+                message: "GPU Render is strict for MotionLoom: Image/Svg scene nodes are not GPU-native yet. Use Compatibility Render (CPU) explicitly, or remove Image/Svg from the scene.".to_string(),
+            });
+        }
+
+        self.ensure_gpu_compositor_size(output_size.0.max(1), output_size.1.max(1))?;
+        let mut assets = GpuSceneNativeAssets::default();
+        let mut primitives = Vec::<GpuScenePrimitive>::new();
+        if let Some(color) = background {
+            primitives.push(gpu_solid_primitive(color));
+        }
+        let mut texture_layers = Vec::<GpuSceneTextureLayer>::new();
+        let mut text_requests = Vec::<GpuSceneTextRequest>::new();
+        let mut unsupported = false;
+        self.collect_gpu_scene_native_commands(
+            nodes,
+            Affine2::identity(),
+            None,
+            1.0,
+            time_norm,
+            time_sec,
+            output_size,
+            &mut assets,
+            &mut primitives,
+            &mut texture_layers,
+            &mut text_requests,
+            &mut unsupported,
+        )?;
+        if unsupported {
+            return Ok(None);
+        }
+
+        for request in text_requests {
+            if let Some(layer) = self.rasterize_text_texture_layer(
+                &request.node,
+                request.transform,
+                request.opacity,
+                time_norm,
+                time_sec,
+                output_size,
+            )? {
+                texture_layers.push(layer);
+            }
+        }
+
+        let compositor =
+            self.gpu_compositor
+                .as_mut()
+                .ok_or_else(|| MotionLoomSceneRenderError::GpuRender {
+                    message: "GPU compositor was not initialized".to_string(),
+                })?;
+        let texture = compositor.render_scene_content_to_texture(
+            &primitives,
+            &texture_layers,
+            [0, 0, 0, 0],
+        )?;
+        compositor.readback_texture_rgba(&texture.texture).map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_gpu_scene_texture_from_nodes(
+        &mut self,
+        nodes: &[SceneNode],
+        transform: Affine2,
+        inherited_opacity: f32,
+        time_norm: f32,
+        time_sec: f32,
+        canvas_size: (u32, u32),
+        assets: &mut GpuSceneNativeAssets,
+    ) -> Result<Option<GpuSceneNativeTexture>, MotionLoomSceneRenderError> {
+        let mut primitives = Vec::<GpuScenePrimitive>::new();
+        let mut texture_layers = Vec::<GpuSceneTextureLayer>::new();
+        let mut text_requests = Vec::<GpuSceneTextRequest>::new();
+        let mut unsupported = false;
+        self.collect_gpu_scene_native_commands(
+            nodes,
+            transform,
+            None,
+            inherited_opacity,
+            time_norm,
+            time_sec,
+            canvas_size,
+            assets,
+            &mut primitives,
+            &mut texture_layers,
+            &mut text_requests,
+            &mut unsupported,
+        )?;
+        if unsupported {
+            return Ok(None);
+        }
+        for request in text_requests {
+            if let Some(layer) = self.rasterize_text_texture_layer(
+                &request.node,
+                request.transform,
+                request.opacity,
+                time_norm,
+                time_sec,
+                canvas_size,
+            )? {
+                texture_layers.push(layer);
+            }
+        }
+        let compositor =
+            self.gpu_compositor
+                .as_mut()
+                .ok_or_else(|| MotionLoomSceneRenderError::GpuRender {
+                    message: "GPU compositor was not initialized".to_string(),
+                })?;
+        compositor
+            .render_scene_content_to_texture(&primitives, &texture_layers, [0, 0, 0, 0])
+            .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_gpu_scene_native_commands(
+        &mut self,
+        nodes: &[SceneNode],
+        transform: Affine2,
+        deform: Option<&EvaluatedDeformGrid>,
+        inherited_opacity: f32,
+        time_norm: f32,
+        time_sec: f32,
+        canvas_size: (u32, u32),
+        assets: &mut GpuSceneNativeAssets,
+        primitives: &mut Vec<GpuScenePrimitive>,
+        texture_layers: &mut Vec<GpuSceneTextureLayer>,
+        text_requests: &mut Vec<GpuSceneTextRequest>,
+        unsupported: &mut bool,
+    ) -> Result<(), MotionLoomSceneRenderError> {
+        for node in nodes {
+            match node {
+                SceneNode::Defs(_) | SceneNode::Palette(_) | SceneNode::Shadow(_) => {}
+                SceneNode::Mask(mask) => {
+                    if let Some(id) = mask.id.as_deref() {
+                        let Some(texture) = self.render_gpu_mask_texture(
+                            mask,
+                            transform,
+                            time_norm,
+                            time_sec,
+                            canvas_size,
+                        )?
+                        else {
+                            *unsupported = true;
+                            continue;
+                        };
+                        assets.masks.insert(id.to_string(), texture.clone());
+                    }
+                    if !mask.children.is_empty() {
+                        let Some(source) = self.render_gpu_scene_texture_from_nodes(
+                            &mask.children,
+                            transform,
+                            inherited_opacity,
+                            time_norm,
+                            time_sec,
+                            canvas_size,
+                            assets,
+                        )?
+                        else {
+                            *unsupported = true;
+                            continue;
+                        };
+                        let Some(matte) = self.render_gpu_mask_texture(
+                            mask,
+                            transform,
+                            time_norm,
+                            time_sec,
+                            canvas_size,
+                        )?
+                        else {
+                            *unsupported = true;
+                            continue;
+                        };
+                        texture_layers.push(GpuSceneTextureLayer {
+                            source: GpuSceneTextureSource::Gpu(source),
+                            transform: Affine2::identity(),
+                            opacity: 1.0,
+                            blend: SceneBlendMode::Normal,
+                            matte: Some(GpuSceneTextureMatte {
+                                texture: matte,
+                                mode: GpuSceneMatteMode::Alpha,
+                                invert: false,
+                            }),
+                        });
+                    }
+                }
+                SceneNode::Precompose(precompose) => {
+                    let size = precompose.size.unwrap_or(canvas_size);
+                    if size != canvas_size {
+                        *unsupported = true;
+                        continue;
+                    }
+                    let Some(texture) = self.render_gpu_scene_texture_from_nodes(
+                        &precompose.children,
+                        Affine2::identity(),
+                        1.0,
+                        time_norm,
+                        time_sec,
+                        canvas_size,
+                        assets,
+                    )?
+                    else {
+                        *unsupported = true;
+                        continue;
+                    };
+                    assets.precomposes.insert(precompose.id.clone(), texture);
+                }
+                SceneNode::Layer(layer) => {
+                    let opacity = (eval_scene_number(&layer.opacity, time_norm, time_sec)?
+                        * inherited_opacity)
+                        .clamp(0.0, 1.0);
+                    if opacity <= 0.0001 {
+                        continue;
+                    }
+                    let Some(source) = assets.precomposes.get(&layer.source).cloned() else {
+                        continue;
+                    };
+                    let matte = if let Some(matte_id) = layer.matte.as_deref() {
+                        if let Some(mask) = assets.masks.get(matte_id).cloned() {
+                            Some(GpuSceneTextureMatte {
+                                texture: mask,
+                                mode: GpuSceneMatteMode::Alpha,
+                                invert: scene_bool(&layer.invert_matte),
+                            })
+                        } else {
+                            assets.precomposes.get(matte_id).cloned().map(|texture| {
+                                GpuSceneTextureMatte {
+                                    texture,
+                                    mode: gpu_matte_mode(&layer.matte_mode),
+                                    invert: scene_bool(&layer.invert_matte),
+                                }
+                            })
+                        }
+                    } else {
+                        None
+                    };
+                    texture_layers.push(GpuSceneTextureLayer {
+                        source: GpuSceneTextureSource::Gpu(source),
+                        transform: transform
+                            .mul(scene_layer_local_transform(layer, time_norm, time_sec)?),
+                        opacity,
+                        blend: parse_scene_blend(&layer.blend)?,
+                        matte,
+                    });
+                }
+                SceneNode::Group(group) => {
+                    let opacity = (eval_scene_number(&group.opacity, time_norm, time_sec)?
+                        * inherited_opacity)
+                        .clamp(0.0, 1.0);
+                    if opacity <= 0.0001 {
+                        continue;
+                    }
+                    let group_local = scene_group_local_transform(group, time_norm, time_sec)?;
+                    let group_transform = transform.mul(group_local);
+                    let group_deform = eval_group_deform_grid(group, time_norm, time_sec)?;
+                    if let Some(mask_id) = group.mask.as_deref() {
+                        if !affine_is_identity(group_local) || group_deform.is_some() {
+                            *unsupported = true;
+                            continue;
+                        }
+                        let Some(matte) = assets.masks.get(mask_id).cloned() else {
+                            *unsupported = true;
+                            continue;
+                        };
+                        let Some(source) = self.render_gpu_scene_texture_from_nodes(
+                            &group.children,
+                            group_transform,
+                            opacity,
+                            time_norm,
+                            time_sec,
+                            canvas_size,
+                            assets,
+                        )?
+                        else {
+                            *unsupported = true;
+                            continue;
+                        };
+                        texture_layers.push(GpuSceneTextureLayer {
+                            source: GpuSceneTextureSource::Gpu(source),
+                            transform: Affine2::identity(),
+                            opacity: 1.0,
+                            blend: SceneBlendMode::Normal,
+                            matte: Some(GpuSceneTextureMatte {
+                                texture: matte,
+                                mode: GpuSceneMatteMode::Alpha,
+                                invert: scene_mask_mode_inverts(&group.mask_mode),
+                            }),
+                        });
+                    } else {
+                        let group_deform = group_deform
+                            .as_ref()
+                            .map(|grid| transform_deform_grid(grid, group_transform));
+                        let child_deform = group_deform.as_ref().or(deform);
+                        self.collect_gpu_scene_native_commands(
+                            &group.children,
+                            group_transform,
+                            child_deform,
+                            opacity,
+                            time_norm,
+                            time_sec,
+                            canvas_size,
+                            assets,
+                            primitives,
+                            texture_layers,
+                            text_requests,
+                            unsupported,
+                        )?;
+                    }
+                }
+                SceneNode::Part(part) => {
+                    let opacity = (eval_scene_number(&part.opacity, time_norm, time_sec)?
+                        * inherited_opacity)
+                        .clamp(0.0, 1.0);
+                    if opacity <= 0.0001 {
+                        continue;
+                    }
+                    let x = eval_scene_number(&part.x, time_norm, time_sec)?;
+                    let y = eval_scene_number(&part.y, time_norm, time_sec)?;
+                    let rotation = eval_scene_number(&part.rotation, time_norm, time_sec)?;
+                    let scale =
+                        eval_scene_number(&part.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+                    let anchor_x = eval_scene_number(&part.anchor_x, time_norm, time_sec)?;
+                    let anchor_y = eval_scene_number(&part.anchor_y, time_norm, time_sec)?;
+                    let part_transform = transform
+                        .mul(Affine2::translate(x, y))
+                        .mul(Affine2::rotate_deg(rotation))
+                        .mul(Affine2::scale(scale))
+                        .mul(Affine2::translate(-anchor_x, -anchor_y));
+                    self.collect_gpu_scene_native_commands(
+                        &part.children,
+                        part_transform,
+                        deform,
+                        opacity,
+                        time_norm,
+                        time_sec,
+                        canvas_size,
+                        assets,
+                        primitives,
+                        texture_layers,
+                        text_requests,
+                        unsupported,
+                    )?;
+                }
+                SceneNode::Repeat(repeat) => {
+                    let count = eval_repeat_count(&repeat.count, time_norm, time_sec)?;
+                    let x = eval_scene_number(&repeat.x, time_norm, time_sec)?;
+                    let y = eval_scene_number(&repeat.y, time_norm, time_sec)?;
+                    let rotation = eval_scene_number(&repeat.rotation, time_norm, time_sec)?;
+                    let scale =
+                        eval_scene_number(&repeat.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+                    let opacity = eval_scene_number(&repeat.opacity, time_norm, time_sec)?;
+                    let x_step = eval_scene_number(&repeat.x_step, time_norm, time_sec)?;
+                    let y_step = eval_scene_number(&repeat.y_step, time_norm, time_sec)?;
+                    let rotation_step =
+                        eval_scene_number(&repeat.rotation_step, time_norm, time_sec)?;
+                    let scale_step = eval_scene_number(&repeat.scale_step, time_norm, time_sec)?;
+                    let opacity_step =
+                        eval_scene_number(&repeat.opacity_step, time_norm, time_sec)?;
+                    for index in 0..count {
+                        let i = index as f32;
+                        let copy_opacity =
+                            ((opacity + opacity_step * i) * inherited_opacity).clamp(0.0, 1.0);
+                        if copy_opacity <= 0.0001 {
+                            continue;
+                        }
+                        let repeat_transform = transform
+                            .mul(Affine2::translate(x + x_step * i, y + y_step * i))
+                            .mul(Affine2::rotate_deg(rotation + rotation_step * i))
+                            .mul(Affine2::scale((scale + scale_step * i).clamp(0.001, 64.0)));
+                        self.collect_gpu_scene_native_commands(
+                            &repeat.children,
+                            repeat_transform,
+                            deform,
+                            copy_opacity,
+                            time_norm,
+                            time_sec,
+                            canvas_size,
+                            assets,
+                            primitives,
+                            texture_layers,
+                            text_requests,
+                            unsupported,
+                        )?;
+                    }
+                }
+                _ => {
+                    let mut overlays = Vec::<CpuSceneOverlay>::new();
+                    collect_gpu_scene_commands(
+                        std::slice::from_ref(node),
+                        transform,
+                        deform,
+                        inherited_opacity,
+                        time_norm,
+                        time_sec,
+                        canvas_size,
+                        &self.gradient_defs,
+                        &self.palette_defs,
+                        primitives,
+                        text_requests,
+                        &mut overlays,
+                    )?;
+                    if !overlays.is_empty() {
+                        *unsupported = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn render_gpu_mask_texture(
+        &mut self,
+        mask: &MaskNode,
+        transform: Affine2,
+        time_norm: f32,
+        time_sec: f32,
+        canvas_size: (u32, u32),
+    ) -> Result<Option<GpuSceneNativeTexture>, MotionLoomSceneRenderError> {
+        let opacity = eval_scene_number(&mask.opacity, time_norm, time_sec)?.clamp(0.0, 1.0);
+        let mut primitives = Vec::<GpuScenePrimitive>::new();
+        if opacity > 0.0001 {
+            let color = [255, 255, 255, 255];
+            match mask.shape.trim().to_ascii_lowercase().as_str() {
+                "circle" => {
+                    let x = eval_scene_number(&mask.x, time_norm, time_sec)?;
+                    let y = eval_scene_number(&mask.y, time_norm, time_sec)?;
+                    let radius = eval_scene_number(&mask.radius, time_norm, time_sec)?.max(0.0);
+                    primitives.push(GpuScenePrimitive {
+                        kind: GPU_SHAPE_CIRCLE_FILL,
+                        transform,
+                        shape: [x, y, radius, 0.0],
+                        radius: 0.0,
+                        stroke_width: 0.0,
+                        blur: 0.0,
+                        color,
+                        opacity,
+                        blend: SceneBlendMode::Normal,
+                        gradient: None,
+                        line_t0: 0.0,
+                        line_t1: 1.0,
+                        taper_start: 0.0,
+                        taper_end: 0.0,
+                    });
+                }
+                "path" => {
+                    let Some(d) = mask.d.as_deref() else {
+                        return Ok(None);
+                    };
+                    let path = PathNode {
+                        id: mask.id.clone(),
+                        d: d.to_string(),
+                        fill: Some("#ffffff".to_string()),
+                        stroke: "none".to_string(),
+                        stroke_width: "0".to_string(),
+                        line_cap: "round".to_string(),
+                        line_join: "round".to_string(),
+                        trim_start: "0".to_string(),
+                        trim_end: "1".to_string(),
+                        taper_start: "0".to_string(),
+                        taper_end: "0".to_string(),
+                        stroke_style: "clean".to_string(),
+                        stroke_roughness: "0".to_string(),
+                        stroke_copies: "1".to_string(),
+                        stroke_texture: "0".to_string(),
+                        stroke_bristles: "1".to_string(),
+                        stroke_pressure: "1".to_string(),
+                        stroke_pressure_min: "1".to_string(),
+                        stroke_pressure_curve: "1".to_string(),
+                        opacity: mask.opacity.clone(),
+                        blend: "normal".to_string(),
+                        brush: None,
+                        x: "0".to_string(),
+                        y: "0".to_string(),
+                        rotation: "0".to_string(),
+                        scale: "1".to_string(),
+                        scale_x: "1".to_string(),
+                        scale_y: "1".to_string(),
+                        skew_x: "0".to_string(),
+                        skew_y: "0".to_string(),
+                        transform_origin_x: "0".to_string(),
+                        transform_origin_y: "0".to_string(),
+                    };
+                    push_gpu_path_commands(
+                        &path,
+                        transform,
+                        None,
+                        1.0,
+                        time_norm,
+                        time_sec,
+                        &self.gradient_defs,
+                        &mut primitives,
+                    )?;
+                }
+                _ => {
+                    let x = eval_scene_number(&mask.x, time_norm, time_sec)?;
+                    let y = eval_scene_number(&mask.y, time_norm, time_sec)?;
+                    let width = eval_scene_number(&mask.width, time_norm, time_sec)?.max(0.0);
+                    let height = eval_scene_number(&mask.height, time_norm, time_sec)?.max(0.0);
+                    let radius = eval_scene_number(&mask.radius, time_norm, time_sec)?.max(0.0);
+                    primitives.push(GpuScenePrimitive {
+                        kind: GPU_SHAPE_RECT_FILL,
+                        transform,
+                        shape: [x, y, width, height],
+                        radius,
+                        stroke_width: 0.0,
+                        blur: 0.0,
+                        color,
+                        opacity,
+                        blend: SceneBlendMode::Normal,
+                        gradient: None,
+                        line_t0: 0.0,
+                        line_t1: 1.0,
+                        taper_start: 0.0,
+                        taper_end: 0.0,
+                    });
+                }
+            }
+        }
+
+        self.ensure_gpu_compositor_size(canvas_size.0.max(1), canvas_size.1.max(1))?;
+        let compositor =
+            self.gpu_compositor
+                .as_mut()
+                .ok_or_else(|| MotionLoomSceneRenderError::GpuRender {
+                    message: "GPU compositor was not initialized".to_string(),
+                })?;
+        let mut texture =
+            compositor.render_scene_content_to_texture(&primitives, &[], [0, 0, 0, 0])?;
+        let feather = eval_scene_number(&mask.feather, time_norm, time_sec)?.max(0.0);
+        if feather > 0.01 {
+            texture = compositor
+                .apply_gpu_blur_texture(&texture, &[(true, feather), (false, feather)])?;
+        }
+        Ok(Some(texture))
+    }
+
     fn render_cpu_scene_nodes_scaled(
         &mut self,
         nodes: &[SceneNode],
@@ -3012,6 +5025,45 @@ impl SceneFrameRenderer {
         );
         self.draw_scene_nodes(&mut logical_canvas, nodes, time_norm, time_sec, 1.0)?;
         Ok(fit_logical_canvas_to_output(&logical_canvas, output_size))
+    }
+
+    fn apply_scene_post_pass_multi(
+        &mut self,
+        inputs: &[RgbaImage],
+        pass: &PassNode,
+        time_norm: f32,
+        time_sec: f32,
+    ) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+        let effect = pass.effect.to_ascii_lowercase();
+        if effect == "over" || effect == "composite.over" {
+            return Ok(apply_over_pass(inputs));
+        }
+        if effect == "hsla" || effect == "hsla_overlay" || effect == "color.hsla" {
+            return apply_hsla_pass(&inputs[0], pass, time_norm, time_sec);
+        }
+        if effect == "blur" || effect == "gaussian_blur" {
+            let sigma = pass_param_expr(pass, "sigma")
+                .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+                .transpose()?
+                .unwrap_or(2.0)
+                .clamp(0.0, 64.0);
+            if self.profile.uses_gpu_compositor() {
+                self.ensure_gpu_compositor_size(
+                    inputs[0].width().max(1),
+                    inputs[0].height().max(1),
+                )?;
+                let compositor = self.gpu_compositor.as_mut().ok_or_else(|| {
+                    MotionLoomSceneRenderError::GpuRender {
+                        message: "GPU compositor was not initialized".to_string(),
+                    }
+                })?;
+                return compositor
+                    .apply_gpu_blur_passes(&inputs[0], &[(true, sigma), (false, sigma)]);
+            }
+            let blurred = apply_box_blur_pass(&inputs[0], sigma, true);
+            return Ok(apply_box_blur_pass(&blurred, sigma, false));
+        }
+        self.apply_scene_post_pass(&inputs[0], pass, time_norm, time_sec)
     }
 
     fn apply_scene_post_pass(
@@ -3057,14 +5109,18 @@ impl SceneFrameRenderer {
                 SceneNode::Defs(_) => {
                     pending_shadow = None;
                 }
-                SceneNode::Solid(solid) => {
-                    let mut color = parse_color(&solid.color)?;
-                    color[3] = ((color[3] as f32) * inherited_opacity)
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
-                    for pixel in canvas.pixels_mut() {
-                        *pixel = Rgba(color);
-                    }
+                SceneNode::Palette(_) => {
+                    pending_shadow = None;
+                }
+                SceneNode::PixelGrid(grid) => {
+                    self.draw_pixel_grid(
+                        canvas,
+                        grid,
+                        Affine2::identity(),
+                        inherited_opacity,
+                        time_norm,
+                        time_sec,
+                    )?;
                     pending_shadow = None;
                 }
                 SceneNode::Text(text) => {
@@ -3161,7 +5217,20 @@ impl SceneFrameRenderer {
                     pending_shadow = None;
                 }
                 SceneNode::Mask(mask) => {
-                    self.draw_mask(canvas, mask, time_norm, time_sec, inherited_opacity)?;
+                    if let Some(id) = mask.id.as_deref() {
+                        self.scene_masks.insert(id.to_string(), mask.clone());
+                    }
+                    if !mask.children.is_empty() {
+                        self.draw_mask(canvas, mask, time_norm, time_sec, inherited_opacity)?;
+                    }
+                    pending_shadow = None;
+                }
+                SceneNode::Precompose(precompose) => {
+                    self.render_precompose(precompose, canvas.dimensions(), time_norm, time_sec)?;
+                    pending_shadow = None;
+                }
+                SceneNode::Layer(layer) => {
+                    self.draw_scene_layer(canvas, layer, time_norm, time_sec, inherited_opacity)?;
                     pending_shadow = None;
                 }
                 SceneNode::Camera(camera) => {
@@ -3193,8 +5262,8 @@ impl SceneFrameRenderer {
         let (w, h) = graph.size;
         let mut canvas = RgbaImage::from_pixel(w.max(1), h.max(1), Rgba([0, 0, 0, 0]));
 
-        for solid in &graph.solids {
-            let color = parse_color(&solid.color)?;
+        for background in &graph.backgrounds {
+            let color = parse_color(&background.color)?;
             for pixel in canvas.pixels_mut() {
                 *pixel = Rgba(color);
             }
@@ -3228,13 +5297,28 @@ impl SceneFrameRenderer {
                 .ok_or_else(|| MotionLoomSceneRenderError::GpuRender {
                     message: "GPU compositor was not initialized".to_string(),
                 })?;
-        let solid = graph
-            .solids
+        let background = graph
+            .backgrounds
             .last()
-            .map(|solid| parse_color(&solid.color))
+            .map(|background| parse_color(&background.color))
             .transpose()?
             .unwrap_or([0, 0, 0, 0]);
-        compositor.render(graph, solid, time_norm, time_sec)
+        compositor.render(graph, background, time_norm, time_sec)
+    }
+
+    fn render_gpu_background_frame(
+        &mut self,
+        output_size: (u32, u32),
+        color: [u8; 4],
+    ) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+        self.ensure_gpu_compositor_size(output_size.0.max(1), output_size.1.max(1))?;
+        let compositor =
+            self.gpu_compositor
+                .as_mut()
+                .ok_or_else(|| MotionLoomSceneRenderError::GpuRender {
+                    message: "GPU compositor was not initialized".to_string(),
+                })?;
+        compositor.render_scene_content(&[gpu_solid_primitive(color)], &[])
     }
 
     fn draw_text(
@@ -3384,15 +5468,151 @@ impl SceneFrameRenderer {
         if opacity <= 0.0001 {
             return Ok(());
         }
-        let x = eval_scene_number(&group.x, time_norm, time_sec)?;
-        let y = eval_scene_number(&group.y, time_norm, time_sec)?;
-        let rotation = eval_scene_number(&group.rotation, time_norm, time_sec)?;
-        let scale = eval_scene_number(&group.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+        let transform = scene_group_local_transform(group, time_norm, time_sec)?;
 
         let mut layer = RgbaImage::from_pixel(canvas.width(), canvas.height(), Rgba([0, 0, 0, 0]));
         self.draw_scene_nodes(&mut layer, &group.children, time_norm, time_sec, opacity)?;
-        composite_transformed_layer(canvas, &layer, x, y, rotation, scale);
+        if let Some(mask_id) = group.mask.as_deref()
+            && let Some(mask_alpha) = self.scene_mask_alpha(
+                mask_id,
+                canvas.width(),
+                canvas.height(),
+                time_norm,
+                time_sec,
+            )?
+        {
+            let invert = group.mask_mode.trim().eq_ignore_ascii_case("inverse")
+                || group.mask_mode.trim().eq_ignore_ascii_case("invert")
+                || group.mask_mode.trim().eq_ignore_ascii_case("inverted");
+            apply_alpha_mask_with_invert(&mut layer, &mask_alpha, invert);
+        }
+        if let Some(deform_grid) = eval_group_deform_grid(group, time_norm, time_sec)? {
+            layer = apply_deform_grid(&layer, &deform_grid);
+        }
+        composite_layer_affine(canvas, &layer, transform);
         Ok(())
+    }
+
+    fn render_precompose(
+        &mut self,
+        precompose: &PrecomposeNode,
+        fallback_size: (u32, u32),
+        time_norm: f32,
+        time_sec: f32,
+    ) -> Result<(), MotionLoomSceneRenderError> {
+        let size = precompose.size.unwrap_or(fallback_size);
+        let mut layer = RgbaImage::from_pixel(size.0.max(1), size.1.max(1), Rgba([0, 0, 0, 0]));
+        self.draw_scene_nodes(&mut layer, &precompose.children, time_norm, time_sec, 1.0)?;
+        self.scene_precomposes.insert(precompose.id.clone(), layer);
+        Ok(())
+    }
+
+    fn draw_scene_layer(
+        &mut self,
+        canvas: &mut RgbaImage,
+        layer: &SceneLayerNode,
+        time_norm: f32,
+        time_sec: f32,
+        inherited_opacity: f32,
+    ) -> Result<(), MotionLoomSceneRenderError> {
+        let opacity = (eval_scene_number(&layer.opacity, time_norm, time_sec)? * inherited_opacity)
+            .clamp(0.0, 1.0);
+        if opacity <= 0.0001 {
+            return Ok(());
+        }
+        let Some(source) = self.scene_precomposes.get(&layer.source).cloned() else {
+            return Ok(());
+        };
+        let mut source = source;
+        if let Some(matte_id) = layer.matte.as_deref()
+            && let Some(matte_alpha) = self.scene_matte_alpha(
+                matte_id,
+                source.width(),
+                source.height(),
+                &layer.matte_mode,
+                time_norm,
+                time_sec,
+            )?
+        {
+            apply_alpha_mask_with_invert(
+                &mut source,
+                &matte_alpha,
+                scene_bool(&layer.invert_matte),
+            );
+        }
+
+        let transform = scene_layer_local_transform(layer, time_norm, time_sec)?;
+        let blend = parse_scene_blend(&layer.blend)?;
+        composite_layer_affine_blend(canvas, &source, transform, opacity, blend);
+        Ok(())
+    }
+
+    fn scene_mask_alpha(
+        &mut self,
+        id: &str,
+        width: u32,
+        height: u32,
+        time_norm: f32,
+        time_sec: f32,
+    ) -> Result<Option<RgbaImage>, MotionLoomSceneRenderError> {
+        let Some(mask) = self.scene_masks.get(id).cloned() else {
+            return Ok(None);
+        };
+        self.render_mask_alpha(
+            width,
+            height,
+            &mask,
+            Affine2::identity(),
+            time_norm,
+            time_sec,
+        )
+        .map(Some)
+    }
+
+    fn scene_matte_alpha(
+        &mut self,
+        id: &str,
+        width: u32,
+        height: u32,
+        mode: &str,
+        time_norm: f32,
+        time_sec: f32,
+    ) -> Result<Option<RgbaImage>, MotionLoomSceneRenderError> {
+        let normalized = mode.trim().to_ascii_lowercase().replace('_', "-");
+        if let Some(mask) = self.scene_mask_alpha(id, width, height, time_norm, time_sec)? {
+            return Ok(Some(mask));
+        }
+        let Some(matte) = self.scene_precomposes.get(id) else {
+            return Ok(None);
+        };
+        let mut alpha =
+            RgbaImage::from_pixel(width.max(1), height.max(1), Rgba([255, 255, 255, 0]));
+        let w = alpha.width().min(matte.width());
+        let h = alpha.height().min(matte.height());
+        for y in 0..h {
+            for x in 0..w {
+                let px = matte.get_pixel(x, y).0;
+                let src_alpha = px[3] as f32 / 255.0;
+                let amount = if normalized == "luma" || normalized == "luminance" {
+                    ((0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32)
+                        / 255.0)
+                        * src_alpha
+                } else {
+                    src_alpha
+                };
+                alpha.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        255,
+                        255,
+                        255,
+                        (amount * 255.0).round().clamp(0.0, 255.0) as u8,
+                    ]),
+                );
+            }
+        }
+        Ok(Some(alpha))
     }
 
     fn draw_part(
@@ -3412,10 +5632,14 @@ impl SceneFrameRenderer {
         let y = eval_scene_number(&part.y, time_norm, time_sec)?;
         let rotation = eval_scene_number(&part.rotation, time_norm, time_sec)?;
         let scale = eval_scene_number(&part.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+        let anchor_x = eval_scene_number(&part.anchor_x, time_norm, time_sec)?;
+        let anchor_y = eval_scene_number(&part.anchor_y, time_norm, time_sec)?;
 
         let mut layer = RgbaImage::from_pixel(canvas.width(), canvas.height(), Rgba([0, 0, 0, 0]));
         self.draw_scene_nodes(&mut layer, &part.children, time_norm, time_sec, opacity)?;
-        composite_transformed_layer(canvas, &layer, x, y, rotation, scale);
+        composite_transformed_layer_anchored(
+            canvas, &layer, x, y, rotation, scale, anchor_x, anchor_y,
+        );
         Ok(())
     }
 
@@ -3592,7 +5816,8 @@ impl SceneFrameRenderer {
                 let Some(d) = mask.d.as_deref() else {
                     return Ok(alpha);
                 };
-                let subpaths = self.cached_path_subpaths(d)?;
+                let path_d = eval_path_d(d, time_norm, time_sec)?;
+                let subpaths = self.cached_path_subpaths(path_d.as_ref())?;
                 draw_transformed_filled_polylines(&mut alpha, &subpaths, mask_color, transform);
             }
             _ => {
@@ -3605,6 +5830,11 @@ impl SceneFrameRenderer {
                 let (x, y) = transform.transform_point(x, y);
                 draw_rounded_rect(&mut alpha, x, y, w, h, radius, mask_color);
             }
+        }
+        let feather = eval_scene_number(&mask.feather, time_norm, time_sec)?.max(0.0);
+        if feather > 0.01 {
+            let blurred = apply_box_blur_pass(&alpha, feather, true);
+            alpha = apply_box_blur_pass(&blurred, feather, false);
         }
         Ok(alpha)
     }
@@ -3624,14 +5854,9 @@ impl SceneFrameRenderer {
         if opacity <= 0.0001 {
             return Ok(());
         }
-        let x = eval_scene_number(&character.x, time_norm, time_sec)?;
-        let y = eval_scene_number(&character.y, time_norm, time_sec)?;
-        let rotation = eval_scene_number(&character.rotation, time_norm, time_sec)?;
-        let scale = eval_scene_number(&character.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
-        let character_transform = transform
-            .mul(Affine2::translate(x, y))
-            .mul(Affine2::rotate_deg(rotation))
-            .mul(Affine2::scale(scale));
+        let character_transform = transform.mul(scene_character_local_transform(
+            character, time_norm, time_sec,
+        )?);
         self.draw_character_nodes_vector(
             canvas,
             &character.children,
@@ -3654,6 +5879,17 @@ impl SceneFrameRenderer {
         for node in nodes {
             match node {
                 SceneNode::Defs(_) => {}
+                SceneNode::Palette(_) => {}
+                SceneNode::PixelGrid(grid) => {
+                    self.draw_pixel_grid(
+                        canvas,
+                        grid,
+                        transform,
+                        inherited_opacity,
+                        time_norm,
+                        time_sec,
+                    )?;
+                }
                 SceneNode::Group(group) => {
                     let opacity = (eval_scene_number(&group.opacity, time_norm, time_sec)?
                         * inherited_opacity)
@@ -3661,15 +5897,8 @@ impl SceneFrameRenderer {
                     if opacity <= 0.0001 {
                         continue;
                     }
-                    let x = eval_scene_number(&group.x, time_norm, time_sec)?;
-                    let y = eval_scene_number(&group.y, time_norm, time_sec)?;
-                    let rotation = eval_scene_number(&group.rotation, time_norm, time_sec)?;
-                    let scale =
-                        eval_scene_number(&group.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
-                    let group_transform = transform
-                        .mul(Affine2::translate(x, y))
-                        .mul(Affine2::rotate_deg(rotation))
-                        .mul(Affine2::scale(scale));
+                    let group_transform =
+                        transform.mul(scene_group_local_transform(group, time_norm, time_sec)?);
                     self.draw_character_nodes_vector(
                         canvas,
                         &group.children,
@@ -3691,10 +5920,13 @@ impl SceneFrameRenderer {
                     let rotation = eval_scene_number(&part.rotation, time_norm, time_sec)?;
                     let scale =
                         eval_scene_number(&part.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+                    let anchor_x = eval_scene_number(&part.anchor_x, time_norm, time_sec)?;
+                    let anchor_y = eval_scene_number(&part.anchor_y, time_norm, time_sec)?;
                     let part_transform = transform
                         .mul(Affine2::translate(x, y))
                         .mul(Affine2::rotate_deg(rotation))
-                        .mul(Affine2::scale(scale));
+                        .mul(Affine2::scale(scale))
+                        .mul(Affine2::translate(-anchor_x, -anchor_y));
                     self.draw_character_nodes_vector(
                         canvas,
                         &part.children,
@@ -3793,6 +6025,8 @@ impl SceneFrameRenderer {
                     )?;
                 }
                 SceneNode::Line(line) => {
+                    let node_transform =
+                        transform.mul(scene_line_local_transform(line, time_norm, time_sec)?);
                     let opacity = (eval_scene_number(&line.opacity, time_norm, time_sec)?
                         * inherited_opacity)
                         .clamp(0.0, 1.0);
@@ -3801,7 +6035,7 @@ impl SceneFrameRenderer {
                     }
                     let style = eval_line_stroke_style(line, time_norm, time_sec)?;
                     let width = eval_scene_number(&line.width, time_norm, time_sec)?.max(0.0)
-                        * affine_uniform_scale(transform);
+                        * affine_uniform_scale(node_transform);
                     if width <= 0.0001 {
                         continue;
                     }
@@ -3811,8 +6045,8 @@ impl SceneFrameRenderer {
                     let y2 = eval_scene_number(&line.y2, time_norm, time_sec)?;
                     let mut color = parse_color(&line.color)?;
                     color[3] = ((color[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
-                    let (x1, y1) = transform.transform_point(x1, y1);
-                    let (x2, y2) = transform.transform_point(x2, y2);
+                    let (x1, y1) = node_transform.transform_point(x1, y1);
+                    let (x2, y2) = node_transform.transform_point(x2, y2);
                     draw_line_segment_styled(
                         canvas,
                         Point2::new(x1, y1),
@@ -3825,6 +6059,9 @@ impl SceneFrameRenderer {
                     );
                 }
                 SceneNode::Polyline(polyline) => {
+                    let node_transform = transform.mul(scene_polyline_local_transform(
+                        polyline, time_norm, time_sec,
+                    )?);
                     let opacity = (eval_scene_number(&polyline.opacity, time_norm, time_sec)?
                         * inherited_opacity)
                         .clamp(0.0, 1.0);
@@ -3834,7 +6071,7 @@ impl SceneFrameRenderer {
                     let style = eval_polyline_stroke_style(polyline, time_norm, time_sec)?;
                     let width = eval_scene_number(&polyline.stroke_width, time_norm, time_sec)?
                         .max(0.0)
-                        * affine_uniform_scale(transform);
+                        * affine_uniform_scale(node_transform);
                     if width <= 0.0001 {
                         continue;
                     }
@@ -3853,29 +6090,37 @@ impl SceneFrameRenderer {
                             width,
                             color,
                             trim,
-                            transform,
+                            node_transform,
                             style,
                         );
                     }
                 }
                 SceneNode::Path(path) => {
+                    let node_transform =
+                        transform.mul(scene_path_local_transform(path, time_norm, time_sec)?);
                     let opacity = (eval_scene_number(&path.opacity, time_norm, time_sec)?
                         * inherited_opacity)
                         .clamp(0.0, 1.0);
                     if opacity <= 0.0001 {
                         continue;
                     }
-                    let subpaths = self.cached_path_subpaths(&path.d)?;
+                    let path_d = eval_path_d(&path.d, time_norm, time_sec)?;
+                    let subpaths = self.cached_path_subpaths(path_d.as_ref())?;
                     if let Some(fill) = path.fill.as_deref() {
                         let paint = self.resolve_paint(fill)?;
                         let blend = parse_scene_blend(&path.blend)?;
                         draw_transformed_filled_polylines_paint(
-                            canvas, &subpaths, &paint, opacity, blend, transform,
+                            canvas,
+                            &subpaths,
+                            &paint,
+                            opacity,
+                            blend,
+                            node_transform,
                         );
                     }
                     let width = eval_scene_number(&path.stroke_width, time_norm, time_sec)?
                         .max(0.0)
-                        * affine_uniform_scale(transform);
+                        * affine_uniform_scale(node_transform);
                     if width <= 0.0001 {
                         continue;
                     }
@@ -3885,7 +6130,13 @@ impl SceneFrameRenderer {
                     if let Some(mut color) = parse_paint(&path.stroke)? {
                         color[3] = ((color[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
                         draw_transformed_trimmed_polylines_styled(
-                            canvas, &subpaths, width, color, trim, transform, style,
+                            canvas,
+                            &subpaths,
+                            width,
+                            color,
+                            trim,
+                            node_transform,
+                            style,
                         );
                     }
                 }
@@ -3900,6 +6151,8 @@ impl SceneFrameRenderer {
                     )?;
                 }
                 SceneNode::Circle(circle) => {
+                    let node_transform =
+                        transform.mul(scene_circle_local_transform(circle, time_norm, time_sec)?);
                     let opacity = (eval_scene_number(&circle.opacity, time_norm, time_sec)?
                         * inherited_opacity)
                         .clamp(0.0, 1.0);
@@ -3909,7 +6162,7 @@ impl SceneFrameRenderer {
                     let x = eval_scene_number(&circle.x, time_norm, time_sec)?;
                     let y = eval_scene_number(&circle.y, time_norm, time_sec)?;
                     let radius = eval_scene_number(&circle.radius, time_norm, time_sec)?.max(0.0)
-                        * affine_uniform_scale(transform);
+                        * affine_uniform_scale(node_transform);
                     if radius <= 0.0001 {
                         continue;
                     }
@@ -3918,8 +6171,8 @@ impl SceneFrameRenderer {
                     let stroke = circle.stroke.as_deref().map(parse_color).transpose()?;
                     let stroke_width =
                         eval_scene_number(&circle.stroke_width, time_norm, time_sec)?.max(0.0)
-                            * affine_uniform_scale(transform);
-                    let (x, y) = transform.transform_point(x, y);
+                            * affine_uniform_scale(node_transform);
+                    let (x, y) = node_transform.transform_point(x, y);
                     draw_circle_paint(canvas, x, y, radius, &paint, opacity, blend);
                     if let Some(mut stroke) = stroke {
                         stroke[3] = ((stroke[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
@@ -3927,13 +6180,15 @@ impl SceneFrameRenderer {
                     }
                 }
                 SceneNode::Rect(rect) => {
+                    let node_transform =
+                        transform.mul(scene_rect_local_transform(rect, time_norm, time_sec)?);
                     let opacity = (eval_scene_number(&rect.opacity, time_norm, time_sec)?
                         * inherited_opacity)
                         .clamp(0.0, 1.0);
                     if opacity <= 0.0001 {
                         continue;
                     }
-                    let scale = affine_uniform_scale(transform);
+                    let scale = affine_uniform_scale(node_transform);
                     let x = eval_scene_number(&rect.x, time_norm, time_sec)?;
                     let y = eval_scene_number(&rect.y, time_norm, time_sec)?;
                     let width =
@@ -3951,7 +6206,7 @@ impl SceneFrameRenderer {
                     let stroke_width = eval_scene_number(&rect.stroke_width, time_norm, time_sec)?
                         .max(0.0)
                         * scale;
-                    let (x, y) = transform.transform_point(x, y);
+                    let (x, y) = node_transform.transform_point(x, y);
                     draw_rounded_rect_paint(
                         canvas, x, y, width, height, radius, &paint, opacity, blend,
                     );
@@ -3969,7 +6224,8 @@ impl SceneFrameRenderer {
                         );
                     }
                 }
-                SceneNode::Solid(_)
+                SceneNode::Precompose(_)
+                | SceneNode::Layer(_)
                 | SceneNode::Image(_)
                 | SceneNode::Svg(_)
                 | SceneNode::Shadow(_) => {}
@@ -3995,6 +6251,75 @@ impl SceneFrameRenderer {
         parse_color(value).map(ResolvedPaint::Solid)
     }
 
+    fn draw_pixel_grid(
+        &mut self,
+        canvas: &mut RgbaImage,
+        grid: &PixelGridNode,
+        transform: Affine2,
+        inherited_opacity: f32,
+        time_norm: f32,
+        time_sec: f32,
+    ) -> Result<(), MotionLoomSceneRenderError> {
+        let opacity = (eval_scene_number(&grid.opacity, time_norm, time_sec)? * inherited_opacity)
+            .clamp(0.0, 1.0);
+        if opacity <= 0.0001 {
+            return Ok(());
+        }
+        let pixel_size = eval_scene_number(&grid.pixel_size, time_norm, time_sec)?.max(0.0);
+        if pixel_size <= 0.0001 {
+            return Ok(());
+        }
+        let x = eval_scene_number(&grid.x, time_norm, time_sec)?;
+        let y = eval_scene_number(&grid.y, time_norm, time_sec)?;
+        let scale = affine_uniform_scale(transform).max(0.001);
+        let draw_size = pixel_size * scale;
+        let palette = self.palette_defs.get(&grid.palette).ok_or_else(|| {
+            MotionLoomSceneRenderError::InvalidPaint {
+                value: grid.palette.clone(),
+                message: format!("PixelGrid palette not found: {}", grid.palette),
+            }
+        })?;
+        let blend = parse_scene_blend(&grid.blend)?;
+
+        for (row, line) in grid.data.lines().enumerate() {
+            for (col, ch) in line.chars().enumerate() {
+                if ch.is_whitespace() {
+                    continue;
+                }
+                let key = ch.to_string();
+                let Some(color_def) = palette.colors.iter().find(|color| color.key == key) else {
+                    return Err(MotionLoomSceneRenderError::InvalidPaint {
+                        value: key,
+                        message: format!(
+                            "PixelGrid{} references color key not found in palette '{}'",
+                            id_suffix(grid.id.as_deref()),
+                            grid.palette
+                        ),
+                    });
+                };
+                let color = parse_color(&color_def.value)?;
+                if color[3] == 0 {
+                    continue;
+                }
+                let local_x = x + col as f32 * pixel_size;
+                let local_y = y + row as f32 * pixel_size;
+                let (draw_x, draw_y) = transform.transform_point(local_x, local_y);
+                draw_rounded_rect_paint(
+                    canvas,
+                    draw_x,
+                    draw_y,
+                    draw_size,
+                    draw_size,
+                    0.0,
+                    &ResolvedPaint::Solid(color),
+                    opacity,
+                    blend,
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn draw_rect(
         &mut self,
         canvas: &mut RgbaImage,
@@ -4014,13 +6339,13 @@ impl SceneFrameRenderer {
         let width = eval_scene_number(&rect.width, time_norm, time_sec)?.max(0.0);
         let height = eval_scene_number(&rect.height, time_norm, time_sec)?.max(0.0);
         let radius = eval_scene_number(&rect.radius, time_norm, time_sec)?.max(0.0);
-        let rotation = eval_scene_number(&rect.rotation, time_norm, time_sec)?;
         let paint = self.resolve_paint(&rect.color)?;
         let blend = parse_scene_blend(&rect.blend)?;
         let stroke = rect.stroke.as_deref().map(parse_color).transpose()?;
         let stroke_width = eval_scene_number(&rect.stroke_width, time_norm, time_sec)?.max(0.0);
+        let transform = scene_rect_local_transform(rect, time_norm, time_sec)?;
 
-        if rotation.abs() > 0.001 {
+        if !affine_is_identity(transform) {
             let mut layer =
                 RgbaImage::from_pixel(canvas.width(), canvas.height(), Rgba([0, 0, 0, 0]));
             if let Some(shadow) = shadow {
@@ -4041,7 +6366,7 @@ impl SceneFrameRenderer {
                     stroke,
                 );
             }
-            composite_transformed_layer(canvas, &layer, 0.0, 0.0, rotation, 1.0);
+            composite_layer_affine(canvas, &layer, transform);
             return Ok(());
         }
 
@@ -4077,6 +6402,21 @@ impl SceneFrameRenderer {
         let blend = parse_scene_blend(&circle.blend)?;
         let stroke = circle.stroke.as_deref().map(parse_color).transpose()?;
         let stroke_width = eval_scene_number(&circle.stroke_width, time_norm, time_sec)?.max(0.0);
+        let transform = scene_circle_local_transform(circle, time_norm, time_sec)?;
+
+        if !affine_is_identity(transform) {
+            let mut layer =
+                RgbaImage::from_pixel(canvas.width(), canvas.height(), Rgba([0, 0, 0, 0]));
+            if let Some(shadow) = shadow {
+                draw_circle_shadow(&mut layer, x, y, radius, &shadow);
+            }
+            draw_circle_paint(&mut layer, x, y, radius, &paint, opacity, blend);
+            if let Some(stroke) = stroke {
+                draw_circle_stroke(&mut layer, x, y, radius, stroke_width, stroke);
+            }
+            composite_layer_affine(canvas, &layer, transform);
+            return Ok(());
+        }
 
         if let Some(shadow) = shadow {
             draw_circle_shadow(canvas, x, y, radius, &shadow);
@@ -4105,13 +6445,17 @@ impl SceneFrameRenderer {
         let y1 = eval_scene_number(&line.y1, time_norm, time_sec)?;
         let x2 = eval_scene_number(&line.x2, time_norm, time_sec)?;
         let y2 = eval_scene_number(&line.y2, time_norm, time_sec)?;
-        let width = eval_scene_number(&line.width, time_norm, time_sec)?.max(0.0);
+        let transform = scene_line_local_transform(line, time_norm, time_sec)?;
+        let width = eval_scene_number(&line.width, time_norm, time_sec)?.max(0.0)
+            * affine_uniform_scale(transform);
         if width <= 0.0001 {
             return Ok(());
         }
         let style = eval_line_stroke_style(line, time_norm, time_sec)?;
         if let Some(mut color) = parse_paint(&line.color)? {
             color[3] = ((color[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
+            let (x1, y1) = transform.transform_point(x1, y1);
+            let (x2, y2) = transform.transform_point(x2, y2);
             draw_line_segment_styled(
                 canvas,
                 Point2::new(x1, y1),
@@ -4140,7 +6484,9 @@ impl SceneFrameRenderer {
         if opacity <= 0.0001 {
             return Ok(());
         }
-        let width = eval_scene_number(&polyline.stroke_width, time_norm, time_sec)?.max(0.0);
+        let transform = scene_polyline_local_transform(polyline, time_norm, time_sec)?;
+        let width = eval_scene_number(&polyline.stroke_width, time_norm, time_sec)?.max(0.0)
+            * affine_uniform_scale(transform);
         if width <= 0.0001 {
             return Ok(());
         }
@@ -4154,7 +6500,15 @@ impl SceneFrameRenderer {
         let style = eval_polyline_stroke_style(polyline, time_norm, time_sec)?;
         if let Some(mut color) = parse_paint(&polyline.stroke)? {
             color[3] = ((color[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
-            draw_trimmed_polylines_styled(canvas, &[points], width, color, trim, style);
+            draw_transformed_trimmed_polylines_styled(
+                canvas,
+                &[points],
+                width,
+                color,
+                trim,
+                transform,
+                style,
+            );
         }
         Ok(())
     }
@@ -4172,13 +6526,18 @@ impl SceneFrameRenderer {
         if opacity <= 0.0001 {
             return Ok(());
         }
-        let subpaths = parse_path_subpaths(&path.d)?;
+        let transform = scene_path_local_transform(path, time_norm, time_sec)?;
+        let path_d = eval_path_d(&path.d, time_norm, time_sec)?;
+        let subpaths = parse_path_subpaths(path_d.as_ref())?;
         if let Some(fill) = path.fill.as_deref() {
             let paint = self.resolve_paint(fill)?;
             let blend = parse_scene_blend(&path.blend)?;
-            draw_filled_polylines_paint(canvas, &subpaths, &paint, opacity, blend);
+            draw_transformed_filled_polylines_paint(
+                canvas, &subpaths, &paint, opacity, blend, transform,
+            );
         }
-        let width = eval_scene_number(&path.stroke_width, time_norm, time_sec)?.max(0.0);
+        let width = eval_scene_number(&path.stroke_width, time_norm, time_sec)?.max(0.0)
+            * affine_uniform_scale(transform);
         if width <= 0.0001 {
             return Ok(());
         }
@@ -4186,7 +6545,9 @@ impl SceneFrameRenderer {
         let style = eval_path_stroke_style(path, time_norm, time_sec)?;
         if let Some(mut color) = parse_paint(&path.stroke)? {
             color[3] = ((color[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
-            draw_trimmed_polylines_styled(canvas, &subpaths, width, color, trim, style);
+            draw_transformed_trimmed_polylines_styled(
+                canvas, &subpaths, width, color, trim, transform, style,
+            );
         }
         Ok(())
     }
@@ -4249,7 +6610,9 @@ impl SceneFrameRenderer {
             time_sec,
             (canvas.width(), canvas.height()),
         )? {
-            composite_layer_affine(canvas, &layer.image, layer.transform);
+            if let GpuSceneTextureSource::Cpu(image) = &layer.source {
+                composite_layer_affine(canvas, image, layer.transform);
+            }
         }
         Ok(())
     }
@@ -4362,12 +6725,15 @@ impl SceneFrameRenderer {
                 blend_pixel(&mut layer, px, py, [sr, sg, sb, sa]);
             },
         );
-        let text_transform =
-            transform.mul(Affine2::translate(x_base - pad as f32, y_base - pad as f32));
+        let text_transform = transform
+            .mul(Affine2::translate(x_base - pad as f32, y_base - pad as f32))
+            .mul(scene_text_local_transform(text, time_norm, time_sec)?);
         Ok(Some(GpuSceneTextureLayer {
-            image: layer,
+            source: GpuSceneTextureSource::Cpu(layer),
             transform: text_transform,
             opacity: 1.0,
+            blend: SceneBlendMode::Normal,
+            matte: None,
         }))
     }
 
@@ -4436,6 +6802,299 @@ fn eval_scene_number(
     })
 }
 
+#[derive(Debug, Clone)]
+struct PathMorphKeyframe {
+    time_sec: f32,
+    tokens: Vec<PathMorphToken>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PathMorphToken {
+    Command(char),
+    Number(f32),
+}
+
+fn eval_path_d<'a>(
+    d: &'a str,
+    _time_norm: f32,
+    time_sec: f32,
+) -> Result<Cow<'a, str>, MotionLoomSceneRenderError> {
+    let trimmed = d.trim();
+    if !trimmed.starts_with("morph(") {
+        return Ok(Cow::Borrowed(d));
+    }
+
+    Ok(Cow::Owned(eval_path_morph(trimmed, time_sec)?))
+}
+
+fn eval_path_morph(expr: &str, time_sec: f32) -> Result<String, MotionLoomSceneRenderError> {
+    let inner = expr
+        .strip_prefix("morph(")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| invalid_path_morph(expr, "expected morph(\"time:path\", ...)"))?;
+    let args = split_path_morph_args(inner, expr)?;
+    if args.len() < 2 {
+        return Err(invalid_path_morph(
+            expr,
+            "morph requires at least two keyframes.",
+        ));
+    }
+
+    let mut keyframes = args
+        .iter()
+        .map(|arg| parse_path_morph_keyframe(arg, expr))
+        .collect::<Result<Vec<_>, _>>()?;
+    keyframes.sort_by(|a, b| a.time_sec.total_cmp(&b.time_sec));
+    for pair in keyframes.windows(2) {
+        if (pair[0].time_sec - pair[1].time_sec).abs() <= f32::EPSILON {
+            return Err(invalid_path_morph(
+                expr,
+                format!(
+                    "duplicate morph keyframe time: {}",
+                    format_path_morph_number(pair[0].time_sec)
+                ),
+            ));
+        }
+    }
+
+    if time_sec <= keyframes[0].time_sec {
+        return Ok(path_morph_tokens_to_d(&keyframes[0].tokens));
+    }
+    let last = keyframes.len() - 1;
+    if time_sec >= keyframes[last].time_sec {
+        return Ok(path_morph_tokens_to_d(&keyframes[last].tokens));
+    }
+
+    for pair in keyframes.windows(2) {
+        let from = &pair[0];
+        let to = &pair[1];
+        if time_sec < from.time_sec || time_sec > to.time_sec {
+            continue;
+        }
+        let t = ((time_sec - from.time_sec) / (to.time_sec - from.time_sec)).clamp(0.0, 1.0);
+        return interpolate_path_morph_tokens(&from.tokens, &to.tokens, t, expr);
+    }
+
+    Ok(path_morph_tokens_to_d(&keyframes[last].tokens))
+}
+
+fn split_path_morph_args(
+    inner: &str,
+    source: &str,
+) -> Result<Vec<String>, MotionLoomSceneRenderError> {
+    let mut args = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+
+    for (index, ch) in inner.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return Err(invalid_path_morph(
+                        source,
+                        "unexpected ')' in morph arguments.",
+                    ));
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                let arg = inner[start..index].trim();
+                if !arg.is_empty() {
+                    args.push(arg.to_string());
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if quote.is_some() {
+        return Err(invalid_path_morph(
+            source,
+            "unterminated string in morph arguments.",
+        ));
+    }
+    if depth != 0 {
+        return Err(invalid_path_morph(
+            source,
+            "unclosed nested expression in morph arguments.",
+        ));
+    }
+
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        args.push(tail.to_string());
+    }
+    Ok(args)
+}
+
+fn parse_path_morph_keyframe(
+    arg: &str,
+    source: &str,
+) -> Result<PathMorphKeyframe, MotionLoomSceneRenderError> {
+    let arg = unquote_path_morph_arg(arg, source)?;
+    let Some((time_raw, path_raw)) = arg.split_once(':') else {
+        return Err(invalid_path_morph(
+            source,
+            "each morph keyframe must be \"seconds:path data\".",
+        ));
+    };
+    let time_sec = time_raw
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| invalid_path_morph(source, format!("invalid keyframe time: {time_raw}")))?;
+    if !time_sec.is_finite() {
+        return Err(invalid_path_morph(
+            source,
+            format!("invalid keyframe time: {time_raw}"),
+        ));
+    }
+    let path = path_raw.trim();
+    if path.is_empty() {
+        return Err(invalid_path_morph(
+            source,
+            "morph keyframe path data is empty.",
+        ));
+    }
+
+    let tokens = tokenize_path_data(path)?
+        .into_iter()
+        .map(|token| match token {
+            PathToken::Command(command) => PathMorphToken::Command(command),
+            PathToken::Number(value) => PathMorphToken::Number(value),
+        })
+        .collect();
+
+    Ok(PathMorphKeyframe { time_sec, tokens })
+}
+
+fn unquote_path_morph_arg(arg: &str, source: &str) -> Result<String, MotionLoomSceneRenderError> {
+    let arg = arg.trim();
+    let Some(first) = arg.chars().next() else {
+        return Err(invalid_path_morph(source, "empty morph keyframe."));
+    };
+    if first != '"' && first != '\'' {
+        return Ok(arg.to_string());
+    }
+    if !arg.ends_with(first) || arg.len() < 2 {
+        return Err(invalid_path_morph(
+            source,
+            "unterminated morph keyframe string.",
+        ));
+    }
+
+    let body = &arg[first.len_utf8()..arg.len() - first.len_utf8()];
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    if escaped {
+        out.push('\\');
+    }
+    Ok(out)
+}
+
+fn interpolate_path_morph_tokens(
+    from: &[PathMorphToken],
+    to: &[PathMorphToken],
+    t: f32,
+    source: &str,
+) -> Result<String, MotionLoomSceneRenderError> {
+    if from.len() != to.len() {
+        return Err(invalid_path_morph(
+            source,
+            "incompatible path data: keyframes have different token counts.",
+        ));
+    }
+
+    let mut out = Vec::with_capacity(from.len());
+    for (from_token, to_token) in from.iter().zip(to.iter()) {
+        match (*from_token, *to_token) {
+            (PathMorphToken::Command(a), PathMorphToken::Command(b)) if a == b => {
+                out.push(PathMorphToken::Command(a));
+            }
+            (PathMorphToken::Number(a), PathMorphToken::Number(b)) => {
+                out.push(PathMorphToken::Number(a + (b - a) * t));
+            }
+            (PathMorphToken::Command(a), PathMorphToken::Command(b)) => {
+                return Err(invalid_path_morph(
+                    source,
+                    format!("incompatible path data: command '{a}' does not match '{b}'."),
+                ));
+            }
+            _ => {
+                return Err(invalid_path_morph(
+                    source,
+                    "incompatible path data: command/number layout differs.",
+                ));
+            }
+        }
+    }
+
+    Ok(path_morph_tokens_to_d(&out))
+}
+
+fn path_morph_tokens_to_d(tokens: &[PathMorphToken]) -> String {
+    let mut out = String::new();
+    for token in tokens {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        match *token {
+            PathMorphToken::Command(command) => out.push(command),
+            PathMorphToken::Number(value) => out.push_str(&format_path_morph_number(value)),
+        }
+    }
+    out
+}
+
+fn format_path_morph_number(value: f32) -> String {
+    let mut text = format!("{value:.3}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    if text == "-0" { "0".to_string() } else { text }
+}
+
+fn invalid_path_morph(source: &str, message: impl Into<String>) -> MotionLoomSceneRenderError {
+    MotionLoomSceneRenderError::InvalidPathData {
+        value: source.to_string(),
+        message: message.into(),
+    }
+}
+
 fn eval_repeat_count(
     expr: &str,
     time_norm: f32,
@@ -4444,6 +7103,365 @@ fn eval_repeat_count(
     Ok(eval_scene_number(expr, time_norm, time_sec)?
         .round()
         .clamp(0.0, 1000.0) as u32)
+}
+
+#[derive(Debug, Clone)]
+struct EvaluatedDeformGrid {
+    cols: usize,
+    rows: usize,
+    from: Vec<Point2>,
+    to: Vec<Point2>,
+}
+
+fn eval_group_deform_grid(
+    group: &GroupNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Option<EvaluatedDeformGrid>, MotionLoomSceneRenderError> {
+    let Some(size_raw) = group.deform_grid.as_deref() else {
+        return Ok(None);
+    };
+    let size_raw = size_raw.trim();
+    if size_raw.is_empty() || size_raw.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+
+    let amount = eval_scene_number(&group.deform_amount, time_norm, time_sec)?.clamp(0.0, 1.0);
+    if amount <= 0.0001 {
+        return Ok(None);
+    }
+
+    let (cols, rows) = parse_deform_grid_size(size_raw)?;
+    let expected = cols * rows;
+    let grid_from_raw = group.grid_from.as_deref().ok_or_else(|| {
+        invalid_deform_grid(size_raw, "deformGrid requires gridFrom=\"x,y ...\".")
+    })?;
+    let grid_to_raw = group
+        .grid_to
+        .as_deref()
+        .ok_or_else(|| invalid_deform_grid(size_raw, "deformGrid requires gridTo=\"x,y ...\"."))?;
+    let from = parse_deform_grid_points(grid_from_raw, cols, rows, "gridFrom")?;
+    let target = parse_deform_grid_points(grid_to_raw, cols, rows, "gridTo")?;
+    if from.len() != expected || target.len() != expected {
+        return Err(invalid_deform_grid(
+            size_raw,
+            format!("expected {expected} control points."),
+        ));
+    }
+
+    let to = from
+        .iter()
+        .zip(target.iter())
+        .map(|(from, target)| from.lerp(*target, amount))
+        .collect();
+
+    Ok(Some(EvaluatedDeformGrid {
+        cols,
+        rows,
+        from,
+        to,
+    }))
+}
+
+fn transform_deform_grid(grid: &EvaluatedDeformGrid, transform: Affine2) -> EvaluatedDeformGrid {
+    EvaluatedDeformGrid {
+        cols: grid.cols,
+        rows: grid.rows,
+        from: grid
+            .from
+            .iter()
+            .map(|point| transform_point2(transform, *point))
+            .collect(),
+        to: grid
+            .to
+            .iter()
+            .map(|point| transform_point2(transform, *point))
+            .collect(),
+    }
+}
+
+fn transform_point2(transform: Affine2, point: Point2) -> Point2 {
+    let (x, y) = transform.transform_point(point.x, point.y);
+    Point2::new(x, y)
+}
+
+fn transform_and_deform_point(
+    transform: Affine2,
+    point: Point2,
+    deform: Option<&EvaluatedDeformGrid>,
+) -> Point2 {
+    let transformed = transform_point2(transform, point);
+    deform
+        .map(|grid| warp_point_with_deform_grid(transformed, grid))
+        .unwrap_or(transformed)
+}
+
+fn transform_and_deform_subpaths(
+    subpaths: &[Vec<Point2>],
+    transform: Affine2,
+    deform: &EvaluatedDeformGrid,
+) -> Vec<Vec<Point2>> {
+    subpaths
+        .iter()
+        .map(|subpath| {
+            subpath
+                .iter()
+                .map(|point| transform_and_deform_point(transform, *point, Some(deform)))
+                .collect()
+        })
+        .collect()
+}
+
+fn warp_point_with_deform_grid(point: Point2, grid: &EvaluatedDeformGrid) -> Point2 {
+    for row in 0..grid.rows - 1 {
+        for col in 0..grid.cols - 1 {
+            let i00 = row * grid.cols + col;
+            let i10 = i00 + 1;
+            let i01 = (row + 1) * grid.cols + col;
+            let i11 = i01 + 1;
+            if let Some(warped) = warp_point_with_deform_triangle(
+                point,
+                [grid.from[i00], grid.from[i10], grid.from[i11]],
+                [grid.to[i00], grid.to[i10], grid.to[i11]],
+            ) {
+                return warped;
+            }
+            if let Some(warped) = warp_point_with_deform_triangle(
+                point,
+                [grid.from[i00], grid.from[i11], grid.from[i01]],
+                [grid.to[i00], grid.to[i11], grid.to[i01]],
+            ) {
+                return warped;
+            }
+        }
+    }
+    point
+}
+
+fn warp_point_with_deform_triangle(
+    point: Point2,
+    src: [Point2; 3],
+    dst: [Point2; 3],
+) -> Option<Point2> {
+    let denom = triangle_barycentric_denominator(src);
+    let (w0, w1, w2) = triangle_barycentric(point, src, denom)?;
+    if w0 < -0.001 || w1 < -0.001 || w2 < -0.001 {
+        return None;
+    }
+    Some(Point2::new(
+        dst[0].x * w0 + dst[1].x * w1 + dst[2].x * w2,
+        dst[0].y * w0 + dst[1].y * w1 + dst[2].y * w2,
+    ))
+}
+
+fn parse_deform_grid_size(size: &str) -> Result<(usize, usize), MotionLoomSceneRenderError> {
+    let normalized = size.trim().to_ascii_lowercase().replace(' ', "");
+    let Some((cols_raw, rows_raw)) = normalized.split_once('x') else {
+        return Err(invalid_deform_grid(
+            size,
+            "deformGrid must use the form \"colsxrows\", for example \"3x3\".",
+        ));
+    };
+    let cols = cols_raw
+        .parse::<usize>()
+        .map_err(|_| invalid_deform_grid(size, format!("invalid column count: {cols_raw}")))?;
+    let rows = rows_raw
+        .parse::<usize>()
+        .map_err(|_| invalid_deform_grid(size, format!("invalid row count: {rows_raw}")))?;
+    if cols < 2 || rows < 2 || cols > 16 || rows > 16 {
+        return Err(invalid_deform_grid(
+            size,
+            "deformGrid supports 2..16 columns and 2..16 rows.",
+        ));
+    }
+    Ok((cols, rows))
+}
+
+fn parse_deform_grid_points(
+    value: &str,
+    cols: usize,
+    rows: usize,
+    label: &str,
+) -> Result<Vec<Point2>, MotionLoomSceneRenderError> {
+    let mut points = Vec::new();
+    let row_chunks: Vec<&str> = if value.contains(';') {
+        value.split(';').collect()
+    } else {
+        vec![value]
+    };
+    if row_chunks.len() != 1 && row_chunks.len() != rows {
+        return Err(invalid_deform_grid(
+            value,
+            format!("{label} expected {rows} rows separated by ';'."),
+        ));
+    }
+
+    for (row_index, row) in row_chunks.iter().enumerate() {
+        let row_points = row
+            .split_whitespace()
+            .map(|raw| parse_deform_grid_point(raw, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        if row_chunks.len() != 1 && row_points.len() != cols {
+            return Err(invalid_deform_grid(
+                value,
+                format!(
+                    "{label} row {} expected {cols} points, got {}.",
+                    row_index + 1,
+                    row_points.len()
+                ),
+            ));
+        }
+        points.extend(row_points);
+    }
+
+    let expected = cols * rows;
+    if points.len() != expected {
+        return Err(invalid_deform_grid(
+            value,
+            format!("{label} expected {expected} points, got {}.", points.len()),
+        ));
+    }
+    Ok(points)
+}
+
+fn parse_deform_grid_point(raw: &str, source: &str) -> Result<Point2, MotionLoomSceneRenderError> {
+    let Some((x_raw, y_raw)) = raw.split_once(',') else {
+        return Err(invalid_deform_grid(
+            source,
+            format!("control point must be \"x,y\": {raw}"),
+        ));
+    };
+    let x = x_raw
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| invalid_deform_grid(source, format!("invalid x value: {x_raw}")))?;
+    let y = y_raw
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| invalid_deform_grid(source, format!("invalid y value: {y_raw}")))?;
+    if !x.is_finite() || !y.is_finite() {
+        return Err(invalid_deform_grid(
+            source,
+            format!("control point must be finite: {raw}"),
+        ));
+    }
+    Ok(Point2::new(x, y))
+}
+
+fn apply_deform_grid(source: &RgbaImage, grid: &EvaluatedDeformGrid) -> RgbaImage {
+    let mut out = RgbaImage::from_pixel(source.width(), source.height(), Rgba([0, 0, 0, 0]));
+    for row in 0..grid.rows - 1 {
+        for col in 0..grid.cols - 1 {
+            let i00 = row * grid.cols + col;
+            let i10 = i00 + 1;
+            let i01 = (row + 1) * grid.cols + col;
+            let i11 = i01 + 1;
+            raster_deform_triangle(
+                &mut out,
+                source,
+                [grid.from[i00], grid.from[i10], grid.from[i11]],
+                [grid.to[i00], grid.to[i10], grid.to[i11]],
+            );
+            raster_deform_triangle(
+                &mut out,
+                source,
+                [grid.from[i00], grid.from[i11], grid.from[i01]],
+                [grid.to[i00], grid.to[i11], grid.to[i01]],
+            );
+        }
+    }
+    out
+}
+
+fn raster_deform_triangle(
+    out: &mut RgbaImage,
+    source: &RgbaImage,
+    src: [Point2; 3],
+    dst: [Point2; 3],
+) {
+    let min_x = dst
+        .iter()
+        .map(|point| point.x)
+        .fold(f32::INFINITY, f32::min)
+        .floor() as i32
+        - 1;
+    let min_y = dst
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::INFINITY, f32::min)
+        .floor() as i32
+        - 1;
+    let max_x = dst
+        .iter()
+        .map(|point| point.x)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil() as i32
+        + 1;
+    let max_y = dst
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil() as i32
+        + 1;
+
+    let x0 = min_x.clamp(0, out.width() as i32);
+    let y0 = min_y.clamp(0, out.height() as i32);
+    let x1 = max_x.clamp(0, out.width() as i32);
+    let y1 = max_y.clamp(0, out.height() as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
+    let denom = triangle_barycentric_denominator(dst);
+    if denom.abs() <= 0.00001 {
+        return;
+    }
+
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let point = Point2::new(x as f32, y as f32);
+            let Some((w0, w1, w2)) = triangle_barycentric(point, dst, denom) else {
+                continue;
+            };
+            if w0 < -0.001 || w1 < -0.001 || w2 < -0.001 {
+                continue;
+            }
+            let src_x = src[0].x * w0 + src[1].x * w1 + src[2].x * w2;
+            let src_y = src[0].y * w0 + src[1].y * w1 + src[2].y * w2;
+            let Some(pixel) = sample_layer_bilinear(source, src_x, src_y) else {
+                continue;
+            };
+            if pixel[3] == 0 {
+                continue;
+            }
+            out.put_pixel(x as u32, y as u32, Rgba(pixel));
+        }
+    }
+}
+
+fn triangle_barycentric_denominator(tri: [Point2; 3]) -> f32 {
+    (tri[1].y - tri[2].y) * (tri[0].x - tri[2].x) + (tri[2].x - tri[1].x) * (tri[0].y - tri[2].y)
+}
+
+fn triangle_barycentric(point: Point2, tri: [Point2; 3], denom: f32) -> Option<(f32, f32, f32)> {
+    if denom.abs() <= 0.00001 {
+        return None;
+    }
+    let w0 = ((tri[1].y - tri[2].y) * (point.x - tri[2].x)
+        + (tri[2].x - tri[1].x) * (point.y - tri[2].y))
+        / denom;
+    let w1 = ((tri[2].y - tri[0].y) * (point.x - tri[2].x)
+        + (tri[0].x - tri[2].x) * (point.y - tri[2].y))
+        / denom;
+    let w2 = 1.0 - w0 - w1;
+    Some((w0, w1, w2))
+}
+
+fn invalid_deform_grid(value: &str, message: impl Into<String>) -> MotionLoomSceneRenderError {
+    MotionLoomSceneRenderError::InvalidDeformGrid {
+        value: value.to_string(),
+        message: message.into(),
+    }
 }
 
 fn text_bounds(buffer: &Buffer, fallback_line_height: f32) -> (f32, f32) {
@@ -4742,16 +7760,8 @@ fn find_scene_node_anchor(
                 return Some(transform.transform_point(x, y + h * 0.5));
             }
             SceneNode::Group(group) => {
-                let x = eval_scene_number(&group.x, time_norm, time_sec).ok()?;
-                let y = eval_scene_number(&group.y, time_norm, time_sec).ok()?;
-                let rotation = eval_scene_number(&group.rotation, time_norm, time_sec).ok()?;
-                let scale = eval_scene_number(&group.scale, time_norm, time_sec)
-                    .ok()?
-                    .clamp(0.001, 64.0);
-                let group_transform = transform
-                    .mul(Affine2::translate(x, y))
-                    .mul(Affine2::rotate_deg(rotation))
-                    .mul(Affine2::scale(scale));
+                let group_transform =
+                    transform.mul(scene_group_local_transform_opt(group, time_norm, time_sec)?);
                 if group.id.as_deref() == Some(id) {
                     return Some(group_transform.transform_point(0.0, 0.0));
                 }
@@ -4772,10 +7782,13 @@ fn find_scene_node_anchor(
                 let scale = eval_scene_number(&part.scale, time_norm, time_sec)
                     .ok()?
                     .clamp(0.001, 64.0);
+                let anchor_x = eval_scene_number(&part.anchor_x, time_norm, time_sec).ok()?;
+                let anchor_y = eval_scene_number(&part.anchor_y, time_norm, time_sec).ok()?;
                 let part_transform = transform
                     .mul(Affine2::translate(x, y))
                     .mul(Affine2::rotate_deg(rotation))
-                    .mul(Affine2::scale(scale));
+                    .mul(Affine2::scale(scale))
+                    .mul(Affine2::translate(-anchor_x, -anchor_y));
                 if part.id.as_deref() == Some(id) {
                     return Some(part_transform.transform_point(0.0, 0.0));
                 }
@@ -4808,16 +7821,9 @@ fn find_scene_node_anchor(
                 }
             }
             SceneNode::Character(character) => {
-                let x = eval_scene_number(&character.x, time_norm, time_sec).ok()?;
-                let y = eval_scene_number(&character.y, time_norm, time_sec).ok()?;
-                let rotation = eval_scene_number(&character.rotation, time_norm, time_sec).ok()?;
-                let scale = eval_scene_number(&character.scale, time_norm, time_sec)
-                    .ok()?
-                    .clamp(0.001, 64.0);
-                let character_transform = transform
-                    .mul(Affine2::translate(x, y))
-                    .mul(Affine2::rotate_deg(rotation))
-                    .mul(Affine2::scale(scale));
+                let character_transform = transform.mul(scene_character_local_transform_opt(
+                    character, time_norm, time_sec,
+                )?);
                 if character.id.as_deref() == Some(id) {
                     return Some(character_transform.transform_point(0.0, 0.0));
                 }
@@ -4842,6 +7848,21 @@ fn find_scene_node_anchor(
                 {
                     return Some(point);
                 }
+            }
+            SceneNode::Precompose(precompose) => {
+                if precompose.id == id {
+                    return Some(transform.transform_point(0.0, 0.0));
+                }
+                if let Some(point) =
+                    find_scene_node_anchor(&precompose.children, id, transform, time_norm, time_sec)
+                {
+                    return Some(point);
+                }
+            }
+            SceneNode::Layer(layer) if layer.id.as_deref() == Some(id) => {
+                let layer_transform =
+                    transform.mul(scene_layer_local_transform(layer, time_norm, time_sec).ok()?);
+                return Some(layer_transform.transform_point(0.0, 0.0));
             }
             _ => {}
         }
@@ -4872,6 +7893,13 @@ fn collect_graph_gradient_defs(graph: &GraphScript, out: &mut HashMap<String, Gr
     }
 }
 
+fn collect_graph_palette_defs(graph: &GraphScript, out: &mut HashMap<String, PaletteNode>) {
+    collect_scene_palette_defs(&graph.scene_nodes, out);
+    for scene in &graph.scenes {
+        collect_scene_palette_defs(&scene.children, out);
+    }
+}
+
 fn collect_scene_gradient_defs(nodes: &[SceneNode], out: &mut HashMap<String, GradientDef>) {
     for node in nodes {
         match node {
@@ -4888,10 +7916,33 @@ fn collect_scene_gradient_defs(nodes: &[SceneNode], out: &mut HashMap<String, Gr
             SceneNode::Part(part) => collect_scene_gradient_defs(&part.children, out),
             SceneNode::Repeat(repeat) => collect_scene_gradient_defs(&repeat.children, out),
             SceneNode::Mask(mask) => collect_scene_gradient_defs(&mask.children, out),
+            SceneNode::Precompose(precompose) => {
+                collect_scene_gradient_defs(&precompose.children, out)
+            }
             SceneNode::Camera(camera) => collect_scene_gradient_defs(&camera.children, out),
             SceneNode::Character(character) => {
                 collect_scene_gradient_defs(&character.children, out)
             }
+            _ => {}
+        }
+    }
+}
+
+fn collect_scene_palette_defs(nodes: &[SceneNode], out: &mut HashMap<String, PaletteNode>) {
+    for node in nodes {
+        match node {
+            SceneNode::Palette(palette) => {
+                out.insert(palette.id.clone(), palette.clone());
+            }
+            SceneNode::Group(group) => collect_scene_palette_defs(&group.children, out),
+            SceneNode::Part(part) => collect_scene_palette_defs(&part.children, out),
+            SceneNode::Repeat(repeat) => collect_scene_palette_defs(&repeat.children, out),
+            SceneNode::Mask(mask) => collect_scene_palette_defs(&mask.children, out),
+            SceneNode::Precompose(precompose) => {
+                collect_scene_palette_defs(&precompose.children, out)
+            }
+            SceneNode::Camera(camera) => collect_scene_palette_defs(&camera.children, out),
+            SceneNode::Character(character) => collect_scene_palette_defs(&character.children, out),
             _ => {}
         }
     }
@@ -4906,6 +7957,26 @@ fn scene_nodes_contain_image_or_svg(nodes: &[SceneNode]) -> bool {
         SceneNode::Camera(camera) => scene_nodes_contain_image_or_svg(&camera.children),
         SceneNode::Character(character) => scene_nodes_contain_image_or_svg(&character.children),
         SceneNode::Mask(mask) => scene_nodes_contain_image_or_svg(&mask.children),
+        SceneNode::Precompose(precompose) => scene_nodes_contain_image_or_svg(&precompose.children),
+        _ => false,
+    })
+}
+
+fn scene_nodes_require_cpu_scene_compositing(nodes: &[SceneNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        SceneNode::Precompose(_) | SceneNode::Layer(_) => true,
+        SceneNode::Group(group) => {
+            group.mask.is_some() || scene_nodes_require_cpu_scene_compositing(&group.children)
+        }
+        SceneNode::Mask(mask) => {
+            mask.feather.trim() != "0" || scene_nodes_require_cpu_scene_compositing(&mask.children)
+        }
+        SceneNode::Part(part) => scene_nodes_require_cpu_scene_compositing(&part.children),
+        SceneNode::Repeat(repeat) => scene_nodes_require_cpu_scene_compositing(&repeat.children),
+        SceneNode::Camera(camera) => scene_nodes_require_cpu_scene_compositing(&camera.children),
+        SceneNode::Character(character) => {
+            scene_nodes_require_cpu_scene_compositing(&character.children)
+        }
         _ => false,
     })
 }
@@ -4913,11 +7984,13 @@ fn scene_nodes_contain_image_or_svg(nodes: &[SceneNode]) -> bool {
 fn collect_gpu_scene_commands(
     nodes: &[SceneNode],
     transform: Affine2,
+    deform: Option<&EvaluatedDeformGrid>,
     inherited_opacity: f32,
     time_norm: f32,
     time_sec: f32,
     canvas_size: (u32, u32),
     gradient_defs: &HashMap<String, GradientDef>,
+    palette_defs: &HashMap<String, PaletteNode>,
     primitives: &mut Vec<GpuScenePrimitive>,
     text_requests: &mut Vec<GpuSceneTextRequest>,
     scene_overlays: &mut Vec<CpuSceneOverlay>,
@@ -4928,52 +8001,39 @@ fn collect_gpu_scene_commands(
             SceneNode::Defs(_) => {
                 pending_shadow = None;
             }
-            SceneNode::Solid(solid) => {
-                let mut color = parse_color(&solid.color)?;
-                color[3] = ((color[3] as f32) * inherited_opacity)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-                if transform.is_identity() {
-                    primitives.push(GpuScenePrimitive {
-                        kind: GPU_SHAPE_SOLID,
-                        transform: Affine2::identity(),
-                        shape: [0.0, 0.0, 0.0, 0.0],
-                        radius: 0.0,
-                        stroke_width: 0.0,
-                        blur: 0.0,
-                        color,
-                        opacity: 1.0,
-                        gradient: None,
-                        line_t0: 0.0,
-                        line_t1: 1.0,
-                        taper_start: 0.0,
-                        taper_end: 0.0,
+            SceneNode::Palette(_) => {
+                pending_shadow = None;
+            }
+            SceneNode::PixelGrid(grid) => {
+                if deform.is_some() {
+                    scene_overlays.push(CpuSceneOverlay::Vector {
+                        nodes: vec![SceneNode::PixelGrid(grid.clone())],
                     });
                 } else {
-                    primitives.push(GpuScenePrimitive {
-                        kind: GPU_SHAPE_RECT_FILL,
+                    push_gpu_pixel_grid_commands(
+                        grid,
                         transform,
-                        shape: [0.0, 0.0, canvas_size.0 as f32, canvas_size.1 as f32],
-                        radius: 0.0,
-                        stroke_width: 0.0,
-                        blur: 0.0,
-                        color,
-                        opacity: 1.0,
-                        gradient: None,
-                        line_t0: 0.0,
-                        line_t1: 1.0,
-                        taper_start: 0.0,
-                        taper_end: 0.0,
-                    });
+                        inherited_opacity,
+                        time_norm,
+                        time_sec,
+                        palette_defs,
+                        primitives,
+                    )?;
                 }
                 pending_shadow = None;
             }
             SceneNode::Text(text) => {
-                text_requests.push(GpuSceneTextRequest {
-                    node: text.clone(),
-                    transform,
-                    opacity: inherited_opacity,
-                });
+                if deform.is_some() {
+                    scene_overlays.push(CpuSceneOverlay::Vector {
+                        nodes: vec![SceneNode::Text(text.clone())],
+                    });
+                } else {
+                    text_requests.push(GpuSceneTextRequest {
+                        node: text.clone(),
+                        transform,
+                        opacity: inherited_opacity,
+                    });
+                }
                 pending_shadow = None;
             }
             SceneNode::Rect(rect) => {
@@ -4986,6 +8046,7 @@ fn collect_gpu_scene_commands(
                     push_gpu_rect_commands(
                         rect,
                         transform,
+                        deform,
                         pending_shadow.take(),
                         inherited_opacity,
                         time_norm,
@@ -5005,6 +8066,7 @@ fn collect_gpu_scene_commands(
                     push_gpu_circle_commands(
                         circle,
                         transform,
+                        deform,
                         pending_shadow.take(),
                         inherited_opacity,
                         time_norm,
@@ -5023,6 +8085,7 @@ fn collect_gpu_scene_commands(
                     push_gpu_line_command(
                         line,
                         transform,
+                        deform,
                         inherited_opacity,
                         time_norm,
                         time_sec,
@@ -5041,6 +8104,7 @@ fn collect_gpu_scene_commands(
                     push_gpu_polyline_commands(
                         polyline,
                         transform,
+                        deform,
                         inherited_opacity,
                         time_norm,
                         time_sec,
@@ -5059,6 +8123,7 @@ fn collect_gpu_scene_commands(
                     push_gpu_path_commands(
                         path,
                         transform,
+                        deform,
                         inherited_opacity,
                         time_norm,
                         time_sec,
@@ -5087,23 +8152,21 @@ fn collect_gpu_scene_commands(
                     * inherited_opacity)
                     .clamp(0.0, 1.0);
                 if opacity > 0.0001 {
-                    let x = eval_scene_number(&group.x, time_norm, time_sec)?;
-                    let y = eval_scene_number(&group.y, time_norm, time_sec)?;
-                    let rotation = eval_scene_number(&group.rotation, time_norm, time_sec)?;
-                    let scale =
-                        eval_scene_number(&group.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
-                    let group_transform = transform
-                        .mul(Affine2::translate(x, y))
-                        .mul(Affine2::rotate_deg(rotation))
-                        .mul(Affine2::scale(scale));
+                    let group_transform =
+                        transform.mul(scene_group_local_transform(group, time_norm, time_sec)?);
+                    let group_deform = eval_group_deform_grid(group, time_norm, time_sec)?
+                        .map(|grid| transform_deform_grid(&grid, group_transform));
+                    let child_deform = group_deform.as_ref().or(deform);
                     collect_gpu_scene_commands(
                         &group.children,
                         group_transform,
+                        child_deform,
                         opacity,
                         time_norm,
                         time_sec,
                         canvas_size,
                         gradient_defs,
+                        palette_defs,
                         primitives,
                         text_requests,
                         scene_overlays,
@@ -5121,18 +8184,23 @@ fn collect_gpu_scene_commands(
                     let rotation = eval_scene_number(&part.rotation, time_norm, time_sec)?;
                     let scale =
                         eval_scene_number(&part.scale, time_norm, time_sec)?.clamp(0.001, 64.0);
+                    let anchor_x = eval_scene_number(&part.anchor_x, time_norm, time_sec)?;
+                    let anchor_y = eval_scene_number(&part.anchor_y, time_norm, time_sec)?;
                     let part_transform = transform
                         .mul(Affine2::translate(x, y))
                         .mul(Affine2::rotate_deg(rotation))
-                        .mul(Affine2::scale(scale));
+                        .mul(Affine2::scale(scale))
+                        .mul(Affine2::translate(-anchor_x, -anchor_y));
                     collect_gpu_scene_commands(
                         &part.children,
                         part_transform,
+                        deform,
                         opacity,
                         time_norm,
                         time_sec,
                         canvas_size,
                         gradient_defs,
+                        palette_defs,
                         primitives,
                         text_requests,
                         scene_overlays,
@@ -5167,11 +8235,13 @@ fn collect_gpu_scene_commands(
                     collect_gpu_scene_commands(
                         &repeat.children,
                         repeat_transform,
+                        deform,
                         copy_opacity,
                         time_norm,
                         time_sec,
                         canvas_size,
                         gradient_defs,
+                        palette_defs,
                         primitives,
                         text_requests,
                         scene_overlays,
@@ -5182,6 +8252,18 @@ fn collect_gpu_scene_commands(
             SceneNode::Mask(mask) => {
                 scene_overlays.push(CpuSceneOverlay::Vector {
                     nodes: vec![SceneNode::Mask(mask.clone())],
+                });
+                pending_shadow = None;
+            }
+            SceneNode::Precompose(precompose) => {
+                scene_overlays.push(CpuSceneOverlay::Vector {
+                    nodes: vec![SceneNode::Precompose(precompose.clone())],
+                });
+                pending_shadow = None;
+            }
+            SceneNode::Layer(layer) => {
+                scene_overlays.push(CpuSceneOverlay::Vector {
+                    nodes: vec![SceneNode::Layer(layer.clone())],
                 });
                 pending_shadow = None;
             }
@@ -5201,11 +8283,13 @@ fn collect_gpu_scene_commands(
                     collect_gpu_scene_commands(
                         &camera.children,
                         transform.mul(camera_transform),
+                        deform,
                         opacity,
                         time_norm,
                         time_sec,
                         canvas_size,
                         gradient_defs,
+                        palette_defs,
                         primitives,
                         text_requests,
                         scene_overlays,
@@ -5218,23 +8302,19 @@ fn collect_gpu_scene_commands(
                     * inherited_opacity)
                     .clamp(0.0, 1.0);
                 if opacity > 0.0001 {
-                    let x = eval_scene_number(&character.x, time_norm, time_sec)?;
-                    let y = eval_scene_number(&character.y, time_norm, time_sec)?;
-                    let rotation = eval_scene_number(&character.rotation, time_norm, time_sec)?;
-                    let scale = eval_scene_number(&character.scale, time_norm, time_sec)?
-                        .clamp(0.001, 64.0);
-                    let character_transform = transform
-                        .mul(Affine2::translate(x, y))
-                        .mul(Affine2::rotate_deg(rotation))
-                        .mul(Affine2::scale(scale));
+                    let character_transform = transform.mul(scene_character_local_transform(
+                        character, time_norm, time_sec,
+                    )?);
                     collect_gpu_scene_commands(
                         &character.children,
                         character_transform,
+                        deform,
                         opacity,
                         time_norm,
                         time_sec,
                         canvas_size,
                         gradient_defs,
+                        palette_defs,
                         primitives,
                         text_requests,
                         scene_overlays,
@@ -5251,21 +8331,95 @@ fn collect_gpu_scene_commands(
 }
 
 fn rect_requires_cpu_overlay(rect: &RectNode) -> bool {
-    !is_normal_blend(&rect.blend)
+    !is_gpu_native_blend(&rect.blend)
 }
 
 fn circle_requires_cpu_overlay(circle: &CircleNode) -> bool {
-    !is_normal_blend(&circle.blend)
+    !is_gpu_native_blend(&circle.blend)
 }
 
 fn line_requires_cpu_overlay(line: &LineNode) -> bool {
-    !is_normal_blend(&line.blend) || !is_default_line_cap(&line.line_cap)
+    !is_gpu_native_blend(&line.blend) || !is_default_line_cap(&line.line_cap)
 }
 
 fn polyline_requires_cpu_overlay(polyline: &PolylineNode) -> bool {
-    !is_normal_blend(&polyline.blend)
+    !is_gpu_native_blend(&polyline.blend)
         || !is_default_line_cap(&polyline.line_cap)
         || !is_default_line_join(&polyline.line_join)
+}
+
+fn push_gpu_pixel_grid_commands(
+    grid: &PixelGridNode,
+    transform: Affine2,
+    inherited_opacity: f32,
+    time_norm: f32,
+    time_sec: f32,
+    palette_defs: &HashMap<String, PaletteNode>,
+    primitives: &mut Vec<GpuScenePrimitive>,
+) -> Result<(), MotionLoomSceneRenderError> {
+    let opacity = (eval_scene_number(&grid.opacity, time_norm, time_sec)? * inherited_opacity)
+        .clamp(0.0, 1.0);
+    if opacity <= 0.0001 {
+        return Ok(());
+    }
+    let pixel_size = eval_scene_number(&grid.pixel_size, time_norm, time_sec)?.max(0.0);
+    if pixel_size <= 0.0001 {
+        return Ok(());
+    }
+    let x = eval_scene_number(&grid.x, time_norm, time_sec)?;
+    let y = eval_scene_number(&grid.y, time_norm, time_sec)?;
+    let blend = parse_scene_blend(&grid.blend)?;
+    let palette = palette_defs.get(&grid.palette).ok_or_else(|| {
+        MotionLoomSceneRenderError::InvalidPaint {
+            value: grid.palette.clone(),
+            message: format!("PixelGrid palette not found: {}", grid.palette),
+        }
+    })?;
+
+    for (row, line) in grid.data.lines().enumerate() {
+        for (col, ch) in line.chars().enumerate() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            let key = ch.to_string();
+            let Some(color_def) = palette.colors.iter().find(|color| color.key == key) else {
+                return Err(MotionLoomSceneRenderError::InvalidPaint {
+                    value: key,
+                    message: format!(
+                        "PixelGrid{} references color key not found in palette '{}'",
+                        id_suffix(grid.id.as_deref()),
+                        grid.palette
+                    ),
+                });
+            };
+            let color = parse_color(&color_def.value)?;
+            if color[3] == 0 {
+                continue;
+            }
+            primitives.push(GpuScenePrimitive {
+                kind: GPU_SHAPE_RECT_FILL,
+                transform,
+                shape: [
+                    x + col as f32 * pixel_size,
+                    y + row as f32 * pixel_size,
+                    pixel_size,
+                    pixel_size,
+                ],
+                radius: 0.0,
+                stroke_width: 0.0,
+                blur: 0.0,
+                color,
+                opacity,
+                blend,
+                gradient: None,
+                line_t0: 0.0,
+                line_t1: 1.0,
+                taper_start: 0.0,
+                taper_end: 0.0,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn path_requires_cpu_overlay(path: &PathNode) -> bool {
@@ -5273,7 +8427,7 @@ fn path_requires_cpu_overlay(path: &PathNode) -> bool {
         .fill
         .as_deref()
         .is_some_and(|fill| !is_none_paint(fill));
-    !is_normal_blend(&path.blend)
+    !is_gpu_native_blend(&path.blend)
         || !is_default_line_cap(&path.line_cap)
         || !is_default_line_join(&path.line_join)
         || (is_none_paint(&path.stroke) && !has_visible_fill)
@@ -5347,9 +8501,33 @@ fn subpaths_bounds(subpaths: &[Vec<Point2>]) -> Option<PaintBounds> {
     bounds
 }
 
+fn rect_polygon(x: f32, y: f32, width: f32, height: f32) -> Vec<Point2> {
+    vec![
+        Point2::new(x, y),
+        Point2::new(x + width, y),
+        Point2::new(x + width, y + height),
+        Point2::new(x, y + height),
+        Point2::new(x, y),
+    ]
+}
+
+fn circle_polygon(x: f32, y: f32, radius: f32) -> Vec<Point2> {
+    if radius <= 0.0001 {
+        return Vec::new();
+    }
+    let steps = 48usize;
+    let mut points = Vec::with_capacity(steps + 1);
+    for ix in 0..=steps {
+        let t = ix as f32 / steps as f32 * std::f32::consts::TAU;
+        points.push(Point2::new(x + t.cos() * radius, y + t.sin() * radius));
+    }
+    points
+}
+
 fn push_gpu_rect_commands(
     rect: &RectNode,
     transform: Affine2,
+    deform: Option<&EvaluatedDeformGrid>,
     shadow: Option<EvaluatedShadow>,
     inherited_opacity: f32,
     time_norm: f32,
@@ -5367,9 +8545,67 @@ fn push_gpu_rect_commands(
     let width = eval_scene_number(&rect.width, time_norm, time_sec)?.max(0.0);
     let height = eval_scene_number(&rect.height, time_norm, time_sec)?.max(0.0);
     let radius = eval_scene_number(&rect.radius, time_norm, time_sec)?.max(0.0);
-    let rotation = eval_scene_number(&rect.rotation, time_norm, time_sec)?;
-    let shape_transform = transform.mul(Affine2::rotate_deg(rotation));
+    let shape_transform = transform.mul(scene_rect_local_transform(rect, time_norm, time_sec)?);
     let paint_bounds = PaintBounds::new(x, y, x + width, y + height);
+    let fill_blend = parse_scene_blend(&rect.blend)?;
+
+    if let Some(deform) = deform {
+        if let Some(shadow) = shadow {
+            let shadow_subpaths = vec![rect_polygon(x + shadow.x, y + shadow.y, width, height)];
+            let shadow_subpaths =
+                transform_and_deform_subpaths(&shadow_subpaths, shape_transform, deform);
+            push_gpu_filled_path_triangles(
+                primitives,
+                Affine2::identity(),
+                &shadow_subpaths,
+                shadow.color,
+                1.0,
+                None,
+            );
+        }
+
+        let subpaths = vec![rect_polygon(x, y, width, height)];
+        let subpaths = transform_and_deform_subpaths(&subpaths, shape_transform, deform);
+        let warped_bounds =
+            subpaths_bounds(&subpaths).unwrap_or_else(|| PaintBounds::new(0.0, 0.0, 1.0, 1.0));
+        let (color, gradient) = resolve_gpu_scene_paint(&rect.color, gradient_defs, warped_bounds)?;
+        push_gpu_filled_path_triangles_with_blend(
+            primitives,
+            Affine2::identity(),
+            &subpaths,
+            color,
+            opacity,
+            gradient,
+            fill_blend,
+        );
+
+        if let Some(stroke_value) = rect
+            .stroke
+            .as_deref()
+            .filter(|stroke| !is_none_paint(stroke))
+        {
+            let stroke_width = eval_scene_number(&rect.stroke_width, time_norm, time_sec)?.max(0.0)
+                * affine_uniform_scale(shape_transform);
+            if stroke_width > 0.0 {
+                let (stroke, gradient) =
+                    resolve_gpu_scene_paint(stroke_value, gradient_defs, warped_bounds)?;
+                push_gpu_stroke_segments(
+                    primitives,
+                    Affine2::identity(),
+                    &subpaths,
+                    stroke_width,
+                    stroke,
+                    opacity,
+                    gradient,
+                    (0.0, 1.0),
+                    StrokeStyle::default(),
+                    fill_blend,
+                );
+            }
+        }
+        let _ = radius;
+        return Ok(());
+    }
 
     if let Some(shadow) = shadow {
         primitives.push(GpuScenePrimitive {
@@ -5381,6 +8617,7 @@ fn push_gpu_rect_commands(
             blur: shadow.blur,
             color: shadow.color,
             opacity: 1.0,
+            blend: SceneBlendMode::Normal,
             gradient: None,
             line_t0: 0.0,
             line_t1: 1.0,
@@ -5399,6 +8636,7 @@ fn push_gpu_rect_commands(
         blur: 0.0,
         color,
         opacity,
+        blend: fill_blend,
         gradient,
         line_t0: 0.0,
         line_t1: 1.0,
@@ -5424,6 +8662,7 @@ fn push_gpu_rect_commands(
                 blur: 0.0,
                 color: stroke,
                 opacity,
+                blend: SceneBlendMode::Normal,
                 gradient,
                 line_t0: 0.0,
                 line_t1: 1.0,
@@ -5438,6 +8677,7 @@ fn push_gpu_rect_commands(
 fn push_gpu_circle_commands(
     circle: &CircleNode,
     transform: Affine2,
+    deform: Option<&EvaluatedDeformGrid>,
     shadow: Option<EvaluatedShadow>,
     inherited_opacity: f32,
     time_norm: f32,
@@ -5453,18 +8693,80 @@ fn push_gpu_circle_commands(
     let x = eval_scene_number(&circle.x, time_norm, time_sec)?;
     let y = eval_scene_number(&circle.y, time_norm, time_sec)?;
     let radius = eval_scene_number(&circle.radius, time_norm, time_sec)?.max(0.0);
+    let shape_transform = transform.mul(scene_circle_local_transform(circle, time_norm, time_sec)?);
     let paint_bounds = PaintBounds::new(x - radius, y - radius, x + radius, y + radius);
+    let blend = parse_scene_blend(&circle.blend)?;
+
+    if let Some(deform) = deform {
+        if let Some(shadow) = shadow {
+            let shadow_subpaths = vec![circle_polygon(x + shadow.x, y + shadow.y, radius)];
+            let shadow_subpaths =
+                transform_and_deform_subpaths(&shadow_subpaths, shape_transform, deform);
+            push_gpu_filled_path_triangles(
+                primitives,
+                Affine2::identity(),
+                &shadow_subpaths,
+                shadow.color,
+                1.0,
+                None,
+            );
+        }
+
+        let subpaths = vec![circle_polygon(x, y, radius)];
+        let subpaths = transform_and_deform_subpaths(&subpaths, shape_transform, deform);
+        let warped_bounds =
+            subpaths_bounds(&subpaths).unwrap_or_else(|| PaintBounds::new(0.0, 0.0, 1.0, 1.0));
+        let (color, gradient) =
+            resolve_gpu_scene_paint(&circle.color, gradient_defs, warped_bounds)?;
+        push_gpu_filled_path_triangles_with_blend(
+            primitives,
+            Affine2::identity(),
+            &subpaths,
+            color,
+            opacity,
+            gradient,
+            blend,
+        );
+
+        if let Some(stroke_value) = circle
+            .stroke
+            .as_deref()
+            .filter(|stroke| !is_none_paint(stroke))
+        {
+            let stroke_width = eval_scene_number(&circle.stroke_width, time_norm, time_sec)?
+                .max(0.0)
+                * affine_uniform_scale(shape_transform);
+            if stroke_width > 0.0 {
+                let (stroke, gradient) =
+                    resolve_gpu_scene_paint(stroke_value, gradient_defs, warped_bounds)?;
+                push_gpu_stroke_segments(
+                    primitives,
+                    Affine2::identity(),
+                    &subpaths,
+                    stroke_width,
+                    stroke,
+                    opacity,
+                    gradient,
+                    (0.0, 1.0),
+                    StrokeStyle::default(),
+                    blend,
+                );
+            }
+        }
+        return Ok(());
+    }
 
     if let Some(shadow) = shadow {
         primitives.push(GpuScenePrimitive {
             kind: GPU_SHAPE_CIRCLE_SHADOW,
-            transform,
+            transform: shape_transform,
             shape: [x + shadow.x, y + shadow.y, radius, 0.0],
             radius: 0.0,
             stroke_width: 0.0,
             blur: shadow.blur,
             color: shadow.color,
             opacity: 1.0,
+            blend: SceneBlendMode::Normal,
             gradient: None,
             line_t0: 0.0,
             line_t1: 1.0,
@@ -5476,13 +8778,14 @@ fn push_gpu_circle_commands(
     let (color, gradient) = resolve_gpu_scene_paint(&circle.color, gradient_defs, paint_bounds)?;
     primitives.push(GpuScenePrimitive {
         kind: GPU_SHAPE_CIRCLE_FILL,
-        transform,
+        transform: shape_transform,
         shape: [x, y, radius, 0.0],
         radius: 0.0,
         stroke_width: 0.0,
         blur: 0.0,
         color,
         opacity,
+        blend,
         gradient,
         line_t0: 0.0,
         line_t1: 1.0,
@@ -5501,13 +8804,14 @@ fn push_gpu_circle_commands(
                 resolve_gpu_scene_paint(stroke_value, gradient_defs, paint_bounds)?;
             primitives.push(GpuScenePrimitive {
                 kind: GPU_SHAPE_CIRCLE_STROKE,
-                transform,
+                transform: shape_transform,
                 shape: [x, y, radius, 0.0],
                 radius: 0.0,
                 stroke_width,
                 blur: 0.0,
                 color: stroke,
                 opacity,
+                blend,
                 gradient,
                 line_t0: 0.0,
                 line_t1: 1.0,
@@ -5522,6 +8826,7 @@ fn push_gpu_circle_commands(
 fn push_gpu_line_command(
     line: &LineNode,
     transform: Affine2,
+    deform: Option<&EvaluatedDeformGrid>,
     inherited_opacity: f32,
     time_norm: f32,
     time_sec: f32,
@@ -5538,19 +8843,44 @@ fn push_gpu_line_command(
     let y1 = eval_scene_number(&line.y1, time_norm, time_sec)?;
     let x2 = eval_scene_number(&line.x2, time_norm, time_sec)?;
     let y2 = eval_scene_number(&line.y2, time_norm, time_sec)?;
+    let transform = transform.mul(scene_line_local_transform(line, time_norm, time_sec)?);
     let width = eval_scene_number(&line.width, time_norm, time_sec)?.max(0.0);
     if width <= 0.0001 {
         return Ok(());
     }
+    let blend = parse_scene_blend(&line.blend)?;
 
-    let paint_bounds = PaintBounds::new(x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2));
+    let p0 = transform_and_deform_point(transform, Point2::new(x1, y1), deform);
+    let p1 = transform_and_deform_point(transform, Point2::new(x2, y2), deform);
+    let (paint_bounds, primitive_transform, p0, p1, width) = if deform.is_some() {
+        (
+            PaintBounds::new(
+                p0.x.min(p1.x),
+                p0.y.min(p1.y),
+                p0.x.max(p1.x),
+                p0.y.max(p1.y),
+            ),
+            Affine2::identity(),
+            p0,
+            p1,
+            width * affine_uniform_scale(transform),
+        )
+    } else {
+        (
+            PaintBounds::new(x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2)),
+            transform,
+            Point2::new(x1, y1),
+            Point2::new(x2, y2),
+            width,
+        )
+    };
     let (color, gradient) = resolve_gpu_scene_paint(&line.color, gradient_defs, paint_bounds)?;
     let style = eval_line_stroke_style(line, time_norm, time_sec)?;
     push_gpu_styled_line_primitives(
         primitives,
-        transform,
-        Point2::new(x1, y1),
-        Point2::new(x2, y2),
+        primitive_transform,
+        p0,
+        p1,
         width,
         color,
         opacity,
@@ -5558,6 +8888,7 @@ fn push_gpu_line_command(
         0.0,
         1.0,
         style,
+        blend,
     );
     Ok(())
 }
@@ -5565,6 +8896,7 @@ fn push_gpu_line_command(
 fn push_gpu_polyline_commands(
     polyline: &PolylineNode,
     transform: Affine2,
+    deform: Option<&EvaluatedDeformGrid>,
     inherited_opacity: f32,
     time_norm: f32,
     time_sec: f32,
@@ -5581,6 +8913,22 @@ fn push_gpu_polyline_commands(
         return Ok(());
     }
     let points = parse_polyline_points(&polyline.points)?;
+    let transform = transform.mul(scene_polyline_local_transform(
+        polyline, time_norm, time_sec,
+    )?);
+    let blend = parse_scene_blend(&polyline.blend)?;
+    let (points, primitive_transform, width) = if let Some(deform) = deform {
+        (
+            points
+                .iter()
+                .map(|point| transform_and_deform_point(transform, *point, Some(deform)))
+                .collect::<Vec<_>>(),
+            Affine2::identity(),
+            width * affine_uniform_scale(transform),
+        )
+    } else {
+        (points, transform, width)
+    };
     let trim = evaluate_trim(
         &polyline.trim_start,
         &polyline.trim_end,
@@ -5593,7 +8941,7 @@ fn push_gpu_polyline_commands(
     let style = eval_polyline_stroke_style(polyline, time_norm, time_sec)?;
     push_gpu_stroke_segments(
         primitives,
-        transform,
+        primitive_transform,
         &[points],
         width,
         color,
@@ -5601,6 +8949,7 @@ fn push_gpu_polyline_commands(
         gradient,
         trim,
         style,
+        blend,
     );
     Ok(())
 }
@@ -5608,6 +8957,7 @@ fn push_gpu_polyline_commands(
 fn push_gpu_path_commands(
     path: &PathNode,
     transform: Affine2,
+    deform: Option<&EvaluatedDeformGrid>,
     inherited_opacity: f32,
     time_norm: f32,
     time_sec: f32,
@@ -5619,21 +8969,51 @@ fn push_gpu_path_commands(
     if opacity <= 0.0001 {
         return Ok(());
     }
-    let subpaths = parse_path_subpaths(&path.d)?;
+    let path_d = eval_path_d(&path.d, time_norm, time_sec)?;
+    let transform = transform.mul(scene_path_local_transform(path, time_norm, time_sec)?);
+    let blend = parse_scene_blend(&path.blend)?;
+    let subpaths = parse_path_subpaths(path_d.as_ref())?;
+    let (subpaths, primitive_transform, stroke_width_scale) = if let Some(deform) = deform {
+        (
+            transform_and_deform_subpaths(&subpaths, transform, deform),
+            Affine2::identity(),
+            affine_uniform_scale(transform),
+        )
+    } else {
+        (subpaths, transform, 1.0)
+    };
     let paint_bounds =
         subpaths_bounds(&subpaths).unwrap_or_else(|| PaintBounds::new(0.0, 0.0, 1.0, 1.0));
     if let Some(fill) = path.fill.as_deref().filter(|fill| !is_none_paint(fill)) {
         let (color, gradient) = resolve_gpu_scene_paint(fill, gradient_defs, paint_bounds)?;
-        push_gpu_filled_path_triangles(primitives, transform, &subpaths, color, opacity, gradient);
+        push_gpu_filled_path_triangles_with_blend(
+            primitives,
+            primitive_transform,
+            &subpaths,
+            color,
+            opacity,
+            gradient,
+            blend,
+        );
     }
 
-    let width = eval_scene_number(&path.stroke_width, time_norm, time_sec)?.max(0.0);
+    let width =
+        eval_scene_number(&path.stroke_width, time_norm, time_sec)?.max(0.0) * stroke_width_scale;
     if width > 0.0001 && !is_none_paint(&path.stroke) {
         let trim = evaluate_trim(&path.trim_start, &path.trim_end, time_norm, time_sec)?;
         let (color, gradient) = resolve_gpu_scene_paint(&path.stroke, gradient_defs, paint_bounds)?;
         let style = eval_path_stroke_style(path, time_norm, time_sec)?;
         push_gpu_stroke_segments(
-            primitives, transform, &subpaths, width, color, opacity, gradient, trim, style,
+            primitives,
+            primitive_transform,
+            &subpaths,
+            width,
+            color,
+            opacity,
+            gradient,
+            trim,
+            style,
+            blend,
         );
     }
     Ok(())
@@ -5647,6 +9027,26 @@ fn push_gpu_filled_path_triangles(
     opacity: f32,
     gradient: Option<GpuSceneGradientPaint>,
 ) {
+    push_gpu_filled_path_triangles_with_blend(
+        primitives,
+        transform,
+        subpaths,
+        color,
+        opacity,
+        gradient,
+        SceneBlendMode::Normal,
+    );
+}
+
+fn push_gpu_filled_path_triangles_with_blend(
+    primitives: &mut Vec<GpuScenePrimitive>,
+    transform: Affine2,
+    subpaths: &[Vec<Point2>],
+    color: [u8; 4],
+    opacity: f32,
+    gradient: Option<GpuSceneGradientPaint>,
+    blend: SceneBlendMode,
+) {
     for subpath in subpaths {
         for [a, b, c] in triangulate_polygon(subpath) {
             primitives.push(GpuScenePrimitive {
@@ -5658,6 +9058,7 @@ fn push_gpu_filled_path_triangles(
                 blur: 0.0,
                 color,
                 opacity,
+                blend,
                 gradient: gradient.clone(),
                 line_t0: 0.0,
                 line_t1: 1.0,
@@ -5803,6 +9204,7 @@ fn push_gpu_styled_line_primitives(
     line_t0: f32,
     line_t1: f32,
     style: StrokeStyle,
+    blend: SceneBlendMode,
 ) {
     let copies = stroke_texture_copy_count(style);
     for copy_ix in 0..copies {
@@ -5823,6 +9225,7 @@ fn push_gpu_styled_line_primitives(
                 line_t0,
                 line_t1,
                 style,
+                blend,
             );
         } else {
             push_gpu_line_primitive(
@@ -5838,11 +9241,12 @@ fn push_gpu_styled_line_primitives(
                 line_t1,
                 style.taper_start,
                 style.taper_end,
+                blend,
             );
         }
     }
     push_gpu_stroke_overlay_primitives(
-        primitives, transform, p0, p1, width, color, opacity, line_t0, line_t1, style,
+        primitives, transform, p0, p1, width, color, opacity, line_t0, line_t1, style, blend,
     );
 }
 
@@ -5860,6 +9264,7 @@ fn push_gpu_line_primitive(
     line_t1: f32,
     taper_start: f32,
     taper_end: f32,
+    blend: SceneBlendMode,
 ) {
     primitives.push(GpuScenePrimitive {
         kind: GPU_SHAPE_LINE,
@@ -5870,6 +9275,7 @@ fn push_gpu_line_primitive(
         blur: 0.0,
         color,
         opacity: opacity.clamp(0.0, 1.0),
+        blend,
         gradient,
         line_t0,
         line_t1,
@@ -5891,6 +9297,7 @@ fn push_gpu_pressure_line_primitives(
     line_t0: f32,
     line_t1: f32,
     style: StrokeStyle,
+    blend: SceneBlendMode,
 ) {
     let len = point_distance(p0, p1);
     if len <= 0.0001 {
@@ -5916,6 +9323,7 @@ fn push_gpu_pressure_line_primitives(
             1.0,
             0.0,
             0.0,
+            blend,
         );
     }
 }
@@ -5932,18 +9340,19 @@ fn push_gpu_stroke_overlay_primitives(
     line_t0: f32,
     line_t1: f32,
     style: StrokeStyle,
+    blend: SceneBlendMode,
 ) {
     if width <= 0.0 || opacity <= 0.0 {
         return;
     }
     if style.texture_strength > 0.001 {
         push_gpu_stroke_stamp_primitives(
-            primitives, transform, p0, p1, width, color, opacity, line_t0, line_t1, style,
+            primitives, transform, p0, p1, width, color, opacity, line_t0, line_t1, style, blend,
         );
     }
     if style.bristles > 0 {
         push_gpu_stroke_bristle_primitives(
-            primitives, transform, p0, p1, width, color, opacity, line_t0, line_t1, style,
+            primitives, transform, p0, p1, width, color, opacity, line_t0, line_t1, style, blend,
         );
     }
 }
@@ -5960,6 +9369,7 @@ fn push_gpu_stroke_stamp_primitives(
     line_t0: f32,
     line_t1: f32,
     style: StrokeStyle,
+    blend: SceneBlendMode,
 ) {
     let len = point_distance(p0, p1);
     if len <= 0.0001 {
@@ -6018,6 +9428,7 @@ fn push_gpu_stroke_stamp_primitives(
             blur: 0.0,
             color,
             opacity: (opacity * strength * alpha_scale).clamp(0.0, 1.0),
+            blend,
             gradient: None,
             line_t0: 0.0,
             line_t1: 1.0,
@@ -6039,6 +9450,7 @@ fn push_gpu_stroke_bristle_primitives(
     line_t0: f32,
     line_t1: f32,
     style: StrokeStyle,
+    blend: SceneBlendMode,
 ) {
     let len = point_distance(p0, p1);
     if len <= 0.0001 {
@@ -6086,6 +9498,7 @@ fn push_gpu_stroke_bristle_primitives(
             1.0,
             0.0,
             0.0,
+            blend,
         );
     }
 }
@@ -6100,6 +9513,7 @@ fn push_gpu_stroke_segments(
     gradient: Option<GpuSceneGradientPaint>,
     trim: (f32, f32),
     style: StrokeStyle,
+    blend: SceneBlendMode,
 ) {
     for segment in trimmed_polyline_segments_with_progress(subpaths, trim) {
         push_gpu_styled_line_primitives(
@@ -6114,6 +9528,7 @@ fn push_gpu_stroke_segments(
             segment.t0,
             segment.t1,
             style,
+            blend,
         );
     }
 }
@@ -6383,7 +9798,7 @@ fn batch_shape_primitive_values(
     let mut values = [0.0_f32; 84];
     values[..28].copy_from_slice(&[
         primitive.kind,
-        0.0,
+        primitive.blend.gpu_code(),
         0.0,
         0.0,
         bounds_x as f32,
@@ -6480,7 +9895,8 @@ fn texture_layer_bounds(
     Some((x0, y0, x1 - x0, y1 - y0))
 }
 
-fn affine_texture_uniform(
+#[allow(clippy::too_many_arguments)]
+fn matte_texture_uniform(
     layer: &GpuSceneTextureLayer,
     canvas_w: u32,
     canvas_h: u32,
@@ -6488,6 +9904,12 @@ fn affine_texture_uniform(
     bounds_y: u32,
     bounds_w: u32,
     bounds_h: u32,
+    image_w: u32,
+    image_h: u32,
+    matte_w: u32,
+    matte_h: u32,
+    matte_mode: GpuSceneMatteMode,
+    invert_matte: bool,
 ) -> Result<[u8; 96], MotionLoomSceneRenderError> {
     let inverse =
         layer
@@ -6496,23 +9918,28 @@ fn affine_texture_uniform(
             .ok_or_else(|| MotionLoomSceneRenderError::GpuRender {
                 message: "texture transform is not invertible".to_string(),
             })?;
+    let point_sample_source = texture_layer_is_pixel_aligned_1_to_1(layer.transform);
+    let point_sample_matte = point_sample_source
+        && matte_mode != GpuSceneMatteMode::None
+        && matte_w == image_w
+        && matte_h == image_h;
     let values = [
         canvas_w as f32,
         canvas_h as f32,
-        0.0,
-        0.0,
+        if point_sample_source { 1.0 } else { 0.0 },
+        if point_sample_matte { 1.0 } else { 0.0 },
         bounds_x as f32,
         bounds_y as f32,
         bounds_w as f32,
         bounds_h as f32,
-        layer.image.width() as f32,
-        layer.image.height() as f32,
-        0.0,
-        0.0,
+        image_w as f32,
+        image_h as f32,
+        matte_w as f32,
+        matte_h as f32,
         layer.opacity,
-        0.0,
-        0.0,
-        0.0,
+        layer.blend.gpu_code(),
+        matte_mode.gpu_code(),
+        if invert_matte { 1.0 } else { 0.0 },
         inverse.m00,
         inverse.m01,
         inverse.m02,
@@ -6527,6 +9954,16 @@ fn affine_texture_uniform(
         uniform[ix * 4..ix * 4 + 4].copy_from_slice(&value.to_ne_bytes());
     }
     Ok(uniform)
+}
+
+fn texture_layer_is_pixel_aligned_1_to_1(transform: Affine2) -> bool {
+    const EPS: f32 = 0.0001;
+    (transform.m00 - 1.0).abs() <= EPS
+        && transform.m01.abs() <= EPS
+        && transform.m10.abs() <= EPS
+        && (transform.m11 - 1.0).abs() <= EPS
+        && (transform.m02 - transform.m02.round()).abs() <= EPS
+        && (transform.m12 - transform.m12.round()).abs() <= EPS
 }
 
 fn post_blur_uniform(canvas_w: u32, canvas_h: u32, horizontal: bool, sigma: f32) -> [u8; 32] {
@@ -6563,18 +10000,21 @@ fn graph_has_rich_scene_tree(graph: &GraphScript) -> bool {
 fn scene_node_is_rich(node: &SceneNode) -> bool {
     match node {
         SceneNode::Defs(_)
-        | SceneNode::Solid(_)
+        | SceneNode::Palette(_)
         | SceneNode::Text(_)
         | SceneNode::Image(_)
         | SceneNode::Svg(_) => false,
         SceneNode::Rect(_)
+        | SceneNode::PixelGrid(_)
         | SceneNode::Circle(_)
         | SceneNode::Line(_)
         | SceneNode::Polyline(_)
         | SceneNode::Path(_)
         | SceneNode::FaceJaw(_)
         | SceneNode::Shadow(_)
-        | SceneNode::Mask(_) => true,
+        | SceneNode::Mask(_)
+        | SceneNode::Layer(_) => true,
+        SceneNode::Precompose(precompose) => precompose.children.iter().any(scene_node_is_rich),
         SceneNode::Group(group) => group.children.iter().any(scene_node_is_rich),
         SceneNode::Part(part) => part.children.iter().any(scene_node_is_rich),
         SceneNode::Repeat(repeat) => repeat.children.iter().any(scene_node_is_rich),
@@ -6613,6 +10053,18 @@ fn apply_scene_post_pass(
             .clamp(0.0, 64.0);
         return Ok(apply_box_blur_pass(input, sigma, false));
     }
+    if effect == "blur" || effect == "gaussian_blur" {
+        let sigma = pass_param_expr(pass, "sigma")
+            .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+            .transpose()?
+            .unwrap_or(2.0)
+            .clamp(0.0, 64.0);
+        let blurred = apply_box_blur_pass(input, sigma, true);
+        return Ok(apply_box_blur_pass(&blurred, sigma, false));
+    }
+    if effect == "hsla" || effect == "hsla_overlay" || effect == "color.hsla" {
+        return apply_hsla_pass(input, pass, time_norm, time_sec);
+    }
     if effect == "color_core" || effect == "color_blur" {
         let brightness = pass_param_expr(pass, "brightness")
             .map(|expr| eval_scene_number(expr, time_norm, time_sec))
@@ -6634,6 +10086,166 @@ fn apply_scene_post_pass(
         ));
     }
     Ok(input.clone())
+}
+
+fn apply_layer_effects(
+    input: &RgbaImage,
+    layer: &LayerNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+    let mut out = input.clone();
+    for effect in &layer.effects {
+        out = apply_layer_effect(&out, effect, time_norm, time_sec)?;
+    }
+    Ok(out)
+}
+
+fn apply_layer_effect(
+    input: &RgbaImage,
+    effect: &EffectNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+    let effect_type = effect.r#type.to_ascii_lowercase();
+    if effect_type == "blur" || effect_type == "gaussian_blur" {
+        let sigma = effect_param_expr(effect, "sigma")
+            .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+            .transpose()?
+            .unwrap_or(2.0)
+            .clamp(0.0, 64.0);
+        let blurred = apply_box_blur_pass(input, sigma, true);
+        return Ok(apply_box_blur_pass(&blurred, sigma, false));
+    }
+    if effect_type == "hsla" || effect_type == "hsla_overlay" || effect_type == "color.hsla" {
+        let hue = effect_param_expr(effect, "hue")
+            .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+            .transpose()?
+            .unwrap_or(0.0);
+        let saturation = effect_param_expr(effect, "saturation")
+            .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+            .transpose()?
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let lightness = effect_param_expr(effect, "lightness")
+            .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+            .transpose()?
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
+        let alpha = effect_param_expr(effect, "alpha")
+            .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+            .transpose()?
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        return Ok(apply_hsla_overlay(input, hue, saturation, lightness, alpha));
+    }
+    Ok(input.clone())
+}
+
+fn apply_over_pass(inputs: &[RgbaImage]) -> RgbaImage {
+    let Some(first) = inputs.first() else {
+        return RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 0]));
+    };
+    let mut out = first.clone();
+    for image in inputs.iter().skip(1) {
+        draw_rgba_image(&mut out, image, 0.0, 0.0, 1.0);
+    }
+    out
+}
+
+fn apply_hsla_pass(
+    input: &RgbaImage,
+    pass: &PassNode,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<RgbaImage, MotionLoomSceneRenderError> {
+    let hue = pass_param_expr(pass, "hue")
+        .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+        .transpose()?
+        .unwrap_or(0.0);
+    let saturation = pass_param_expr(pass, "saturation")
+        .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+        .transpose()?
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let lightness = pass_param_expr(pass, "lightness")
+        .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+        .transpose()?
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let alpha = pass_param_expr(pass, "alpha")
+        .map(|expr| eval_scene_number(expr, time_norm, time_sec))
+        .transpose()?
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    Ok(apply_hsla_overlay(input, hue, saturation, lightness, alpha))
+}
+
+fn apply_hsla_overlay(
+    input: &RgbaImage,
+    hue: f32,
+    saturation: f32,
+    lightness: f32,
+    alpha: f32,
+) -> RgbaImage {
+    let [or, og, ob] = hsl_to_rgb(hue, saturation, lightness);
+    let mut out = input.clone();
+    for pixel in out.pixels_mut() {
+        let base_a = pixel[3];
+        let r = pixel[0] as f32 / 255.0;
+        let g = pixel[1] as f32 / 255.0;
+        let b = pixel[2] as f32 / 255.0;
+        pixel[0] = (((r * (1.0 - alpha)) + (or * alpha)) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        pixel[1] = (((g * (1.0 - alpha)) + (og * alpha)) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        pixel[2] = (((b * (1.0 - alpha)) + (ob * alpha)) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        pixel[3] = base_a;
+    }
+    out
+}
+
+fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> [f32; 3] {
+    let h = (hue.rem_euclid(360.0)) / 360.0;
+    let s = saturation.clamp(0.0, 1.0);
+    let l = lightness.clamp(0.0, 1.0);
+    if s <= 0.0001 {
+        return [l, l, l];
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    [
+        hue_to_rgb_channel(p, q, h + 1.0 / 3.0),
+        hue_to_rgb_channel(p, q, h),
+        hue_to_rgb_channel(p, q, h - 1.0 / 3.0),
+    ]
+}
+
+fn hue_to_rgb_channel(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
 }
 
 fn scene_post_blur_params(
@@ -6664,6 +10276,14 @@ fn pass_param_expr<'a>(pass: &'a PassNode, key: &str) -> Option<&'a str> {
         .map(|param| param.value.as_str())
 }
 
+fn effect_param_expr<'a>(effect: &'a EffectNode, key: &str) -> Option<&'a str> {
+    effect
+        .params
+        .iter()
+        .find(|param| param.key.eq_ignore_ascii_case(key))
+        .map(|param| param.value.as_str())
+}
+
 fn apply_opacity_pass(input: &RgbaImage, opacity: f32) -> RgbaImage {
     let mut out = input.clone();
     for pixel in out.pixels_mut() {
@@ -6677,12 +10297,18 @@ fn apply_box_blur_pass(input: &RgbaImage, sigma: f32, horizontal: bool) -> RgbaI
         return input.clone();
     }
     let radius = sigma.ceil().clamp(1.0, 64.0) as i32;
+    let weights = (-radius..=radius)
+        .map(|offset| {
+            let distance = offset as f32;
+            (-(distance * distance) / (2.0 * sigma.max(0.001).powi(2))).exp()
+        })
+        .collect::<Vec<_>>();
+    let weight_sum = weights.iter().sum::<f32>().max(0.001);
     let mut out = RgbaImage::from_pixel(input.width(), input.height(), Rgba([0, 0, 0, 0]));
     for y in 0..input.height() {
         for x in 0..input.width() {
             let mut acc = [0.0_f32; 4];
-            let mut weight_sum = 0.0_f32;
-            for offset in -radius..=radius {
+            for (weight_ix, offset) in (-radius..=radius).enumerate() {
                 let (sx, sy) = if horizontal {
                     (
                         (x as i32 + offset).clamp(0, input.width() as i32 - 1) as u32,
@@ -6694,13 +10320,11 @@ fn apply_box_blur_pass(input: &RgbaImage, sigma: f32, horizontal: bool) -> RgbaI
                         (y as i32 + offset).clamp(0, input.height() as i32 - 1) as u32,
                     )
                 };
-                let distance = offset as f32;
-                let weight = (-(distance * distance) / (2.0 * sigma.max(0.001).powi(2))).exp();
+                let weight = weights[weight_ix];
                 let pixel = input.get_pixel(sx, sy);
                 for channel in 0..4 {
                     acc[channel] += pixel[channel] as f32 * weight;
                 }
-                weight_sum += weight;
             }
             let mut rgba = [0_u8; 4];
             for channel in 0..4 {
@@ -7331,6 +10955,16 @@ fn face_jaw_to_path_node(
     Ok(PathNode {
         id: face_jaw.id.clone(),
         brush: None,
+        x: "0".to_string(),
+        y: "0".to_string(),
+        rotation: "0".to_string(),
+        scale: "1".to_string(),
+        scale_x: "1".to_string(),
+        scale_y: "1".to_string(),
+        skew_x: "0".to_string(),
+        skew_y: "0".to_string(),
+        transform_origin_x: "0".to_string(),
+        transform_origin_y: "0".to_string(),
         d,
         stroke: face_jaw.stroke.clone(),
         fill: face_jaw.fill.clone(),
@@ -7772,22 +11406,6 @@ fn parse_polyline_points(points: &str) -> Result<Vec<Point2>, MotionLoomSceneRen
         .chunks_exact(2)
         .map(|pair| Point2::new(pair[0], pair[1]))
         .collect())
-}
-
-fn draw_trimmed_polylines_styled(
-    canvas: &mut RgbaImage,
-    subpaths: &[Vec<Point2>],
-    width: f32,
-    color: [u8; 4],
-    trim: (f32, f32),
-    style: StrokeStyle,
-) {
-    for segment in trimmed_polyline_segments_with_progress(subpaths, trim) {
-        draw_line_segment_styled(
-            canvas, segment.p0, segment.p1, width, color, style, segment.t0, segment.t1,
-        );
-    }
-    draw_polyline_joins(canvas, subpaths, width, color, trim, style);
 }
 
 fn draw_transformed_trimmed_polylines_styled(
@@ -8287,42 +11905,6 @@ fn draw_line_segment_butt(
     }
 }
 
-fn draw_polyline_joins(
-    canvas: &mut RgbaImage,
-    subpaths: &[Vec<Point2>],
-    width: f32,
-    color: [u8; 4],
-    trim: (f32, f32),
-    style: StrokeStyle,
-) {
-    if style.join != StrokeJoin::Round || color[3] == 0 || width <= 0.0 {
-        return;
-    }
-    let total = polyline_total_length(subpaths);
-    if total <= 0.0001 {
-        return;
-    }
-    let start_distance = trim.0 * total;
-    let end_distance = trim.1 * total;
-    let mut cursor = 0.0;
-    for subpath in subpaths {
-        for (ix, point) in subpath.iter().enumerate() {
-            if ix == 0 || ix + 1 == subpath.len() {
-                continue;
-            }
-            let distance = cursor + polyline_total_length(&[subpath[..=ix].to_vec()]);
-            if distance < start_distance || distance > end_distance {
-                continue;
-            }
-            let pressure = stroke_taper_pressure(distance / total, style);
-            if pressure > 0.0001 {
-                draw_circle(canvas, point.x, point.y, width * pressure * 0.5, color);
-            }
-        }
-        cursor += polyline_total_length(std::slice::from_ref(subpath));
-    }
-}
-
 fn draw_transformed_polyline_joins(
     canvas: &mut RgbaImage,
     subpaths: &[Vec<Point2>],
@@ -8545,11 +12127,18 @@ fn draw_line_segment(
 }
 
 fn apply_alpha_mask(layer: &mut RgbaImage, mask: &RgbaImage) {
+    apply_alpha_mask_with_invert(layer, mask, false);
+}
+
+fn apply_alpha_mask_with_invert(layer: &mut RgbaImage, mask: &RgbaImage, invert: bool) {
     let w = layer.width().min(mask.width());
     let h = layer.height().min(mask.height());
     for y in 0..h {
         for x in 0..w {
-            let alpha = mask.get_pixel(x, y)[3] as f32 / 255.0;
+            let mut alpha = mask.get_pixel(x, y)[3] as f32 / 255.0;
+            if invert {
+                alpha = 1.0 - alpha;
+            }
             let pixel = layer.get_pixel_mut(x, y);
             pixel[3] = ((pixel[3] as f32) * alpha).round().clamp(0.0, 255.0) as u8;
         }
@@ -8595,8 +12184,101 @@ fn composite_transformed_layer(
     }
 }
 
+fn composite_transformed_layer_anchored(
+    canvas: &mut RgbaImage,
+    layer: &RgbaImage,
+    x: f32,
+    y: f32,
+    rotation_deg: f32,
+    scale: f32,
+    anchor_x: f32,
+    anchor_y: f32,
+) {
+    let theta = rotation_deg.to_radians();
+    let (sin_t, cos_t) = theta.sin_cos();
+    for (src_x, src_y, pixel) in layer.enumerate_pixels() {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let sx = (src_x as f32 - anchor_x) * scale;
+        let sy = (src_y as f32 - anchor_y) * scale;
+        let dx = x + sx * cos_t - sy * sin_t;
+        let dy = y + sx * sin_t + sy * cos_t;
+        let dst_x = dx.round() as i32;
+        let dst_y = dy.round() as i32;
+        if dst_x < 0 || dst_y < 0 {
+            continue;
+        }
+        let (dst_x, dst_y) = (dst_x as u32, dst_y as u32);
+        if dst_x >= canvas.width() || dst_y >= canvas.height() {
+            continue;
+        }
+        blend_pixel(canvas, dst_x, dst_y, pixel.0);
+    }
+}
+
 fn composite_layer_affine(canvas: &mut RgbaImage, layer: &RgbaImage, transform: Affine2) {
     composite_layer_affine_clipped(canvas, layer, transform, None);
+}
+
+fn composite_layer_affine_blend(
+    canvas: &mut RgbaImage,
+    layer: &RgbaImage,
+    transform: Affine2,
+    opacity: f32,
+    blend: SceneBlendMode,
+) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0001 {
+        return;
+    }
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+    let w = layer.width() as f32;
+    let h = layer.height() as f32;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+
+    let corners = [
+        transform.transform_point(0.0, 0.0),
+        transform.transform_point(w - 1.0, 0.0),
+        transform.transform_point(w - 1.0, h - 1.0),
+        transform.transform_point(0.0, h - 1.0),
+    ];
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (x, y) in corners {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    let x0 = (min_x.floor() as i32 - 2).clamp(0, canvas.width() as i32);
+    let y0 = (min_y.floor() as i32 - 2).clamp(0, canvas.height() as i32);
+    let x1 = (max_x.ceil() as i32 + 2).clamp(0, canvas.width() as i32);
+    let y1 = (max_y.ceil() as i32 + 2).clamp(0, canvas.height() as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
+    for dst_y in y0..y1 {
+        for dst_x in x0..x1 {
+            let (src_x, src_y) = inverse.transform_point(dst_x as f32, dst_y as f32);
+            let Some(mut pixel) = sample_layer_bilinear(layer, src_x, src_y) else {
+                continue;
+            };
+            if pixel[3] == 0 {
+                continue;
+            }
+            pixel[3] = ((pixel[3] as f32) * opacity).round().clamp(0.0, 255.0) as u8;
+            blend_pixel_with_mode(canvas, dst_x as u32, dst_y as u32, pixel, blend);
+        }
+    }
 }
 
 fn composite_layer_affine_clipped(
@@ -8862,6 +12544,10 @@ fn rgba_image_from_pixmap(
     })
 }
 
+fn default_animation_asset_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/motionloom/world")
+}
+
 fn is_remote_image_source(src: &str) -> bool {
     url::Url::parse(src)
         .map(|url| matches!(url.scheme(), "http" | "https"))
@@ -8971,10 +12657,17 @@ fn gradient_ref_id(value: &str) -> Option<&str> {
     rest.strip_suffix(')')
 }
 
-fn is_normal_blend(value: &str) -> bool {
+fn is_gpu_native_blend(value: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "" | "normal" | "over" | "source-over"
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "" | "normal"
+            | "over"
+            | "source-over"
+            | "multiply"
+            | "screen"
+            | "add"
+            | "plus"
+            | "linear-dodge"
     )
 }
 
@@ -8989,6 +12682,20 @@ fn parse_scene_blend(value: &str) -> Result<SceneBlendMode, MotionLoomSceneRende
             message: format!("unsupported blend mode: {other}"),
         }),
     }
+}
+
+fn gpu_matte_mode(value: &str) -> GpuSceneMatteMode {
+    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "luma" | "luminance" => GpuSceneMatteMode::Luma,
+        _ => GpuSceneMatteMode::Alpha,
+    }
+}
+
+fn scene_mask_mode_inverts(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().replace('_', "-").as_str(),
+        "inverse" | "invert" | "inverted"
+    )
 }
 
 fn parse_paint(value: &str) -> Result<Option<[u8; 4]>, MotionLoomSceneRenderError> {
@@ -9344,12 +13051,447 @@ mod tests {
     }
 
     #[test]
+    fn scene_path_morph_interpolates_compatible_path_data() {
+        let d = r#"morph("0:M 0 0 L 10 0 L 10 10 Z", "2:M 0 0 L 20 10 L 20 20 Z")"#;
+        let interpolated = super::eval_path_d(d, 0.5, 1.0).unwrap().into_owned();
+
+        assert_eq!(interpolated, "M 0 0 L 15 5 L 15 15 Z");
+    }
+
+    #[test]
+    fn scene_renderer_draws_path_d_morph() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[64,48]}>
+  <Background color="#000000" />
+  <Scene id="morph_scene">
+    <Path id="morph_rect"
+          d={morph("0:M 4 4 L 18 4 L 18 20 L 4 20 Z", "1:M 4 4 L 42 4 L 42 20 L 4 20 Z")}
+          fill="#ff0000"
+          stroke="none"
+          opacity="1" />
+  </Scene>
+  <Present from="morph_scene" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+
+        let mut renderer = SceneFrameRenderer::new();
+        let rendered = renderer.render_frame(&graph, 15).expect("frame 15");
+        let inside = rendered.get_pixel(12, 10);
+        assert!(
+            inside[0] > 200,
+            "expected red morphed path pixel, got {inside:?}"
+        );
+    }
+
+    #[test]
+    fn scene_renderer_applies_group_mask_alpha() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[64,32]}>
+  <Background color="#000000" />
+  <Scene id="masked_scene">
+    <Mask id="left_half" shape="rect" x="0" y="0" width="32" height="32" />
+    <Group id="masked_red" mask="left_half">
+      <Rect x="0" y="0" width="64" height="32" color="#ff0000" />
+    </Group>
+  </Scene>
+  <Present from="masked_scene" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+        let mut renderer = SceneFrameRenderer::new();
+        let rendered = renderer.render_frame(&graph, 0).expect("frame 0");
+
+        let inside = rendered.get_pixel(8, 8);
+        let outside = rendered.get_pixel(48, 8);
+        assert!(inside[0] > 200, "expected masked red pixel, got {inside:?}");
+        assert!(
+            outside[0] < 30 && outside[1] < 30 && outside[2] < 30,
+            "expected outside mask to remain background, got {outside:?}"
+        );
+    }
+
+    #[test]
+    fn scene_renderer_applies_precompose_layer_luma_matte() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[64,32]}>
+  <Background color="#000000" />
+  <Scene id="matte_scene">
+    <Precompose id="green_source" size={[64,32]}>
+      <Rect x="0" y="0" width="64" height="32" color="#00ff00" />
+    </Precompose>
+    <Precompose id="luma_cut" size={[64,32]}>
+      <Rect x="0" y="0" width="32" height="32" color="#ffffff" />
+      <Rect x="32" y="0" width="32" height="32" color="#000000" />
+    </Precompose>
+    <Layer id="matted_green" source="green_source" matte="luma_cut" matteMode="luma" />
+  </Scene>
+  <Present from="matte_scene" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+        let mut renderer = SceneFrameRenderer::new();
+        let rendered = renderer.render_frame(&graph, 0).expect("frame 0");
+
+        let revealed = rendered.get_pixel(8, 8);
+        let hidden = rendered.get_pixel(48, 8);
+        assert!(
+            revealed[1] > 200,
+            "expected luma matte to reveal green pixel, got {revealed:?}"
+        );
+        assert!(
+            hidden[0] < 30 && hidden[1] < 30 && hidden[2] < 30,
+            "expected black luma matte to hide source, got {hidden:?}"
+        );
+    }
+
+    #[test]
+    fn scene_gpu_native_path_handles_mask_matte_precompose() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[64,32]}>
+  <Background color="#000000" />
+  <Scene id="gpu_native_matte">
+    <Mask id="left_mask" shape="rect" x="0" y="0" width="32" height="32" feather="1" />
+    <Precompose id="green_source" size={[64,32]}>
+      <Rect x="0" y="0" width="64" height="32" color="#00ff00" />
+    </Precompose>
+    <Precompose id="luma_cut" size={[64,32]}>
+      <Rect x="0" y="0" width="32" height="32" color="#ffffff" />
+      <Rect x="32" y="0" width="32" height="32" color="#000000" />
+    </Precompose>
+    <Layer id="matted_green" source="green_source" matte="luma_cut" matteMode="luma" />
+    <Group id="masked_blue" mask="left_mask">
+      <Rect x="0" y="0" width="64" height="32" color="#0000ff" opacity="0.35" />
+    </Group>
+  </Scene>
+  <Present from="gpu_native_matte" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+        let nodes = super::scene_nodes_for_present(&graph).expect("present scene");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Gpu);
+        let rendered = renderer
+            .try_render_gpu_scene_nodes_composited(
+                nodes,
+                graph.size,
+                graph.size,
+                super::Affine2::identity(),
+                0.0,
+                0.0,
+                Some([0, 0, 0, 255]),
+            )
+            .expect("native gpu render")
+            .expect("expected mask/matte/precompose native GPU path");
+
+        let revealed = rendered.get_pixel(8, 8);
+        let hidden = rendered.get_pixel(48, 8);
+        assert!(
+            revealed[1] > 150 || revealed[2] > 40,
+            "expected native GPU matte/mask to reveal left-side content, got {revealed:?}"
+        );
+        assert!(
+            hidden[1] < 80,
+            "expected luma matte to hide right-side green source, got {hidden:?}"
+        );
+    }
+
+    #[test]
+    fn scene_group_deform_grid_warps_layer_content() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[64,48]}>
+  <Background color="#000000" />
+  <Scene id="deform_scene">
+    <Group id="deformed"
+           deformGrid="2x2"
+           deformAmount="1"
+           gridFrom="10,10 30,10; 10,30 30,30"
+           gridTo="20,10 40,10; 20,30 40,30">
+      <Rect id="source_rect"
+            x="10"
+            y="10"
+            width="20"
+            height="20"
+            color="#ff0000"
+            opacity="1" />
+    </Group>
+  </Scene>
+  <Present from="deform_scene" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+
+        let mut renderer = SceneFrameRenderer::new();
+        let rendered = renderer.render_frame(&graph, 0).expect("frame 0");
+        let moved = rendered.get_pixel(25, 20);
+        let original = rendered.get_pixel(12, 20);
+        assert!(
+            moved[0] > 200,
+            "expected deformed red pixel at moved position, got {moved:?}"
+        );
+        assert!(
+            original[0] < 30,
+            "expected original source position to be transparent/black, got {original:?}"
+        );
+    }
+
+    #[test]
+    fn scene_gpu_group_deform_grid_warps_vector_primitives() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[64,48]}>
+  <Background color="#000000" />
+  <Scene id="deform_scene">
+    <Group id="deformed"
+           deformGrid="2x2"
+           deformAmount="1"
+           gridFrom="10,10 30,10; 10,30 30,30"
+           gridTo="20,10 40,10; 20,30 40,30">
+      <Path id="source_path"
+            d="M 10 10 L 30 10 L 30 30 L 10 30 Z"
+            fill="#ff0000"
+            stroke="none"
+            opacity="1" />
+    </Group>
+  </Scene>
+  <Present from="deform_scene" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Gpu);
+        let rendered = match renderer.render_frame(&graph, 0) {
+            Ok(rendered) => rendered,
+            Err(MotionLoomSceneRenderError::GpuRender { message }) => {
+                if message.contains("CPU overlays") {
+                    panic!("DeformGrid vector primitives must stay GPU-native: {message}");
+                }
+                eprintln!("Skipping GPU DeformGrid vector test: {message}");
+                return;
+            }
+            Err(err) => panic!("unexpected render error: {err}"),
+        };
+        let moved = rendered.get_pixel(25, 20);
+        let original = rendered.get_pixel(12, 20);
+        assert!(
+            moved[0] > 180,
+            "expected GPU-deformed red pixel at moved position, got {moved:?}"
+        );
+        assert!(
+            original[0] < 40,
+            "expected original source position to be transparent/black, got {original:?}"
+        );
+    }
+
+    #[test]
+    fn scene_renderer_draws_unified_scene_layer_graph() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="4s" size={[128,72]} renderSize={[128,72]}>
+  <Background color="#000000" />
+  <Scene id="hello_scene">
+    <Text id="hello_text"
+          value="hello"
+          x="center"
+          y="center"
+          fontSize="18"
+          color="#ffffff"
+          opacity={curve("0:1:linear, 4:1:linear")} />
+    <Circle id="accent_orb"
+            x="64"
+            y="36"
+            radius="18"
+            color="#3B82F6"
+            opacity="0.35" />
+  </Scene>
+  <Layer id="blue_mood_layer">
+    <Effect id="blue_hsla"
+            type="hsla"
+            hue="220"
+            saturation="0.22"
+            lightness="0.08"
+            alpha="0.32" />
+  </Layer>
+  <Tex id="scene_tex" from="hello_scene" fmt="rgba16f" />
+  <Tex id="blurred_scene" fmt="rgba16f" size={[128,72]} />
+  <Pass id="soft_blur"
+        effect="blur"
+        in={["scene_tex"]}
+        out={["blurred_scene"]}
+        params={{ sigma: "1.0" }} />
+  <Tex id="final" from="blue_mood_layer" input="blurred_scene" fmt="rgba16f" />
+  <Present from="final" />
+</Graph>
+"##,
+        )
+        .expect("graph parse");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Cpu);
+        let rendered = renderer.render_frame(&graph, 0).expect("frame");
+        assert!(
+            max_rgb(&rendered) > 20,
+            "expected visible unified scene/layer output"
+        );
+    }
+
+    #[test]
+    fn scene_gpu_renderer_uses_background_as_scene_resource_in_unified_graph() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[32,18]} renderSize={[32,18]}>
+  <Background color="#123456" />
+  <Scene id="marker">
+    <Circle x="16" y="9" radius="0" color="#ffffff" opacity="0" />
+  </Scene>
+  <Tex id="background_tex" from="scene" fmt="rgba16f" />
+  <Present from="background_tex" />
+</Graph>
+"##,
+        )
+        .expect("graph parse");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Gpu);
+        let rendered = renderer.render_frame(&graph, 0).expect("gpu frame");
+        assert_eq!(*rendered.get_pixel(1, 1), Rgba([0x12, 0x34, 0x56, 0xff]));
+    }
+
+    #[test]
+    fn scene_gpu_renderer_applies_graph_background_to_direct_present_scene() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={30} duration="1s" size={[32,18]} renderSize={[32,18]}>
+  <Background color="#f7f7f7" />
+  <Scene id="scene0">
+    <Circle x="16" y="9" radius="4" color="#000000" opacity="1" />
+  </Scene>
+  <Present from="scene0" />
+</Graph>
+"##,
+        )
+        .expect("graph parse");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Gpu);
+        let rendered = renderer.render_frame(&graph, 0).expect("gpu frame");
+        assert_eq!(*rendered.get_pixel(1, 1), Rgba([0xf7, 0xf7, 0xf7, 0xff]));
+        assert_eq!(*rendered.get_pixel(16, 9), Rgba([0x00, 0x00, 0x00, 0xff]));
+    }
+
+    #[test]
+    fn scene_renderer_applies_action_to_matching_character_part() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={60} duration="1s" size={[160,120]}>
+  <Background color="#ffffff" />
+
+  <Action id="raise_arm" skeleton="humanoid_front_v1" duration="1s">
+    <Pose t="0">
+      <Bone id="upper_arm_r" rotation="0" />
+    </Pose>
+    <Pose t="0.5">
+      <Bone id="upper_arm_r" rotation="-80" />
+    </Pose>
+    <Pose t="1">
+      <Bone id="upper_arm_r" rotation="0" />
+    </Pose>
+  </Action>
+
+  <Scene id="scene0">
+    <Character id="hero" rig="humanoid_front_v1" x="80" y="60">
+      <Part id="upper_arm_r" x="0" y="0">
+        <Path d="M 0 0 L 0 42"
+              stroke="#000000"
+              strokeWidth="8"
+              lineCap="round"
+              fill="none" />
+      </Part>
+    </Character>
+  </Scene>
+
+  <ApplyAction target="hero" action="raise_arm" at="0s" />
+  <Present from="scene0" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Cpu);
+        let at_rest = renderer.render_frame(&graph, 0).expect("frame 0");
+        let raised = renderer.render_frame(&graph, 30).expect("frame 30");
+        assert_ne!(
+            at_rest.as_raw(),
+            raised.as_raw(),
+            "action should change rendered pixels between poses"
+        );
+    }
+
+    #[test]
+    fn scene_renderer_applies_skeleton_parent_child_constraints() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={60} duration="1s" size={[180,180]}>
+  <Background color="#ffffff" />
+
+  <Skeleton id="humanoid_front_v1">
+    <Bone id="root" x="0" y="0" />
+    <Bone id="upper_arm_r" parent="root" x="0" y="0" />
+    <Bone id="forearm_r" parent="upper_arm_r" x="40" y="0" />
+  </Skeleton>
+
+  <Action id="bend" skeleton="humanoid_front_v1" duration="1s">
+    <Pose t="0">
+      <Bone id="upper_arm_r" rotation="0" />
+    </Pose>
+    <Pose t="0.5">
+      <Bone id="upper_arm_r" rotation="90" />
+    </Pose>
+    <Pose t="1">
+      <Bone id="upper_arm_r" rotation="0" />
+    </Pose>
+  </Action>
+
+  <Scene id="scene0">
+    <Character id="hero" rig="humanoid_front_v1" x="80" y="80">
+      <Part id="forearm_marker" attachTo="forearm_r">
+        <Circle x="0" y="0" radius="8" fill="#ff0000" />
+      </Part>
+    </Character>
+  </Scene>
+
+  <ApplyAction target="hero" action="bend" at="0s" />
+  <Present from="scene0" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Cpu);
+        let at_rest = renderer.render_frame(&graph, 0).expect("frame 0");
+        let bent = renderer.render_frame(&graph, 30).expect("frame 30");
+        let rest_pixel = at_rest.get_pixel(120, 80);
+        let bent_pixel = bent.get_pixel(80, 120);
+        assert!(
+            rest_pixel[0] > 180 && rest_pixel[1] < 90 && rest_pixel[2] < 90,
+            "expected red marker at parent-rest endpoint, got {rest_pixel:?}"
+        );
+        assert!(
+            bent_pixel[0] > 180 && bent_pixel[1] < 90 && bent_pixel[2] < 90,
+            "expected red marker to follow rotated parent endpoint, got {bent_pixel:?}"
+        );
+    }
+
+    #[test]
     fn scene_renderer_draws_scene_group_shapes_and_text() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[220,140]}>
+<Graph fps={60} duration="1s" size={[220,140]}>
+  <Background color="[1,1,1,1]" />
+
   <Scene id="scene0">
-    <Solid color="[1,1,1,1]" />
     <Group id="card" x="20" y="20" opacity="1">
       <Shadow x="0" y="10" blur="18" color="[0,0,0,0.24]" />
       <Rect width="100" height="58" radius="8" color="[0,0,1,1]" />
@@ -9381,9 +13523,10 @@ mod tests {
     fn scene_renderer_fits_render_size_into_output_size() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[100,100]} renderSize={[200,100]}>
+<Graph fps={60} duration="1s" size={[100,100]} renderSize={[200,100]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Circle x="50" y="50" radius="10" color="#ff0000" />
   </Scene>
   <Present from="scene0" />
@@ -9412,9 +13555,10 @@ mod tests {
     fn scene_renderer_draws_trimmed_polyline_and_path() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[160,90]}>
+<Graph fps={60} duration="1s" size={[160,90]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Polyline points="10,24 110,24"
               stroke="#2f83ff"
               strokeWidth="8"
@@ -9460,9 +13604,10 @@ mod tests {
     fn scene_renderer_draws_brush_part_path() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[120,80]}>
+<Graph fps={60} duration="1s" size={[120,80]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Defs>
       <Brush id="red_ink" stroke="#ff0000" strokeWidth="6" opacity="1" />
     </Defs>
@@ -9489,9 +13634,10 @@ mod tests {
     fn scene_renderer_draws_character_vector_nodes() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[120,90]}>
+<Graph fps={60} duration="1s" size={[120,90]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Character id="face" x="60" y="45" scale="1.5">
       <Path d="M -30 0 C -12 -20 12 -20 30 0"
             stroke="#ff77aa"
@@ -9524,9 +13670,10 @@ mod tests {
     fn scene_gpu_renderer_draws_character_overlay() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[100,80]}>
+<Graph fps={60} duration="1s" size={[100,80]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Character x="50" y="40">
       <Path d="M -24 0 L 24 0" stroke="#00ff00" strokeWidth="8" />
     </Character>
@@ -9557,9 +13704,10 @@ mod tests {
     fn scene_gpu_renderer_draws_filled_path_overlay() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[100,80]}>
+<Graph fps={60} duration="1s" size={[100,80]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Path d="M 20 20 L 70 20 L 70 60 L 20 60 Z"
           fill="#00ff00"
           stroke="none" />
@@ -9590,9 +13738,10 @@ mod tests {
     fn scene_gpu_renderer_draws_sketch_stroke_style() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[100,80]}>
+<Graph fps={60} duration="1s" size={[100,80]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Line x1="12" y1="40" x2="88" y2="40"
           width="8"
           color="#00ff00"
@@ -9631,9 +13780,10 @@ mod tests {
     fn scene_renderer_draws_filled_path_and_mask() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[120,90]}>
+<Graph fps={60} duration="1s" size={[120,90]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Path d="M 10 10 L 45 10 L 45 45 L 10 45 Z"
           fill="#00ff00"
           stroke="none" />
@@ -9670,9 +13820,10 @@ mod tests {
     fn scene_renderer_character_mask_clips_filled_path() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[120,90]}>
+<Graph fps={60} duration="1s" size={[120,90]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Character x="60" y="45">
       <Mask shape="circle" x="0" y="0" radius="18">
         <Path d="M -30 -30 L 30 -30 L 30 30 L -30 30 Z"
@@ -9705,9 +13856,10 @@ mod tests {
     fn scene_renderer_camera_centers_world_coordinate() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[100,80]}>
+<Graph fps={60} duration="1s" size={[100,80]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Camera x="100" y="40" zoom="1">
       <Circle x="100" y="40" radius="8" color="#00ff00" />
     </Camera>
@@ -9731,9 +13883,10 @@ mod tests {
     fn scene_renderer_camera_follow_maps_node_to_anchor() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[100,80]}>
+<Graph fps={60} duration="1s" size={[100,80]}>
+  <Background color="#000000" />
+
   <Scene id="scene0">
-    <Solid color="#000000" />
     <Camera mode="2d" follow="marker" anchorX="25%" anchorY="75%" zoom="1" worldBounds="0,0,200,160">
       <Circle id="marker" x="120" y="60" radius="8" color="#00ff00" />
     </Camera>
@@ -9757,9 +13910,9 @@ mod tests {
     fn scene_renderer_accepts_scene_tex_pass_present_pipeline() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[64,48]}>
+<Graph fps={60} duration="1s" size={[64,48]}>
   <Scene id="scene0">
-    <Solid color="[0,0,1,1]" />
+    <Rect x="0" y="0" width="64" height="48" color="#ff0000" />
   </Scene>
   <Tex id="src" fmt="rgba16f" from="scene:scene0" />
   <Tex id="out" fmt="rgba16f" size={[64,48]} />
@@ -9790,9 +13943,10 @@ mod tests {
     fn scene_gpu_renderer_draws_scene_group_shapes_and_text() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[220,140]}>
+<Graph fps={60} duration="1s" size={[220,140]}>
+  <Background color="[1,1,1,1]" />
+
   <Scene id="scene0">
-    <Solid color="[1,1,1,1]" />
     <Group id="card" x="20" y="20" opacity="1">
       <Shadow x="0" y="10" blur="18" color="[0,0,0,0.24]" />
       <Rect width="100" height="58" radius="8" color="[0,0,1,1]" />
@@ -9828,12 +13982,43 @@ mod tests {
     }
 
     #[test]
+    fn scene_gpu_renderer_draws_screen_blend_rect() {
+        let graph = parse_graph_script(
+            r##"
+<Graph fps={60} duration="1s" size={[96,64]}>
+  <Scene id="scene0">
+    <Rect x="0" y="0" width="96" height="64" color="#0000ff" />
+    <Rect x="20" y="12" width="56" height="40" color="#ff0000" opacity="0.5" blend="screen" />
+  </Scene>
+  <Present from="scene0" />
+</Graph>
+"##,
+        )
+        .expect("scene graph parse");
+        let mut renderer = SceneFrameRenderer::new_for_profile(SceneRenderProfile::Gpu);
+        let rendered = match renderer.render_frame(&graph, 0) {
+            Ok(rendered) => rendered,
+            Err(MotionLoomSceneRenderError::GpuRender { message }) => {
+                eprintln!("Skipping GPU screen blend rect test: {message}");
+                return;
+            }
+            Err(err) => panic!("unexpected render error: {err}"),
+        };
+        let pixel = rendered.get_pixel(48, 32);
+        assert!(
+            pixel[0] > 90 && pixel[2] > 200,
+            "expected screen-blended magenta/blue pixel, got {pixel:?}"
+        );
+    }
+
+    #[test]
     fn scene_gpu_renderer_batches_many_gradient_paths() {
         let mut script = String::from(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[240,160]}>
+<Graph fps={60} duration="1s" size={[240,160]}>
+  <Background color="#ffffff" />
+
   <Scene id="scene0">
-    <Solid color="#ffffff" />
     <Defs>
       <LinearGradient id="sclera_soft" x1="0" y1="0" x2="0" y2="1"
                       stops="0:#D3CEE6, 0.30:#F7F7F7, 0.70:#F7F7F7, 1:#ffffff" />
@@ -9902,9 +14087,10 @@ mod tests {
     fn scene_gpu_renderer_applies_scene_blur_post_pass() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[80,40]}>
+<Graph fps={60} duration="1s" size={[80,40]}>
+  <Background color="#ffffff" />
+
   <Scene id="scene0">
-    <Solid color="#ffffff" />
     <Rect x="35" y="10" width="10" height="20" color="#000000" />
   </Scene>
   <Tex id="src" fmt="rgba16f" from="scene0" />
@@ -9948,8 +14134,8 @@ mod tests {
     fn scene_text_opacity_fades_in_over_time() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="3s" size={[640,360]}>
-  <Solid color="#000000" />
+<Graph fps={60} duration="3s" size={[640,360]}>
+  <Background color="#000000" />
   <Text value="hello world"
         x="center"
         y="center"
@@ -9984,8 +14170,8 @@ mod tests {
 
         let graph = parse_graph_script(&format!(
             r##"
-<Graph scope="scene" fps={{60}} duration="1s" size={{[64,48]}}>
-  <Solid color="#000000" />
+<Graph fps={{60}} duration="1s" size={{[64,48]}}>
+  <Background color="#000000" />
   <Image src="{}"
          x="10"
          y="12"
@@ -10021,8 +14207,8 @@ mod tests {
 
         let graph = parse_graph_script(&format!(
             r##"
-<Graph scope="scene" fps={{60}} duration="1s" size={{[64,48]}}>
-  <Solid color="#000000" />
+<Graph fps={{60}} duration="1s" size={{[64,48]}}>
+  <Background color="#000000" />
   <Svg src="{}"
        x="10"
        y="12"
@@ -10051,8 +14237,8 @@ mod tests {
     fn scene_svg_data_uri_utf8_renders() {
         let graph = parse_graph_script(
             r##"
-<Graph scope="scene" fps={60} duration="1s" size={[64,48]}>
-  <Solid color="#000000" />
+<Graph fps={60} duration="1s" size={[64,48]}>
+  <Background color="#000000" />
   <Svg src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'><rect width='8' height='6' fill='%23ff0000'/></svg>"
        x="10"
        y="12"
@@ -10084,8 +14270,8 @@ mod tests {
 
         let graph = parse_graph_script(&format!(
             r##"
-<Graph scope="scene" fps={{60}} duration="1s" size={{[64,48]}}>
-  <Solid color="#000000" />
+<Graph fps={{60}} duration="1s" size={{[64,48]}}>
+  <Background color="#000000" />
   <Image src="{}"
          x="10"
          y="12"
@@ -10128,8 +14314,8 @@ mod tests {
 
         let graph = parse_graph_script(&format!(
             r##"
-<Graph scope="scene" fps={{60}} duration="1s" size={{[64,48]}}>
-  <Solid color="#000000" />
+<Graph fps={{60}} duration="1s" size={{[64,48]}}>
+  <Background color="#000000" />
   <Svg src="{}"
        x="10"
        y="12"
@@ -10173,8 +14359,8 @@ mod tests {
 
         let graph = parse_graph_script(&format!(
             r##"
-<Graph scope="scene" fps={{60}} duration="1s" size={{[64,48]}}>
-  <Solid color="#000000" />
+<Graph fps={{60}} duration="1s" size={{[64,48]}}>
+  <Background color="#000000" />
   <Image src="{}"
          x="10"
          y="12"
@@ -10225,8 +14411,8 @@ mod tests {
 
         let graph = parse_graph_script(&format!(
             r##"
-<Graph scope="scene" fps={{60}} duration="1s" size={{[64,48]}}>
-  <Solid color="#000000" />
+<Graph fps={{60}} duration="1s" size={{[64,48]}}>
+  <Background color="#000000" />
   <Image src="{}" x="4" y="10" scale="1.0" opacity="1.0" />
   <Image src="{}" x="24" y="10" scale="1.0" opacity="1.0" />
   <Present from="scene" />

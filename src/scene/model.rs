@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::dsl::{ImageNode, SolidNode, SvgNode, TextNode};
+use crate::dsl::{ImageNode, SvgNode, TextNode};
 
 fn default_scene_blend() -> String {
     "normal".to_string()
@@ -38,6 +38,14 @@ fn default_stroke_pressure_curve() -> String {
     "1".to_string()
 }
 
+fn default_scene_zero() -> String {
+    "0".to_string()
+}
+
+fn default_scene_one() -> String {
+    "1".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneRootNode {
@@ -50,7 +58,8 @@ pub struct SceneRootNode {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SceneNode {
     Defs(DefsNode),
-    Solid(SolidNode),
+    Palette(PaletteNode),
+    PixelGrid(PixelGridNode),
     Text(TextNode),
     Image(ImageNode),
     Svg(SvgNode),
@@ -65,6 +74,8 @@ pub enum SceneNode {
     Part(PartNode),
     Repeat(RepeatNode),
     Mask(MaskNode),
+    Precompose(PrecomposeNode),
+    Layer(SceneLayerNode),
     Camera(CameraNode),
     Character(CharacterNode),
 }
@@ -76,6 +87,34 @@ pub struct DefsNode {
     pub gradients: Vec<GradientDef>,
     #[serde(default)]
     pub brushes: Vec<BrushDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaletteNode {
+    pub id: String,
+    pub colors: Vec<PaletteColorDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaletteColorDef {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PixelGridNode {
+    pub id: Option<String>,
+    pub x: String,
+    pub y: String,
+    pub pixel_size: String,
+    pub palette: String,
+    pub opacity: String,
+    #[serde(default = "default_scene_blend")]
+    pub blend: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -154,6 +193,20 @@ pub struct RectNode {
     pub stroke_width: String,
     pub opacity: String,
     pub rotation: String,
+    #[serde(default = "default_scene_one")]
+    pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
     #[serde(default = "default_scene_blend")]
     pub blend: String,
 }
@@ -169,6 +222,22 @@ pub struct CircleNode {
     pub stroke: Option<String>,
     pub stroke_width: String,
     pub opacity: String,
+    #[serde(default = "default_scene_zero")]
+    pub rotation: String,
+    #[serde(default = "default_scene_one")]
+    pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
     #[serde(default = "default_scene_blend")]
     pub blend: String,
 }
@@ -177,6 +246,26 @@ pub struct CircleNode {
 #[serde(rename_all = "camelCase")]
 pub struct LineNode {
     pub id: Option<String>,
+    #[serde(default = "default_scene_zero")]
+    pub x: String,
+    #[serde(default = "default_scene_zero")]
+    pub y: String,
+    #[serde(default = "default_scene_zero")]
+    pub rotation: String,
+    #[serde(default = "default_scene_one")]
+    pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
     pub x1: String,
     pub y1: String,
     pub x2: String,
@@ -211,6 +300,26 @@ pub struct LineNode {
 #[serde(rename_all = "camelCase")]
 pub struct PolylineNode {
     pub id: Option<String>,
+    #[serde(default = "default_scene_zero")]
+    pub x: String,
+    #[serde(default = "default_scene_zero")]
+    pub y: String,
+    #[serde(default = "default_scene_zero")]
+    pub rotation: String,
+    #[serde(default = "default_scene_one")]
+    pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
     pub points: String,
     pub stroke: String,
     pub stroke_width: String,
@@ -246,6 +355,26 @@ pub struct PolylineNode {
 pub struct PathNode {
     pub id: Option<String>,
     pub brush: Option<String>,
+    #[serde(default = "default_scene_zero")]
+    pub x: String,
+    #[serde(default = "default_scene_zero")]
+    pub y: String,
+    #[serde(default = "default_scene_zero")]
+    pub rotation: String,
+    #[serde(default = "default_scene_one")]
+    pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
     pub d: String,
     pub stroke: String,
     pub fill: Option<String>,
@@ -341,6 +470,27 @@ pub struct GroupNode {
     pub y: String,
     pub rotation: String,
     pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
+    pub deform_grid: Option<String>,
+    pub grid_from: Option<String>,
+    pub grid_to: Option<String>,
+    #[serde(default = "default_scene_zero")]
+    pub deform_amount: String,
+    #[serde(default)]
+    pub mask: Option<String>,
+    #[serde(default = "default_scene_mask_mode")]
+    pub mask_mode: String,
     pub opacity: String,
     pub children: Vec<SceneNode>,
 }
@@ -351,12 +501,15 @@ pub struct PartNode {
     pub id: Option<String>,
     pub label: Option<String>,
     pub role: Option<String>,
+    pub attach_to: Option<String>,
     pub brush: Option<String>,
     pub x: String,
     pub y: String,
     pub rotation: String,
     pub scale: String,
     pub opacity: String,
+    pub anchor_x: String,
+    pub anchor_y: String,
     pub children: Vec<SceneNode>,
 }
 
@@ -389,8 +542,50 @@ pub struct MaskNode {
     pub height: String,
     pub radius: String,
     pub d: Option<String>,
+    #[serde(default = "default_scene_zero")]
+    pub feather: String,
     pub opacity: String,
     pub children: Vec<SceneNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrecomposeNode {
+    pub id: String,
+    pub size: Option<(u32, u32)>,
+    pub children: Vec<SceneNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLayerNode {
+    pub id: Option<String>,
+    pub source: String,
+    pub x: String,
+    pub y: String,
+    pub rotation: String,
+    pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
+    pub opacity: String,
+    #[serde(default = "default_scene_blend")]
+    pub blend: String,
+    #[serde(default)]
+    pub matte: Option<String>,
+    #[serde(default = "default_scene_matte_mode")]
+    pub matte_mode: String,
+    #[serde(default = "default_scene_false")]
+    pub invert_matte: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -413,14 +608,42 @@ pub struct CameraNode {
     pub children: Vec<SceneNode>,
 }
 
+fn default_scene_mask_mode() -> String {
+    "alpha".to_string()
+}
+
+fn default_scene_matte_mode() -> String {
+    "alpha".to_string()
+}
+
+fn default_scene_false() -> String {
+    "false".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterNode {
     pub id: Option<String>,
+    #[serde(default)]
+    pub rig: Option<String>,
+    #[serde(default)]
+    pub model_profile: Option<String>,
     pub x: String,
     pub y: String,
     pub rotation: String,
     pub scale: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_x: String,
+    #[serde(default = "default_scene_one")]
+    pub scale_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub skew_y: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_x: String,
+    #[serde(default = "default_scene_zero")]
+    pub transform_origin_y: String,
     pub opacity: String,
     pub children: Vec<SceneNode>,
 }

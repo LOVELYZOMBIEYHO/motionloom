@@ -28,12 +28,13 @@ enum TransitionCoreEffect {
     Dissolve,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum CurveEase {
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    Ease(f32, f32, f32, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -982,7 +983,7 @@ fn parse_curve_points(expr: &str) -> Result<Vec<CurvePoint>, String> {
     }
 
     let mut points = Vec::<CurvePoint>::new();
-    for raw_point in inner.split(',') {
+    for raw_point in split_curve_point_tokens(inner)? {
         let token = raw_point.trim();
         if token.is_empty() {
             continue;
@@ -1022,6 +1023,36 @@ fn parse_curve_points(expr: &str) -> Result<Vec<CurvePoint>, String> {
     Ok(points)
 }
 
+fn split_curve_point_tokens(inner: &str) -> Result<Vec<&str>, String> {
+    let mut tokens = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+
+    for (idx, ch) in inner.char_indices() {
+        match ch {
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                if depth == 0 {
+                    return Err("curve expression has unmatched ')'.".to_string());
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                tokens.push(&inner[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if depth != 0 {
+        return Err("curve expression has unmatched '('.".to_string());
+    }
+
+    tokens.push(&inner[start..]);
+    Ok(tokens)
+}
+
 fn parse_curve_ease(raw: &str) -> Result<CurveEase, String> {
     let normalized = raw
         .trim()
@@ -1029,13 +1060,36 @@ fn parse_curve_ease(raw: &str) -> Result<CurveEase, String> {
         .trim()
         .to_ascii_lowercase()
         .replace('-', "_");
+    if let Some(args) = normalized
+        .strip_prefix("ease(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let values: Vec<f32> = args
+            .split(',')
+            .map(str::trim)
+            .map(|v| {
+                v.parse::<f32>()
+                    .map_err(|_| format!("invalid cubic ease value '{}'", v))
+            })
+            .collect::<Result<_, _>>()?;
+        if values.len() != 4 {
+            return Err(format!(
+                "invalid curve easing '{}'; expected ease(x1,y1,x2,y2)",
+                raw.trim()
+            ));
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(format!("non-finite curve easing '{}'", raw.trim()));
+        }
+        return Ok(CurveEase::Ease(values[0], values[1], values[2], values[3]));
+    }
     match normalized.as_str() {
         "linear" => Ok(CurveEase::Linear),
         "ease_in" => Ok(CurveEase::EaseIn),
         "ease_out" => Ok(CurveEase::EaseOut),
         "ease_in_out" => Ok(CurveEase::EaseInOut),
         other => Err(format!(
-            "invalid curve easing '{}'; expected linear | ease_in | ease_out | ease_in_out",
+            "invalid curve easing '{}'; expected linear | ease_in | ease_out | ease_in_out | ease(x1,y1,x2,y2)",
             other
         )),
     }
@@ -1054,7 +1108,61 @@ fn apply_curve_ease(t: f32, easing: CurveEase) -> f32 {
                 1.0 - ((-2.0 * t + 2.0).powi(2) / 2.0)
             }
         }
+        CurveEase::Ease(x1, y1, x2, y2) => apply_cubic_bezier_ease(t, x1, y1, x2, y2),
     }
+}
+
+fn apply_cubic_bezier_ease(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+
+    let x1 = x1.clamp(0.0, 1.0);
+    let x2 = x2.clamp(0.0, 1.0);
+    let mut u = t;
+    for _ in 0..8 {
+        let x = cubic_bezier_sample(x1, x2, u) - t;
+        if x.abs() < 0.000_01 {
+            return cubic_bezier_sample(y1, y2, u);
+        }
+        let dx = cubic_bezier_derivative(x1, x2, u);
+        if dx.abs() < 0.000_001 {
+            break;
+        }
+        u = (u - x / dx).clamp(0.0, 1.0);
+    }
+
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    u = t;
+    for _ in 0..20 {
+        let x = cubic_bezier_sample(x1, x2, u);
+        if (x - t).abs() < 0.000_01 {
+            break;
+        }
+        if x < t {
+            lo = u;
+        } else {
+            hi = u;
+        }
+        u = (lo + hi) * 0.5;
+    }
+
+    cubic_bezier_sample(y1, y2, u)
+}
+
+fn cubic_bezier_sample(a: f32, b: f32, t: f32) -> f32 {
+    let inv = 1.0 - t;
+    3.0 * inv * inv * t * a + 3.0 * inv * t * t * b + t * t * t
+}
+
+fn cubic_bezier_derivative(a: f32, b: f32, t: f32) -> f32 {
+    let inv = 1.0 - t;
+    3.0 * inv * inv * a + 6.0 * inv * t * (b - a) + 3.0 * t * t * (1.0 - b)
 }
 
 #[cfg(test)]
@@ -1066,7 +1174,7 @@ mod tests {
     #[test]
     fn runtime_eval_invert_mix_changes_with_time() {
         let script = r#"
-<Graph scope="clip" fps={60} duration="2s" size={[256,256]}>
+<Graph fps={60} duration="2s" size={[256,256]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[256,256]} />
   <Pass id="invert_pulse" kernel="invert_mix.wgsl" effect="invert_mix"
@@ -1133,7 +1241,7 @@ mod tests {
     #[test]
     fn runtime_eval_blur_kernel_maps_sigma_to_layer_blur() {
         let script = r#"
-<Graph scope="clip" fps={60} duration="1s" size={[1920,1080]}>
+<Graph fps={60} duration="1s" size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_blur" kind="compute" kernel="blur_sharpen_detail_gaussian.wgsl" effect="gaussian_5tap_h"
@@ -1159,7 +1267,7 @@ mod tests {
     #[test]
     fn runtime_duration_limits_effect_window() {
         let script = r#"
-<Graph scope="clip" fps={60} apply="graph" duration="2s" size={[1920,1080]}>
+<Graph fps={60} apply="graph" duration="2s" size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_blur" kind="compute" kernel="blur_sharpen_detail_gaussian.wgsl" effect="gaussian_5tap_h"
@@ -1182,7 +1290,7 @@ mod tests {
     #[test]
     fn runtime_default_apply_clip_does_not_gate_by_duration() {
         let script = r#"
-<Graph scope="clip" fps={60} duration="2s" size={[1920,1080]}>
+<Graph fps={60} duration="2s" size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_blur" kind="compute" kernel="blur_sharpen_detail_gaussian.wgsl" effect="gaussian_5tap_h"
@@ -1203,7 +1311,7 @@ mod tests {
     #[test]
     fn runtime_uses_pass_effect_field_for_blur_sharpen() {
         let script = r#"
-<Graph scope="clip" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_unsharp" kind="compute" kernel="blur_sharpen_detail_gaussian.wgsl" effect="unsharp"
@@ -1224,7 +1332,7 @@ mod tests {
     #[test]
     fn runtime_rejects_invalid_blur_effect() {
         let script = r#"
-<Graph scope="clip" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_bad" kind="compute" kernel="blur_sharpen_detail_gaussian.wgsl" effect="gaussian_9tap"
@@ -1250,7 +1358,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_fade_in_uses_param_window() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fade_in" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1286,7 +1394,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_fade_out_uses_param_window() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fade_out" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1318,7 +1426,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_fade_out_defaults_to_tail_when_start_missing() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fade_out" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1360,7 +1468,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_fade_out_ignores_progress_expr_and_uses_tail_window() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fade_out" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1392,7 +1500,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_fade_in_and_fade_out_compose_for_clip() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fade_in" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1446,7 +1554,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_dissolve_respects_easing() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Input id="prev" type="video" from="input:prev" />
   <Input id="next" type="video" from="input:next" />
@@ -1474,7 +1582,7 @@ mod tests {
     #[test]
     fn runtime_transition_core_missing_effect_is_parser_error() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="bad_transition" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1493,7 +1601,7 @@ mod tests {
     #[test]
     fn runtime_rejects_removed_transition_kernel_names() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="legacy_transition" kind="render" role="transition" kernel="transition_dissolve.wgsl" effect="dissolve"
@@ -1514,7 +1622,7 @@ mod tests {
     #[test]
     fn runtime_uses_explicit_kernel_with_effect() {
         let script = r#"
-<Graph scope="clip" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_blur" kind="compute" kernel="blur_sharpen_detail_gaussian.wgsl" effect="gaussian_5tap_h"
@@ -1534,7 +1642,7 @@ mod tests {
     #[test]
     fn runtime_opacity_effect_sets_layer_transition_opacity() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fx_opacity" kind="compute" kernel="composite_core.wgsl" effect="opacity"
@@ -1553,7 +1661,7 @@ mod tests {
     #[test]
     fn runtime_transition_opacity_curve_uses_seconds_domain() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fade_in" kind="render" role="transition" kernel="transition_core.wgsl"
@@ -1588,7 +1696,7 @@ mod tests {
     #[test]
     fn runtime_opacity_curve_matches_points_and_holds_tail_value() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fx_opacity" kind="compute" effect="opacity"
@@ -1644,9 +1752,20 @@ mod tests {
     }
 
     #[test]
+    fn runtime_curve_expression_supports_cubic_ease_function() {
+        let value = eval_time_expr("curve(\"0:0:ease(0.82,0,0.58,1), 1:100:linear\")", 0.0, 0.5)
+            .expect("custom ease curve");
+
+        assert!(
+            value > 20.0 && value < 23.0,
+            "unexpected cubic ease value at 0.5s: {value}"
+        );
+    }
+
+    #[test]
     fn runtime_lut_effect_sets_layer_lut_mix() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fx_lut" kind="compute" kernel="color_core.wgsl" effect="lut"
@@ -1666,7 +1785,7 @@ mod tests {
     #[test]
     fn runtime_hsla_overlay_effect_sets_hsla_fields() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fx_hsla_overlay" kind="compute" kernel="color_core.wgsl" effect="hsla_overlay"
@@ -1693,7 +1812,7 @@ mod tests {
     #[test]
     fn runtime_blur_sigma_curve_uses_seconds_domain_and_holds_tail() {
         let script = r#"
-<Graph scope="layer" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Input id="under" type="video" from="input:under" />
   <Tex id="out" fmt="rgba16f" size={[1920,1080]} />
   <Pass id="fx_blur" kind="compute" effect="gaussian_5tap_h"
@@ -1731,7 +1850,7 @@ mod tests {
     #[test]
     fn runtime_rejects_missing_kernel_when_effect_not_mapped() {
         let script = r#"
-<Graph scope="clip" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_unknown" kind="compute" effect="unknown_effect"
@@ -1753,7 +1872,7 @@ mod tests {
     #[test]
     fn runtime_accepts_explicit_custom_wgsl_kernel() {
         let script = r#"
-<Graph scope="clip" fps={60} size={[1920,1080]}>
+<Graph fps={60} size={[1920,1080]}>
   <Tex id="src" fmt="rgba8" from="input:clip0" />
   <Tex id="out" fmt="rgba8" size={[1920,1080]} />
   <Pass id="fx_custom" kind="compute" kernel="my_custom_shader.wgsl" effect="my_effect"

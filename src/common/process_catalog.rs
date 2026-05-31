@@ -159,35 +159,37 @@ pub fn process_effects_for_category(
 pub fn kernel_source_by_name(kernel: &str) -> Option<&'static str> {
     match kernel {
         "transform_camera_affine.wgsl" => Some(include_str!(
-            "kernels/process/transform_camera/transform_camera_affine.wgsl"
+            "../kernels/process/transform_camera/transform_camera_affine.wgsl"
         )),
-        "color_core.wgsl" => Some(include_str!("kernels/process/color_tone/color_core.wgsl")),
+        "color_core.wgsl" => Some(include_str!(
+            "../kernels/process/color_tone/color_core.wgsl"
+        )),
         "color_tone_exposure_contrast.wgsl" => Some(include_str!(
-            "kernels/process/color_tone/color_tone_exposure_contrast.wgsl"
+            "../kernels/process/color_tone/color_tone_exposure_contrast.wgsl"
         )),
         "stylize_look_posterize.wgsl" => Some(include_str!(
-            "kernels/process/stylize_look/stylize_look_posterize.wgsl"
+            "../kernels/process/stylize_look/stylize_look_posterize.wgsl"
         )),
         "blur_sharpen_detail_gaussian.wgsl" => Some(include_str!(
-            "kernels/process/blur_sharpen_detail/blur_sharpen_detail_gaussian.wgsl"
+            "../kernels/process/blur_sharpen_detail/blur_sharpen_detail_gaussian.wgsl"
         )),
         "keying_matte_mask_luma_key.wgsl" => Some(include_str!(
-            "kernels/process/keying_matte_mask/keying_matte_mask_luma_key.wgsl"
+            "../kernels/process/keying_matte_mask/keying_matte_mask_luma_key.wgsl"
         )),
         "light_atmosphere_bloom_prefilter.wgsl" => Some(include_str!(
-            "kernels/process/light_atmosphere/light_atmosphere_bloom_prefilter.wgsl"
+            "../kernels/process/light_atmosphere/light_atmosphere_bloom_prefilter.wgsl"
         )),
         "distortion_warp_heat_haze.wgsl" => Some(include_str!(
-            "kernels/process/distortion_warp/distortion_warp_heat_haze.wgsl"
+            "../kernels/process/distortion_warp/distortion_warp_heat_haze.wgsl"
         )),
         "composite_core.wgsl" => Some(include_str!(
-            "kernels/process/composite/composite_core.wgsl"
+            "../kernels/process/composite/composite_core.wgsl"
         )),
         "effect_for_testing_run.wgsl" => Some(include_str!(
-            "kernels/process/testing/effect_for_testing_run.wgsl"
+            "../kernels/process/testing/effect_for_testing_run.wgsl"
         )),
         "transition_core.wgsl" => Some(include_str!(
-            "kernels/process/transition/transition_core.wgsl"
+            "../kernels/process/transition/transition_core.wgsl"
         )),
         _ => None,
     }

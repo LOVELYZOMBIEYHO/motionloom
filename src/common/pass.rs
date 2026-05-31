@@ -29,7 +29,7 @@ pub fn resolve_pass_kernel(pass: &PassNode) -> Option<String> {
 }
 
 fn load_effect_kernel_map() -> HashMap<String, String> {
-    const MAP_TEXT: &str = include_str!("kernels/effect_kernel_map.kv");
+    const MAP_TEXT: &str = include_str!("../kernels/effect_kernel_map.kv");
     let mut out = HashMap::<String, String>::new();
     for raw_line in MAP_TEXT.lines() {
         let line = raw_line.trim();
