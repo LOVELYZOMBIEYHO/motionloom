@@ -18,6 +18,8 @@ pub const MEASUREMENT: &str = "mesh triangle coverage; 128x128 CPU mask over [-1
 
 #[derive(Debug, thiserror::Error)]
 pub enum HeadFitError {
+    #[error(transparent)]
+    Format(#[from] crate::FormatError),
     #[error("invalid reference set: {0}")]
     References(String),
     #[error("invalid candidate: {0}")]
@@ -429,7 +431,12 @@ pub fn fit_head_asset_to_references(
         }
     }
     let changes = source::changes(&original, &best, &r.target_asset_id);
-    let candidate_dsl = source::patch(s, &r.target_asset_id, &changes)?;
+    // Cancellation before any edit must retain the original source revision.
+    let candidate_dsl = if stop == "cancelled" && changes.is_empty() {
+        s.to_string()
+    } else {
+        crate::format_dsl(&source::patch(s, &r.target_asset_id, &changes)?)?.source
+    };
     check_dsl(&candidate_dsl)?;
     // Re-measure the parsed output so text precision cannot invalidate the proposal.
     metrics = projection::evaluate(
@@ -473,7 +480,11 @@ pub fn apply_head_fit_proposal(s: &str, p: &HeadFitProposal) -> Result<String, H
             "version or fingerprint mismatch".into(),
         ));
     }
-    let result = source::patch(s, &p.target_asset_id, &p.changes)?;
+    let result = if p.stop_reason == "cancelled" && p.changes.is_empty() {
+        s.to_string()
+    } else {
+        crate::format_dsl(&source::patch(s, &p.target_asset_id, &p.changes)?)?.source
+    };
     if result != p.candidate_dsl {
         return Err(HeadFitError::Source(
             "candidate differs from reviewed changes".into(),

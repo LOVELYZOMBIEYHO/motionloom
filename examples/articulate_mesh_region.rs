@@ -69,20 +69,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         out
     };
-    let start = source
-        .find(&format!("<MeshAsset id=\"{}\"", a[2]))
-        .ok_or("missing source tag")?;
-    let end = start
-        + source[start..]
-            .find("</MeshAsset>")
-            .ok_or("missing close")?
-        + "</MeshAsset>".len();
-    let mut result = source.clone();
-    result.replace_range(
-        start..end,
+    let fingerprint = motionloom::api::mesh_reference::mesh_source_fingerprint(&source);
+    let mut result = motionloom::api::mesh_authoring::bake_mesh_asset_geometry(
+        &source,
+        &a[2],
+        &compact(retained),
+        &fingerprint,
+    )?;
+    let end = result.find("</Assets>").ok_or("missing Assets close")?;
+    result.insert_str(
+        end,
         &format!(
-            "{}\n{}",
-            mesh_asset_element(&a[2], material, &compact(retained)),
+            "{}\n",
             mesh_asset_element(&a[3], material, &compact(selected))
         ),
     );

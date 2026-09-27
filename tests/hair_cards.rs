@@ -10,7 +10,8 @@ fn script(group: &str) -> String {
         r##"<Graph fps="30" duration="1s" size={{[64,64]}}>
 <Assets>
 <MaterialAsset id="hair" baseColor="#776677" />
-<HairAsset id="test" material="hair" space="asset_local">
+<GeometryAsset id="test_geometry">
+<Hair space="asset_local">
 <HairGroom>
 <HairGroup id="bangs">
 {group}
@@ -19,7 +20,9 @@ fn script(group: &str) -> String {
 <HairRepresentations>
 <HairCards id="cards" lengthSegments="24" widthSegments="6" thickness="0.02" tipShape="point" />
 </HairRepresentations>
-</HairAsset>
+</Hair>
+</GeometryAsset>
+<MeshAsset id="test" material="hair" geometry="test_geometry" />
 </Assets>
 <Background color="#FFFFFF" />
 <Present from="scene" />

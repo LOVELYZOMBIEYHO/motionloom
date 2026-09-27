@@ -29,7 +29,7 @@ For every modification after the initial recipe:
 4. Accept a proposal only when no primary view regresses beyond the configured tolerance.
 5. If a regression occurs, preserve or restore the last accepted source.
 6. Keep the cameras, render dimensions, and reference images unchanged throughout fitting.
-7. The final model must be a `MeshAsset`; do not replace it with a `HeadAsset`, GLB, or another model format.
+7. The final model must be a `MeshAsset`; do not replace it with a `GeometryAsset/Head`, GLB, or another model format.
 8. Enable subdivision only after the fitting process has converged.
 
 ## Resolve images outside MotionLoom

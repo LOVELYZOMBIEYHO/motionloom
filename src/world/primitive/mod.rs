@@ -22,7 +22,11 @@ mod wedge_mesh;
 
 pub(crate) use facial_cage_mesh::validate_layout as validate_facial_layout;
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use crate::dsl::{PrimitiveAssetNode, PrimitiveAxis, PrimitiveGeometry, PrimitiveModifierNode};
 use crate::world::gltf_loader::{
@@ -159,6 +163,51 @@ pub fn generate_primitive_mesh_textured(
     asset: &PrimitiveAssetNode,
     texture_set: PrimitiveTextureSet,
 ) -> GlbMeshData {
+    let builder = cached_geometry(asset).expect("validated generated geometry");
+    let face_textures = texture_set.face.clone();
+    let mut mesh = (*builder).clone().finish(asset, texture_set);
+    face_textures::append(&mut mesh, asset, &face_textures);
+    mesh
+}
+
+// Cache only geometry; appearance is assembled separately for each MeshAsset.
+static GEOMETRY_CACHE: OnceLock<Mutex<HashMap<u64, Arc<MeshBuilder>>>> = OnceLock::new();
+
+fn cached_geometry(
+    asset: &PrimitiveAssetNode,
+) -> Result<Arc<MeshBuilder>, crate::mesh_authoring::MeshAuthoringError> {
+    let key = primitive_geometry_cache_key(asset);
+    let cache = GEOMETRY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(builder) = cache.get(&key) {
+        return Ok(builder.clone());
+    }
+    let builder = Arc::new(compile_geometry(asset)?);
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(key, builder.clone());
+    Ok(builder)
+}
+
+/// Check topology-dependent modifiers through the same compiler used by renderers.
+pub(crate) fn validate_geometry_operations(
+    asset: &PrimitiveAssetNode,
+) -> Result<(), crate::mesh_authoring::MeshAuthoringError> {
+    let geometry = cached_geometry(asset)?;
+    if let Some(max) = asset.mesh_build.max_triangles
+        && geometry.indices.len() / 3 > max as usize
+    {
+        return Err(crate::mesh_authoring::MeshAuthoringError::Operation(
+            format!("compiled geometry exceeds MeshBuild maxTriangles={max}"),
+        ));
+    }
+    Ok(())
+}
+
+fn compile_geometry(
+    asset: &PrimitiveAssetNode,
+) -> Result<MeshBuilder, crate::mesh_authoring::MeshAuthoringError> {
     let mut builder = MeshBuilder::for_asset(asset);
     match &asset.geometry {
         PrimitiveGeometry::Mesh { cage } => subdivision_surface_mesh::generate(&mut builder, cage),
@@ -322,11 +371,8 @@ pub fn generate_primitive_mesh_textured(
             ),
         },
     }
-    builder.apply_modifiers(&asset.modifiers);
-    let face_textures = texture_set.face.clone();
-    let mut mesh = builder.finish(asset, texture_set);
-    face_textures::append(&mut mesh, asset, &face_textures);
-    mesh
+    builder.apply_modifiers(&asset.modifiers)?;
+    Ok(builder)
 }
 
 /// Return exact local-space bounds without loading or tessellating an asset.
@@ -483,11 +529,6 @@ pub fn primitive_geometry_cache_key(asset: &PrimitiveAssetNode) -> u64 {
             .unwrap_or_default()
             .to_le_bytes(),
     );
-    if let Some(material) = &asset.material_definition {
-        // Projection changes base vertex UVs; scale/rotation/variation remain
-        // material/instance data and must not split geometry identity.
-        hash_bytes(&mut hash, material.mapping.as_bytes());
-    }
     hash
 }
 
@@ -539,7 +580,6 @@ pub fn primitive_material_cache_key(asset: &PrimitiveAssetNode) -> u64 {
         hash_bytes(&mut hash, material.alpha_mode.as_bytes());
         hash_bytes(&mut hash, material.depth_write.as_bytes());
         hash_bytes(&mut hash, &material.sort_priority.to_le_bytes());
-        hash_bytes(&mut hash, material.mapping.as_bytes());
         hash_f32s(&mut hash, &material.texture_scale);
         hash_f32s(&mut hash, &material.texture_offset);
         hash_f32s(&mut hash, &material.variation_amount);
@@ -1093,16 +1133,105 @@ fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct MeshBuilder {
     positions: Vec<[f32; 3]>,
     normals: Vec<Option<[f32; 3]>>,
     texcoords: Vec<Option<[f32; 2]>>,
     indices: Vec<u32>,
     shortest_quad_diagonal: bool,
+    control_faces: Option<Vec<Vec<u32>>>,
+    control_pins: Vec<bool>,
+}
+
+/// A recipe sweep uses the canonical curve/profile compiler, then welds its cage.
+pub(crate) fn sweep_control_cage(
+    curve: &crate::CurveAssetNode,
+    profile: &[crate::SweepProfilePointNode],
+) -> crate::ControlCageNode {
+    let mut builder = MeshBuilder::default();
+    sweep_mesh::generate(
+        &mut builder,
+        curve,
+        true,
+        true,
+        true,
+        true,
+        "paralleltransport",
+        "normalized",
+        [1.0; 2],
+        None,
+        profile,
+    );
+    let cage = builder.control_cage();
+    let mut positions = vec![];
+    let mut uvs = vec![];
+    let mut remap = vec![];
+    let mut welded = std::collections::BTreeMap::new();
+    for (i, p) in cage.positions.iter().enumerate() {
+        let key = p.map(|v| (v as f64 * 1e6).round() as i64);
+        let index = *welded.entry(key).or_insert_with(|| {
+            let n = positions.len() as u32;
+            positions.push(*p);
+            uvs.push(cage.uvs[i]);
+            n
+        });
+        remap.push(index);
+    }
+    let faces = cage
+        .faces
+        .iter()
+        .map(|f| f.iter().map(|&v| remap[v as usize]).collect())
+        .collect();
+    crate::ControlCageNode {
+        pinned: vec![false; positions.len()],
+        positions,
+        uvs,
+        faces,
+        subdivision: 0,
+    }
+}
+
+/// Execute one geometry operation on an authored cage without material assembly.
+pub(crate) fn apply_control_cage_modifier(
+    cage: &crate::ControlCageNode,
+    modifier: &PrimitiveModifierNode,
+) -> Result<crate::ControlCageNode, crate::mesh_authoring::MeshAuthoringError> {
+    let mut builder = MeshBuilder::default();
+    subdivision_surface_mesh::generate(&mut builder, cage);
+    builder.apply_modifiers(std::slice::from_ref(modifier))?;
+    Ok(builder.control_cage())
 }
 
 impl MeshBuilder {
+    fn control_cage(&self) -> crate::ControlCageNode {
+        crate::ControlCageNode {
+            positions: self.positions.clone(),
+            uvs: self
+                .texcoords
+                .iter()
+                .map(|v| v.unwrap_or([0.0; 2]))
+                .collect(),
+            pinned: if self.control_pins.len() == self.positions.len() {
+                self.control_pins.clone()
+            } else {
+                vec![false; self.positions.len()]
+            },
+            faces: self
+                .control_faces
+                .clone()
+                .unwrap_or_else(|| self.indices.chunks_exact(3).map(|v| v.to_vec()).collect()),
+            subdivision: 0,
+        }
+    }
+    fn replace_cage(&mut self, cage: &crate::ControlCageNode) {
+        let mut next = Self {
+            shortest_quad_diagonal: self.shortest_quad_diagonal,
+            ..Self::default()
+        };
+        subdivision_surface_mesh::generate(&mut next, cage);
+        *self = next;
+    }
     fn for_asset(asset: &PrimitiveAssetNode) -> Self {
         Self {
             shortest_quad_diagonal: asset.mesh_build.triangulation == "shortestdiagonal",
@@ -1166,8 +1295,12 @@ impl MeshBuilder {
         }
     }
 
-    fn apply_modifiers(&mut self, modifiers: &[PrimitiveModifierNode]) {
+    fn apply_modifiers(
+        &mut self,
+        modifiers: &[PrimitiveModifierNode],
+    ) -> Result<(), crate::mesh_authoring::MeshAuthoringError> {
         for modifier in modifiers {
+            crate::geometry_ops::validate_modifier(modifier)?;
             match modifier {
                 PrimitiveModifierNode::Transform {
                     translate,
@@ -1181,10 +1314,69 @@ impl MeshBuilder {
                     self.bend(*axis, *angle, *pivot)
                 }
                 PrimitiveModifierNode::Twist { axis, angle } => self.twist(*axis, *angle),
-                PrimitiveModifierNode::Subdivision { levels } => {
+                PrimitiveModifierNode::Subdivision { levels, scheme } => {
                     for _ in 0..*levels {
-                        self.subdivide();
+                        if scheme.eq_ignore_ascii_case("catmullclark") {
+                            let next = subdivision_surface_mesh::subdivide(&self.control_cage());
+                            self.replace_cage(&next);
+                        } else {
+                            self.subdivide();
+                        }
                     }
+                }
+                PrimitiveModifierNode::RadialWave {
+                    axis,
+                    cycles,
+                    amplitude,
+                    height_range,
+                    falloff,
+                } => {
+                    crate::geometry_ops::radial_wave(
+                        &mut self.positions,
+                        *axis,
+                        *cycles,
+                        *amplitude,
+                        *height_range,
+                        *falloff,
+                    );
+                    self.refresh_deformed_normals();
+                }
+                PrimitiveModifierNode::DisplaceNoise {
+                    amplitude,
+                    frequency,
+                    seed,
+                } => {
+                    if self.normals.iter().any(Option::is_none) {
+                        self.smooth_normals(180.0, 1.0, false);
+                    }
+                    crate::geometry_ops::displace_noise(
+                        &mut self.positions,
+                        &self.normals,
+                        *amplitude,
+                        *frequency,
+                        *seed,
+                    );
+                    self.refresh_deformed_normals();
+                }
+                PrimitiveModifierNode::Uv { settings } => crate::geometry_ops::apply_uv(
+                    &self.positions,
+                    &self.normals,
+                    &mut self.texcoords,
+                    settings,
+                ),
+                PrimitiveModifierNode::ThickenSurface { thickness } => {
+                    let next = crate::geometry_ops::thicken(&self.control_cage(), *thickness)?;
+                    self.replace_cage(&next);
+                }
+                PrimitiveModifierNode::Wireframe { radius, segments } => {
+                    let next =
+                        crate::geometry_ops::wireframe(&self.control_cage(), *radius, *segments)?;
+                    self.replace_cage(&next);
+                }
+                PrimitiveModifierNode::Partition { u_range, v_range } => {
+                    let next =
+                        crate::geometry_ops::partition(&self.control_cage(), *u_range, *v_range)?;
+                    self.replace_cage(&next);
                 }
                 PrimitiveModifierNode::Smooth { angle } => self.smooth_normals(*angle, 1.0, false),
                 PrimitiveModifierNode::WeightedNormals {
@@ -1196,6 +1388,7 @@ impl MeshBuilder {
                 }
             }
         }
+        Ok(())
     }
 
     fn transform(&mut self, translate: [f32; 3], rotate: [f32; 3], scale: [f32; 3]) {
@@ -1271,6 +1464,8 @@ impl MeshBuilder {
     }
 
     fn subdivide(&mut self) {
+        self.control_faces = None;
+        self.control_pins.clear();
         let old_positions = std::mem::take(&mut self.positions);
         let old_normals = std::mem::take(&mut self.normals);
         let old_texcoords = std::mem::take(&mut self.texcoords);
@@ -1325,6 +1520,15 @@ impl MeshBuilder {
                 let ids = corners.map(|(position, normal, uv)| self.vertex(position, normal, uv));
                 self.triangle(ids[0], ids[1], ids[2]);
             }
+        }
+    }
+
+    fn refresh_deformed_normals(&mut self) {
+        if self.control_faces.is_some() {
+            let cage = self.control_cage();
+            self.replace_cage(&cage);
+        } else {
+            self.recalculate_face_normals();
         }
     }
 
@@ -1384,12 +1588,11 @@ impl MeshBuilder {
     }
 
     pub(crate) fn finish_with_bounds(
-        mut self,
+        self,
         asset: &PrimitiveAssetNode,
         texture_set: PrimitiveTextureSet,
         bounds: ([f32; 3], [f32; 3]),
     ) -> GlbMeshData {
-        apply_material_uvs(asset, &self.positions, &self.normals, &mut self.texcoords);
         let triangles = self
             .indices
             .chunks_exact(3)
@@ -1499,34 +1702,6 @@ impl MeshBuilder {
             bounds_min,
             bounds_max,
         }
-    }
-}
-
-fn apply_material_uvs(
-    asset: &PrimitiveAssetNode,
-    positions: &[[f32; 3]],
-    normals: &[Option<[f32; 3]>],
-    texcoords: &mut [Option<[f32; 2]>],
-) {
-    let Some(material) = asset.material_definition.as_ref() else {
-        return;
-    };
-    for (index, uv) in texcoords.iter_mut().enumerate() {
-        let mapped = if material.mapping == "uv" {
-            uv.unwrap_or([0.0; 2])
-        } else {
-            let position = positions[index];
-            let normal = normals[index].unwrap_or([0.0, 1.0, 0.0]);
-            let absolute = normal.map(f32::abs);
-            if absolute[1] >= absolute[0] && absolute[1] >= absolute[2] {
-                [position[0], position[2]]
-            } else if absolute[0] >= absolute[2] {
-                [position[2], position[1]]
-            } else {
-                [position[0], position[1]]
-            }
-        };
-        *uv = Some(mapped);
     }
 }
 
@@ -1706,20 +1881,23 @@ mod tests {
         let graph = crate::parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="coat" shape="loft">
-      <Loft segments="16">
-        <Section at="-0.6" width="0.7" depth="0.4" profile="rounded_rect" />
-        <Section at="0" width="0.9" depth="0.5" profile="capsule" />
-        <Section at="0.7" width="0.55" depth="0.35" profile="ellipse" />
-      </Loft>
-    </PrimitiveAsset>
-    <PrimitiveAsset id="hair" shape="ribbon">
-      <Ribbon width="0.2" thickness="0.03">
-        <PathPoint position={[0,0,0]} />
-        <PathPoint position={[0.2,-0.4,0.1]} roll="15" />
-        <PathPoint position={[0.1,-0.8,0]} width="0.04" />
-      </Ribbon>
-    </PrimitiveAsset>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="coat_geometry">
+    <Loft segments="16">
+            <Section at="-0.6" width="0.7" depth="0.4" profile="rounded_rect" />
+            <Section at="0" width="0.9" depth="0.5" profile="capsule" />
+            <Section at="0.7" width="0.55" depth="0.35" profile="ellipse" />
+          </Loft>
+    </GeometryAsset>
+    <MeshAsset id="coat" material="geometry_default" geometry="coat_geometry" />
+    <GeometryAsset id="hair_geometry">
+    <Ribbon width="0.2" thickness="0.03">
+            <PathPoint position={[0,0,0]} />
+            <PathPoint position={[0.2,-0.4,0.1]} roll="15" />
+            <PathPoint position={[0.1,-0.8,0]} width="0.04" />
+          </Ribbon>
+    </GeometryAsset>
+    <MeshAsset id="hair" material="geometry_default" geometry="hair_geometry" />
   </Assets>
   <Background color="#000000" />
   <Present from="scene" />
@@ -1783,7 +1961,7 @@ mod tests {
             attenuation_distance: 1_000_000.0,
             depth_write: "auto".into(),
             sort_priority: 0,
-            mapping: "triplanar".into(),
+
             texture_scale: [0.28; 2],
             texture_offset: [0.0; 2],
             texture_rotation: 0.0,
@@ -1867,7 +2045,10 @@ mod tests {
                     axis: PrimitiveAxis::Y,
                     angle: 12.0,
                 },
-                PrimitiveModifierNode::Subdivision { levels: 1 },
+                PrimitiveModifierNode::Subdivision {
+                    levels: 1,
+                    scheme: "linear".into(),
+                },
                 PrimitiveModifierNode::Smooth { angle: 80.0 },
             ],
             mesh_build: Default::default(),

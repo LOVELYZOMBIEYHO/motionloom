@@ -2,7 +2,8 @@
 
 Weaver is MotionLoom's opt-in native offline path tracer. It lives entirely in
 `src/weaver/`; the crate's `weaver` feature registers its API and the scene bridge.
-There is no new crate, CLI executable, DSL syntax, or browser preview dependency.
+The native [MotionLoom CLI](../../CLI.md) exposes this same API through `render`
+and `export`. No additional crate, DSL syntax or browser preview dependency is required.
 
 This is a working initial renderer, **not a claim of production/Cycles parity**.
 See [PLAN.md](PLAN.md) for the remaining acceptance gates.
@@ -54,15 +55,52 @@ job.lighting.light_intensities.insert("sun".into(), 2.5);
 job.lighting.light_intensities.insert("sky_fill".into(), 0.0);
 job.lighting.exposure = Some(0.97);
 job.sun_angular_diameter_degrees = 1.5;
-job.lens.f_stop = 1.4;
+job.lens_overrides.f_stop = Some(1.4);
 ```
 
 These are explicit job overrides, not a new DSL or universal quality guarantee.
 Light IDs must exist. Omitted overrides preserve authored values. A wider sun
 softens penumbrae; it does not increase the total directional-light energy.
-The physical lens conversion depends on the authored camera FOV and sensor width.
-Even a low f-stop remains wide-angle when the scene uses a wide FOV; focus and
-scene scale must be considered together.
+### Camera optics and migration
+
+New `RenderJob::new` jobs use `lens_source = LensSource::AuthoredCamera`.
+Weaver frame, sequence and progressive preview resolve the active DSL camera's
+optics at every frame. Omitted or false `depthOfField` means a pinhole camera,
+matching WGPU Preview; quality presets no longer enable DOF on their own.
+
+```xml
+<Camera3D position={[0,1,6]} target={[0,1,0]} fov="35"
+          depthOfField="true" focalLength="50" fStop="8" />
+```
+
+This automatically focuses on the camera `target`. `focusTarget="@subject"`
+instead tracks a named Anchor or Model; `focusDistance={curve("0:6:linear, 2:3:linear")}`
+sets an explicit rack focus and wins over `focusTarget`. `focusOffset` adds a
+signed distance after focus resolution. Focus is axial depth in scene units;
+one unit is one meter. A missing named focus target or one behind the camera
+produces a diagnostic. FOV controls framing; `focalLength` controls physical
+aperture size, with effective sensor dimensions derived from FOV and aspect.
+
+WGPU uses a depth-aware post pass and Weaver traces an aperture disk. They share
+the same focus plane and aperture radius, but occlusions and bokeh sampling can
+differ. `maxBlur` is a WGPU preview radius budget (pixels by default, or percent
+of height with `maxBlurUnit="percentHeight"`); it does not cap Weaver's lens.
+The explicit `filmic_bokeh_v1` RenderStyle retains its artistic aperture/blur
+controls for compatibility; use the default or `cinematic_bokeh_v1` for
+physically calibrated preview DOF.
+
+Both CLIs support `--dof`, `--no-dof`, `--f-stop F`, `--focus D`, and
+`--focal-length MM`. Only supplied fields override the camera. Numeric overrides
+enable DOF unless `--no-dof` is supplied; `--dof` alone uses camera-target focus
+when no DSL optics exist. Omitted flags always follow the DSL.
+
+Before: callers changed `job.lens.f_stop` / `job.lens.focus_distance`.
+After: use `job.lens_overrides.f_stop = Some(4.0)` and
+`job.lens_overrides.focus_distance = Some(6.0)`, or select
+`job.lens_source = LensSource::Job` to explicitly retain the complete legacy
+job lens, including its sensor width and aperture blades. Older serialized JSON
+without `lens_source` keeps `Job` mode for compatibility. Optics revision keys
+invalidate old tile and completed-frame caches; old outputs remain on disk.
 
 ## Progressive preview
 
@@ -107,8 +145,8 @@ cargo run -p motionloom --release --features weaver --example weaver_frame -- \
   path/to/main.motionloom --frame 486 --size 640x360 --samples 32 --out .render-output/frame
 ```
 
-Use `--composite-scene` to request the authored 2D+3D frame instead of the
-default 3D-only beauty. A scene with no 3D island takes the existing strict GPU
+CLI and frame-example jobs default to the authored 2D+3D composition.
+`--composite-scene` explicitly selects that same composition. A scene with no 3D island takes the existing strict GPU
 raster path. The current mixed path traces camera-compatible 3D islands and
 retains authored 2D runs independently. Raster runs enter the shared-device
 compositor as linear-premultiplied RGBA16F textures; scene-linear work runs
@@ -123,7 +161,7 @@ and `motion.exr`. Coverage is populated; sequence motion contains camera motion
 in output-pixel units. Object/deformation motion is not yet represented.
 
 Flags: `--scene-id`, `--style` (both default `auto`), `--frame`, `--size WxH`,
-`--samples` (omit for Adaptive Ultra), `--out`, `--f-stop`, `--focus`. Without
+`--samples` (default fixed 128 for a still, 64 for a movie), `--out`, `--f-stop`, `--focus`. Without
 `--out`, renders land in the workspace-root `.render-output/weaver` (found by
 walking up for the `anica`/`motionloom-example` marker), never inside `anica/`.
 

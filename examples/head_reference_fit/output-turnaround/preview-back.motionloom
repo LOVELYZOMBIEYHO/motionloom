@@ -1,8 +1,8 @@
 <Graph fps={30} duration="1s" size={[512,512]}>
 <Assets>
 <MaterialAsset id="s86_skin_clay" baseColor="#C8B8AD" roughness="0.75" />
-<HeadAsset id="s86_head" material="s86_skin_clay" archetype="humanoid"
-               variant="feminine" symmetry="x" segments="72" rings="52" seed="8601">
+<GeometryAsset id="s86_head_geometry">
+<Head archetype="humanoid" variant="feminine" symmetry="x" segments="72" rings="52">
       <HeadShape size={[0.800000011920929,1.399999976158142,0.9912499785423279]} forehead="1.18" cheekWidth="1.025"
                  jawWidth="0.94" chinLength="0.012" chinRoundness="0.60" />
       <FaceLayout>
@@ -35,7 +35,9 @@
                    size={[0.42,0.22,0.26]} amount="0.12" falloff="smooth" />
       <HeadMorph headWidth="1.0" headHeight="1.0" headDepth="1.0"
                  faceWidth="1.0" faceHeight="1.0" jawWidth="1.0" featureScale="1.0" />
-    </HeadAsset>
+    </Head>
+</GeometryAsset>
+<MeshAsset id="s86_head" material="s86_skin_clay" materialSeed="8601" geometry="s86_head_geometry" />
 </Assets>
 <Background color="#17202D" />
 <Scene id="head_fit_review">

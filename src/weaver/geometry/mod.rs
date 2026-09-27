@@ -169,6 +169,20 @@ fn refit(node: usize, nodes: &mut [[f32; 4]], tris: &[Triangle]) -> ([f32; 3], [
     (min, max)
 }
 
+// Refit keeps SAH partitions efficient only when every triangle moves together.
+// Independent animation can expand most nodes across the scene and stall GPU rays.
+fn shares_translation(tris: &[Triangle], old: &[[f32; 4]]) -> bool {
+    let delta: [f32; 3] = std::array::from_fn(|a| tris[0].data[0][a] - old[0][a]);
+    tris.iter().enumerate().all(|(i, triangle)| {
+        (0..3).all(|vertex| {
+            (0..3).all(|axis| {
+                let change = triangle.data[vertex * 5][axis] - old[i * 16 + vertex * 5][axis];
+                (change - delta[axis]).abs() <= 1e-6
+            })
+        })
+    })
+}
+
 fn push_rgba(pixels: &mut Vec<u32>, rgba: &[u8]) {
     pixels.extend(
         rgba.chunks_exact(4)
@@ -438,9 +452,14 @@ fn pack_with_bvh(
             ordered.push(triangle);
         }
         tris = ordered;
-        data.extend_from_slice(&previous.data[..previous.triangle_offset as usize]);
-        refit(0, &mut data, &tris);
-        refitted = true;
+        if shares_translation(&tris, &previous.data[previous.triangle_offset as usize..]) {
+            data.extend_from_slice(&previous.data[..previous.triangle_offset as usize]);
+            refit(0, &mut data, &tris);
+            refitted = true;
+        } else {
+            // Repartition moving shards instead of retaining their closed-shell tree.
+            build(&mut tris, 0, &mut data);
+        }
     } else {
         build(&mut tris, 0, &mut data);
     }
@@ -525,6 +544,60 @@ fn pack_with_bvh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bvh_cache_rejects_independent_shard_motion() {
+        // A rigid translation preserves partitions; a separating shard does not.
+        let mut triangles = (0..2)
+            .map(|source| {
+                let mut data = [[0.0; 4]; 16];
+                for vertex in 0..3 {
+                    data[vertex * 5] = [source as f32, vertex as f32, 0.0, 0.0];
+                }
+                Triangle {
+                    data,
+                    min: [0.0; 3],
+                    max: [1.0; 3],
+                    source,
+                }
+            })
+            .collect::<Vec<_>>();
+        let old = triangles
+            .iter()
+            .flat_map(|triangle| triangle.data)
+            .collect::<Vec<_>>();
+        assert!(shares_translation(&triangles, &old));
+        for triangle in &mut triangles {
+            for vertex in 0..3 {
+                triangle.data[vertex * 5][2] += 4.0;
+            }
+        }
+        assert!(shares_translation(&triangles, &old));
+        for vertex in 0..3 {
+            triangles[1].data[vertex * 5][0] += 0.1;
+        }
+        assert!(!shares_translation(&triangles, &old));
+    }
+
+    #[test]
+    fn bvh_cache_rejects_rotation_even_when_triangle_count_is_unchanged() {
+        // Geometry identity alone does not make the old SAH tree reusable.
+        let mut data = [[0.0; 4]; 16];
+        data[5][0] = 1.0;
+        data[10][1] = 1.0;
+        let old = data.to_vec();
+        data[5][0] = 0.0;
+        data[5][1] = 1.0;
+        data[10][0] = -1.0;
+        data[10][1] = 0.0;
+        let triangle = Triangle {
+            data,
+            min: [-1.0, 0.0, 0.0],
+            max: [0.0, 1.0, 0.0],
+            source: 0,
+        };
+        assert!(!shares_translation(&[triangle], &old));
+    }
 
     #[test]
     fn mip_chain_packs_full_levels() {

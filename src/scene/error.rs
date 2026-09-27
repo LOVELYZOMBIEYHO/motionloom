@@ -43,6 +43,8 @@ pub enum MotionLoomSceneRenderError {
     InvalidPaint { value: String, message: String },
     #[error("invalid scene expression '{expr}': {message}")]
     InvalidExpression { expr: String, message: String },
+    #[error("invalid Camera3D optics '{id}': {message}")]
+    InvalidCameraOptics { id: String, message: String },
     #[error("invalid scene path data '{value}': {message}")]
     InvalidPathData { value: String, message: String },
     #[error("invalid scene deform grid '{value}': {message}")]

@@ -21,7 +21,10 @@ fn source(with_volume: bool) -> String {
         r##"<Graph fps="24" duration="1s" size={{[96,64]}}>
 <Assets>
   <MaterialAsset id="paint" baseColor="#8095A0" roughness="0.45" />
-  <PrimitiveAsset id="ball" shape="sphere" radius="0.8" material="paint" />
+  <GeometryAsset id="ball_geometry">
+  <Primitive shape="sphere" radius="0.8" />
+  </GeometryAsset>
+  <MeshAsset id="ball" material="paint" geometry="ball_geometry" />
 </Assets>
 <Scene id="main">
 <Timeline>

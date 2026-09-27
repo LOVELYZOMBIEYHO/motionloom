@@ -474,7 +474,7 @@ pub fn motionloom_dsl_schema_json() -> String {
                 },
                 required_attributes: required_attributes(name),
                 discriminator: match *name {
-                    "PrimitiveAsset" => Some("shape".to_string()),
+                    "Primitive" => Some("shape".to_string()),
                     "VegetationAsset" => Some("kind".to_string()),
                     _ => None,
                 },
@@ -772,40 +772,9 @@ fn append_semantic_diagnostics(
                 severity: AuthoringDiagnosticSeverity::Info,
                 code: code.to_string(),
                 phase: "asset-validation".to_string(),
-                line: {
-                    let primitive_line =
-                        if matches!(asset.geometry, crate::dsl::PrimitiveGeometry::Sweep { .. }) {
-                            find_tag_line(tags, "SweepAsset", Some(&asset.id))
-                        } else {
-                            find_tag_line(tags, "PrimitiveAsset", Some(&asset.id))
-                        };
-                    if primitive_line == 0 {
-                        let hair_line = find_tag_line(tags, "HairAsset", Some(&asset.id));
-                        if hair_line == 0 {
-                            if matches!(asset.geometry, crate::dsl::PrimitiveGeometry::Mesh { .. })
-                            {
-                                find_tag_line(tags, "MeshAsset", Some(&asset.id))
-                            } else {
-                                find_tag_line(tags, "HeadAsset", Some(&asset.id))
-                            }
-                        } else {
-                            hair_line
-                        }
-                    } else {
-                        primitive_line
-                    }
-                },
+                line: find_tag_line(tags, "MeshAsset", Some(&asset.id)),
                 column: 1,
-                tag: Some(
-                    match asset.geometry {
-                        crate::dsl::PrimitiveGeometry::HairCards { .. } => "HairAsset",
-                        crate::dsl::PrimitiveGeometry::HeadSurface { .. } => "HeadAsset",
-                        crate::dsl::PrimitiveGeometry::Mesh { .. } => "MeshAsset",
-                        crate::dsl::PrimitiveGeometry::Sweep { .. } => "SweepAsset",
-                        _ => "PrimitiveAsset",
-                    }
-                    .to_string(),
-                ),
+                tag: Some("MeshAsset".to_string()),
                 node_id: Some(asset.id.clone()),
                 attribute: Some("shape".to_string()),
                 authored_value: Some(asset.geometry.shape_name().to_string()),
@@ -850,8 +819,8 @@ fn append_semantic_diagnostics(
                     facial_cage: Some(_),
                     ..
                 } if topology == "facialcage" => "FacialCage",
-                crate::dsl::PrimitiveGeometry::HeadSurface { .. } => "HeadAsset",
-                _ => "PrimitiveAsset",
+                crate::dsl::PrimitiveGeometry::HeadSurface { .. } => "Head",
+                _ => "Primitive",
             };
             diagnostics.push(AuthoringDiagnostic {
                 severity: AuthoringDiagnosticSeverity::Warning,
@@ -1718,7 +1687,7 @@ fn build_showcase_schema(
             .collect();
         tag_schemas.push(ShowcaseTagSchema {
             required_attributes: required_attributes(&name),
-            discriminator: (name == "PrimitiveAsset").then(|| "shape".to_string()),
+            discriminator: (name == "Primitive").then(|| "shape".to_string()),
             variants: tag_variants(&name),
             tag: name,
             occurrences: occurrences.len(),
@@ -1794,15 +1763,21 @@ fn required_attributes(tag: &str) -> Vec<String> {
         "Graph" => &["fps", "duration", "size"],
         "Image" => &["asset"],
         "RigidBody" => &["id", "target", "dimension", "type"],
-        "PrimitiveAsset" => &["id", "shape"],
+        "GeometryAsset" => &["id"],
+        "Primitive" => &["shape"],
         "CurveAsset" => &["id"],
         "CurvePoint" => &["position"],
-        "SweepAsset" => &["id", "curve"],
+        "Sweep" => &["curve"],
         "Profile" => &[],
         "ProfilePoint" => &["position"],
-        "HairAsset" => &["id", "material"],
-        "HeadAsset" => &["id", "material", "archetype"],
-        "MeshAsset" => &["id", "material"],
+        "UV" => &["mode"],
+        "Subdivision" => &["levels", "scheme"],
+        "ThickenSurface" => &["thickness"],
+        "Wireframe" => &["radius"],
+        "Partition" => &["uRange", "vRange"],
+        "Hair" => &[],
+        "Head" => &["archetype"],
+        "MeshAsset" => &["id", "geometry", "material"],
         // Vertex is also used by 2D MeshTopology, so context parsers enforce its required fields.
         "Vertex" => &[],
         "Face" => &["indices"],
@@ -1903,75 +1878,44 @@ fn tag_variants(tag: &str) -> BTreeMap<String, ShowcaseTagVariantSchema> {
         })
         .collect();
     }
-    if tag != "PrimitiveAsset" {
+    if tag != "Primitive" {
         return BTreeMap::new();
     }
     [
-        ("box", vec!["id", "shape", "size"], vec!["color"]),
-        (
-            "sphere",
-            vec!["id", "shape", "radius"],
-            vec!["segments", "rings", "color"],
-        ),
+        ("box", vec!["shape", "size"], vec![]),
+        ("sphere", vec!["shape", "radius"], vec!["segments", "rings"]),
         (
             "capsule",
-            vec!["id", "shape", "radius", "height"],
-            vec!["segments", "rings", "color"],
+            vec!["shape", "radius", "height"],
+            vec!["segments", "rings"],
         ),
-        (
-            "plane",
-            vec!["id", "shape", "size"],
-            vec!["segments", "color"],
-        ),
+        ("plane", vec!["shape", "size"], vec!["segments"]),
         (
             "cylinder",
-            vec!["id", "shape", "radius", "height"],
-            vec!["segments", "color"],
+            vec!["shape", "radius", "height"],
+            vec!["segments"],
         ),
-        (
-            "cone",
-            vec!["id", "shape", "radius", "height"],
-            vec!["segments", "color"],
-        ),
-        ("wedge", vec!["id", "shape", "size"], vec!["color"]),
+        ("cone", vec!["shape", "radius", "height"], vec!["segments"]),
+        ("wedge", vec!["shape", "size"], vec![]),
         (
             "ellipsoid",
-            vec!["id", "shape", "radii"],
-            vec!["segments", "rings", "color"],
+            vec!["shape", "radii"],
+            vec!["segments", "rings"],
         ),
         (
             "frustum",
-            vec!["id", "shape", "topSize", "bottomSize", "height"],
-            vec!["color"],
+            vec!["shape", "topSize", "bottomSize", "height"],
+            vec![],
         ),
         (
             "roundedBox",
-            vec!["id", "shape", "size", "radius"],
-            vec!["segments", "color"],
+            vec!["shape", "size", "radius"],
+            vec!["segments"],
         ),
     ]
     .into_iter()
     .map(|(shape, required, mut optional)| {
-        optional.extend([
-            "material",
-            "bevelRadius",
-            "bevelSegments",
-            "materialSeed",
-            "collision",
-            "collider",
-            "colliderSize",
-            "colliderRadius",
-            "colliderHeight",
-            "colliderScale",
-            "colliderOffset",
-            "colliderRotation",
-            "colliderMargin",
-            "collisionGroup",
-            "collisionMask",
-            "friction",
-            "restitution",
-            "density",
-        ]);
+        optional.extend(["bevelRadius", "bevelSegments"]);
         (
             shape.to_string(),
             ShowcaseTagVariantSchema {
@@ -2077,6 +2021,14 @@ fn sort_and_deduplicate_diagnostics(diagnostics: &mut Vec<AuthoringDiagnostic>) 
 
 fn scan_tags(script: &str) -> Vec<ScannedTag> {
     let bytes = script.as_bytes();
+    let line_starts: Vec<_> = std::iter::once(0)
+        .chain(
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| (*b == b'\n').then_some(i + 1)),
+        )
+        .collect();
     let mut tags = Vec::new();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
@@ -2112,10 +2064,10 @@ fn scan_tags(script: &str) -> Vec<ScannedTag> {
             cursor = end + 1;
             continue;
         }
-        let (line, column) = line_column(script, start);
+        let (line, column) = line_column(script, &line_starts, start);
         tags.push(ScannedTag {
             name: name.to_string(),
-            attributes: scan_attributes(script, body, start + 1, name_end),
+            attributes: scan_attributes(script, &line_starts, body, start + 1, name_end),
             line,
             column,
         });
@@ -2147,6 +2099,7 @@ fn find_tag_end(script: &str, start: usize) -> Option<usize> {
 
 fn scan_attributes(
     script: &str,
+    line_starts: &[usize],
     body: &str,
     body_offset: usize,
     mut cursor: usize,
@@ -2185,7 +2138,7 @@ fn scan_attributes(
             cursor = consume_attribute_value(body, cursor);
             value = Some(body[value_start..cursor].trim().to_string());
         }
-        let (line, column) = line_column(script, body_offset + name_start);
+        let (line, column) = line_column(script, line_starts, body_offset + name_start);
         attributes.push(ScannedAttribute {
             name,
             value,
@@ -2246,13 +2199,10 @@ fn consume_attribute_value(body: &str, start: usize) -> usize {
     cursor
 }
 
-fn line_column(script: &str, offset: usize) -> (usize, usize) {
-    let prefix = &script[..offset.min(script.len())];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let column = prefix
-        .rfind('\n')
-        .map(|index| prefix[index + 1..].chars().count() + 1)
-        .unwrap_or_else(|| prefix.chars().count() + 1);
+fn line_column(script: &str, line_starts: &[usize], offset: usize) -> (usize, usize) {
+    let offset = offset.min(script.len());
+    let line = line_starts.partition_point(|&start| start <= offset);
+    let column = script[line_starts[line - 1]..offset].chars().count() + 1;
     (line, column)
 }
 
@@ -2435,14 +2385,13 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "attenuationDistance",
             "depthWrite",
             "sortPriority",
-            "mapping",
             "textureScale",
             "textureOffset",
             "textureRotation",
             "variationAmount",
         ]),
-        "PrimitiveAsset" => strict(&[
-            "id",
+        "GeometryAsset" => strict(&["id", "source"]),
+        "Primitive" => strict(&[
             "shape",
             "size",
             "radii",
@@ -2452,65 +2401,30 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "height",
             "segments",
             "rings",
-            "color",
-            "material",
             "bevelRadius",
             "bevelSegments",
-            "materialSeed",
-            "collision",
-            "collider",
-            "colliderSize",
-            "colliderRadius",
-            "colliderHeight",
-            "colliderScale",
-            "colliderOffset",
-            "colliderRotation",
-            "colliderMargin",
-            "collisionGroup",
-            "collisionMask",
-            "friction",
-            "restitution",
-            "density",
         ]),
+        "Mesh" => strict(&[]),
+        "Revolve" => strict(&["axis", "segments", "samples"]),
+        "UV" => strict(&["mode", "axis", "uAxis", "vAxis", "scale", "offset"]),
+        "RadialWave" => strict(&["axis", "cycles", "amplitude", "heightRange", "falloff"]),
+        "DisplaceNoise" => strict(&["amplitude", "frequency", "seed"]),
+        "ThickenSurface" => strict(&["thickness"]),
+        "Wireframe" => strict(&["radius", "segments"]),
+        "Partition" => strict(&["uRange", "vRange"]),
         "CurveAsset" => strict(&["id", "interpolation", "closed", "maxSegmentLength"]),
         "CurvePoint" => strict(&["position", "tilt", "scale"]),
-        "SweepAsset" => strict(&[
-            "id",
+        "Sweep" => strict(&[
             "curve",
-            "material",
-            "color",
             "frame",
-            "uvMode",
-            "uvScale",
             "smoothProfile",
             "capStart",
             "capEnd",
             "dash",
-            "collision",
-            "collider",
-            "colliderSize",
-            "colliderRadius",
-            "colliderHeight",
-            "colliderScale",
-            "colliderOffset",
-            "colliderRotation",
-            "colliderMargin",
-            "collisionGroup",
-            "collisionMask",
-            "friction",
-            "restitution",
-            "density",
         ]),
-        "Profile" => strict(&["closed"]),
+        "Profile" => strict(&["closed", "interpolation"]),
         "ProfilePoint" => strict(&["position"]),
-        "HairAsset" => strict(&[
-            "id",
-            "material",
-            "bindBone",
-            "space",
-            "defaultRepresentation",
-            "seed",
-        ]),
+        "Hair" => strict(&["bindBone", "space", "defaultRepresentation"]),
         "HairGroom" | "HairRepresentations" => strict(&[]),
         "HairGroup" => strict(&["id", "role"]),
         "HairGuide" => strict(&[
@@ -2534,20 +2448,39 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "tipShape",
         ]),
         "HairLOD" => strict(&["representation"]),
-        "MeshAsset" => strict(&["id", "material", "subdivision", "subdivisionScheme"]),
-        // The authoring schema is tag-based; accept both 3D MeshAsset and 2D MeshTopology fields.
-        "Vertex" => strict(&["position", "uv", "pinned", "id", "x", "y"]),
-        "Face" => strict(&["indices"]),
-        "HeadAsset" => strict(&[
+        "MeshAsset" => strict(&[
             "id",
+            "geometry",
             "material",
+            "color",
+            "materialSeed",
+            "collision",
+            "collider",
+            "colliderSize",
+            "colliderRadius",
+            "colliderHeight",
+            "colliderScale",
+            "colliderOffset",
+            "colliderRotation",
+            "colliderMargin",
+            "collisionGroup",
+            "collisionMask",
+            "friction",
+            "restitution",
+            "density",
+        ]),
+        // The authoring schema is tag-based; accept both 3D MeshAsset and 2D MeshTopology fields.
+        "Vertex" => strict(&[
+            "position", "uv", "pinned", "id", "x", "y", "bone", "sampleX", "sampleY",
+        ]),
+        "Face" => strict(&["indices"]),
+        "Head" => strict(&[
             "archetype",
             "variant",
             "bindBone",
             "symmetry",
             "segments",
             "rings",
-            "seed",
             "topology",
         ]),
         "FacialCage" => strict(&[
@@ -2555,14 +2488,12 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "segments",
             "profileSegments",
             "samplesPerSection",
-            "subdivision",
             "orbitalRings",
             "mouthRings",
             "preserveProfile",
-            "uvMode",
         ]),
         "HeadProfile" => strict(&[]),
-        "HeadCage" => strict(&["subdivision"]),
+        "HeadCage" => strict(&[]),
         "HeadSection" => strict(&["id", "at", "width", "frontDepth", "backDepth"]),
         "HeadDome" => strict(&[
             "start",
@@ -2632,7 +2563,7 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
         "Taper" => strict(&["axis", "start", "end"]),
         "Bend" => strict(&["axis", "angle", "pivot"]),
         "Twist" => strict(&["axis", "angle"]),
-        "Subdivision" => strict(&["levels"]),
+        "Subdivision" => strict(&["levels", "scheme"]),
         "Smooth" => strict(&["angle"]),
         "WeightedNormals" => strict(&["strength", "keepSharpEdges"]),
         "MeshBuild" => strict(&["topology", "triangulation", "quality", "maxTriangles"]),
@@ -3942,13 +3873,22 @@ const KNOWN_TAGS: &[&str] = &[
     "ImageAsset",
     "ModelAsset",
     "MaterialAsset",
-    "PrimitiveAsset",
+    "GeometryAsset",
+    "Mesh",
+    "Revolve",
+    "UV",
+    "RadialWave",
+    "DisplaceNoise",
+    "ThickenSurface",
+    "Wireframe",
+    "Partition",
+    "Primitive",
     "CurveAsset",
     "CurvePoint",
-    "SweepAsset",
+    "Sweep",
     "Profile",
     "ProfilePoint",
-    "HairAsset",
+    "Hair",
     "HairGroom",
     "HairGroup",
     "HairGuide",
@@ -3958,7 +3898,7 @@ const KNOWN_TAGS: &[&str] = &[
     "HairRepresentations",
     "HairCards",
     "HairLOD",
-    "HeadAsset",
+    "Head",
     "FacialCage",
     "HeadProfile",
     "HeadSection",
@@ -4316,6 +4256,17 @@ mod tests {
     };
 
     #[test]
+    fn indexed_locations_preserve_unicode_columns_and_multiline_attributes() {
+        let source = "<!--中文-->\n<Graph\n fps={24} duration=\"1s\" size={[64,64]}>";
+        let tags = super::scan_tags(source);
+        assert_eq!((tags[0].line, tags[0].column), (2, 1));
+        assert_eq!(
+            (tags[0].attributes[0].line, tags[0].attributes[0].column),
+            (3, 2)
+        );
+    }
+
+    #[test]
     fn atmosphere_medium_and_camera_optics_are_known_authoring_schema() {
         let script = r##"<Graph fps={30} duration="1s" size={[320,180]}>
   <Scene id="main">
@@ -4338,7 +4289,11 @@ mod tests {
     fn native_smooth_skin_reports_effective_gpu_binding() {
         let script = r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="limb" shape="capsule" radius="0.1" height="0.5" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="limb_geometry">
+    <Primitive shape="capsule" radius="0.1" height="0.5" />
+    </GeometryAsset>
+    <MeshAsset id="limb" material="geometry_default" geometry="limb_geometry" />
     <CompoundAsset id="hero" rig="rig">
       <SkinBinding mode="automatic" maxInfluences="3" falloff="2.25" normalize="true" />
       <Instance id="arm" asset="limb" bone="arm" skin="smooth"
@@ -4375,18 +4330,21 @@ mod tests {
     fn native_character_geometry_is_known_to_authoring_schema() {
         let script = r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="coat" shape="loft">
-      <Loft segments="12">
-        <Section at="-0.5" width="0.7" depth="0.4" />
-        <Section at="0.5" width="0.8" depth="0.4" />
-      </Loft>
-    </PrimitiveAsset>
-    <PrimitiveAsset id="hair" shape="ribbon">
-      <Ribbon width="0.2">
-        <PathPoint position={[0,0,0]} />
-        <PathPoint position={[0,-0.5,0]} />
-      </Ribbon>
-    </PrimitiveAsset>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="coat_geometry">
+    <Loft segments="12">
+            <Section at="-0.5" width="0.7" depth="0.4" />
+            <Section at="0.5" width="0.8" depth="0.4" />
+          </Loft>
+    </GeometryAsset>
+    <MeshAsset id="coat" material="geometry_default" geometry="coat_geometry" />
+    <GeometryAsset id="hair_geometry">
+    <Ribbon width="0.2">
+            <PathPoint position={[0,0,0]} />
+            <PathPoint position={[0,-0.5,0]} />
+          </Ribbon>
+    </GeometryAsset>
+    <MeshAsset id="hair" material="geometry_default" geometry="hair_geometry" />
   </Assets>
   <Background color="#000000" />
   <Present from="scene" />
@@ -4960,14 +4918,18 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|tag| tag["tag"] == "PrimitiveAsset")
+            .find(|tag| tag["tag"] == "Primitive")
             .expect("PrimitiveAsset schema");
         assert_eq!(primitive["discriminator"], "shape");
-        assert_eq!(primitive["variants"]["sphere"]["required"][2], "radius");
+        assert_eq!(primitive["variants"]["sphere"]["required"][1], "radius");
 
         let script = r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="ground" shape="plane" size={[8,8]} color="#202838" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="ground_geometry">
+    <Primitive shape="plane" size={[8,8]} />
+    </GeometryAsset>
+    <MeshAsset id="ground" color="#202838" material="geometry_default" geometry="ground_geometry" />
   </Assets>
   <Scene id="main">
     <Timeline>
@@ -5005,7 +4967,10 @@ mod tests {
         let script = r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
     <MaterialAsset id="glass" transmission="0.9" depthWrite="true" />
-    <PrimitiveAsset id="pane" shape="plane" size={[2,2]} segments="3" material="glass" />
+    <GeometryAsset id="pane_geometry">
+    <Primitive shape="plane" size={[2,2]} segments="3" />
+    </GeometryAsset>
+    <MeshAsset id="pane" material="glass" geometry="pane_geometry" />
   </Assets>
   <Scene id="main">
     <Timeline>

@@ -162,7 +162,8 @@ fn fog_and_optics_pack_into_distinct_gpu_uniform_slots() {
         near: 0.02,
         far: 40.0,
         aspect: 16.0 / 9.0,
-        optics: [5.0, 50.0, 2.8, 8.0],
+        optics: crate::world::optics::ResolvedCameraOptics::new(5.0, 50.0, 2.8)
+            .preview_uniform(8.0),
     };
 
     let params = super::GpuWorldLightingParams::from_world(&lighting, camera, false, 1);
@@ -171,7 +172,7 @@ fn fog_and_optics_pack_into_distinct_gpu_uniform_slots() {
     assert_eq!(params.fog2, [0.0, 0.0, 1.0, 1.0]);
     assert_eq!(params.fog3, [-4.0, 0.0, -8.0, 1.0]);
     assert_eq!(params.fog4, [4.0, 6.0, -1.0, 0.75]);
-    assert_eq!(params.optics0, [5.0, 50.0, 2.8, 8.0]);
+    assert_eq!(params.optics0, camera.optics);
     assert_eq!(super::pack_gpu_world_lighting(params).len(), 1168);
 }
 

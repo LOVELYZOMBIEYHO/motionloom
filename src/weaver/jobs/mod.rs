@@ -57,6 +57,7 @@ struct CachedSource {
     path: PathBuf,
     len: u64,
     modified: Option<std::time::SystemTime>,
+    output_resolution: Option<[u32; 2]>,
     script: Arc<String>,
     graph: Arc<crate::GraphScript>,
 }
@@ -116,23 +117,26 @@ impl RenderCache {
     fn source(
         &mut self,
         path: &Path,
+        output_resolution: Option<[u32; 2]>,
     ) -> Result<(Arc<String>, Arc<crate::GraphScript>, bool), WeaverError> {
         let metadata = std::fs::metadata(path)?;
         let modified = metadata.modified().ok();
         if let Some(source) = &self.source {
-            if source.path == path && source.len == metadata.len() && source.modified == modified {
+            if source.path == path
+                && source.len == metadata.len()
+                && source.modified == modified
+                && source.output_resolution == output_resolution
+            {
                 return Ok((source.script.clone(), source.graph.clone(), true));
             }
         }
         let script = Arc::new(std::fs::read_to_string(path)?);
-        let graph = Arc::new(
-            crate::parse_graph_script(&script)
-                .map_err(|error| WeaverError::Scene(error.to_string()))?,
-        );
+        let graph = Arc::new(parse_render_graph(&script, output_resolution)?);
         self.source = Some(CachedSource {
             path: path.to_path_buf(),
             len: metadata.len(),
             modified,
+            output_resolution,
             script: script.clone(),
             graph: graph.clone(),
         });
@@ -251,6 +255,19 @@ impl RenderCache {
     }
 }
 
+// Resolve explicit job output size using the shared Scene renderSize transform, never source edits.
+fn parse_render_graph(
+    script: &str,
+    output_resolution: Option<[u32; 2]>,
+) -> Result<crate::GraphScript, WeaverError> {
+    let mut graph =
+        crate::parse_graph_script(script).map_err(|error| WeaverError::Scene(error.to_string()))?;
+    if let Some([width, height]) = output_resolution {
+        graph.render_size = Some((width, height));
+    }
+    Ok(graph)
+}
+
 /// Render one evaluated frame. The host owns the executor and cancellation token.
 /// Checkpoints are keyed by settings, shader, geometry, lighting and texture bytes.
 pub async fn render<F: FnMut(RenderProgress)>(
@@ -281,14 +298,13 @@ async fn render_internal<F: FnMut(RenderProgress)>(
     let parse_started = Instant::now();
     let path = std::fs::canonicalize(&job.scene)?;
     let root = path.parent().unwrap();
+    let output_resolution =
+        (job.output_mode == SceneOutputMode::CompositeScene).then_some(job.resolution);
     let (script, graph, reused_source) = match cache.as_deref_mut() {
-        Some(cache) => cache.source(&path)?,
+        Some(cache) => cache.source(&path, output_resolution)?,
         None => {
             let script = Arc::new(std::fs::read_to_string(&path)?);
-            let graph = Arc::new(
-                crate::parse_graph_script(&script)
-                    .map_err(|error| WeaverError::Scene(error.to_string()))?,
-            );
+            let graph = Arc::new(parse_render_graph(&script, output_resolution)?);
             (script, graph, false)
         }
     };
@@ -308,12 +324,6 @@ async fn render_internal<F: FnMut(RenderProgress)>(
             .to_string(),
     );
     if job.output_mode == SceneOutputMode::CompositeScene {
-        if composition.output_size != job.resolution {
-            return Err(WeaverError::Invalid(format!(
-                "composite_scene resolution must match authored output {}x{}",
-                composition.output_size[0], composition.output_size[1]
-            )));
-        }
         if composition
             .layers
             .iter()
@@ -418,15 +428,11 @@ async fn render_internal<F: FnMut(RenderProgress)>(
         f32::from_bits(packed.light_offset),
         packed.lights as f32,
     ];
-    super::camera::configure(&mut p, &snap.camera, job)?;
+    let lens = super::camera::configure(&mut p, &snap.camera, job)?;
     if let Some(cache) = cache.as_deref_mut() {
         cache.apply_previous_camera(&mut p);
     }
-    snap.diagnostics.push(format!(
-        "Physical lens: {:.2} mm equivalent focal length, f/{:.2}, focus {:.2} scene units; assumes one unit is one meter.",
-        job.lens.sensor_width_mm / (2.0 * p[3][3] * p[4][3]),
-        job.lens.f_stop, job.lens.focus_distance,
-    ));
+    snap.diagnostics.push(lens.diagnostic());
     p[7] = [
         job.sampling.min_samples as f32,
         job.sampling.max_samples as f32,
@@ -499,6 +505,7 @@ async fn render_internal<F: FnMut(RenderProgress)>(
     timings.geometry_pack_seconds = pack_started.elapsed().as_secs_f64();
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(job)?);
+    hash.update(super::camera::OPTICS_REVISION);
     hash.update(script.as_bytes());
     hash.update(super::backend::wgpu::bytes(&packed.data));
     hash.update(super::backend::wgpu::bytes(&p));
@@ -1035,4 +1042,34 @@ pub(crate) fn converged(f: &[f32], s: &Sampling) -> bool {
     f[3] >= s.min_samples as f32
         && s.noise_threshold > 0.0
         && (f[5] / (f[3] - 1.0) / f[3]).max(0.0).sqrt() <= s.noise_threshold * f[4].abs().max(0.01)
+}
+
+#[cfg(test)]
+mod output_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_output_size_preserves_logical_canvas_and_reuses_the_source_cache() {
+        let source = include_str!("../../../tests/fixtures/cli-render.motionloom");
+        let path = std::env::temp_dir().join(format!(
+            "weaver-size-cache-{}.motionloom",
+            std::process::id()
+        ));
+        std::fs::write(&path, source).unwrap();
+        let mut cache = RenderCache::default();
+        let (_, first, reused) = cache.source(&path, Some([128, 128])).unwrap();
+        assert!(!reused);
+        assert_eq!(first.size, (64, 64));
+        assert_eq!(first.render_size, Some((128, 128)));
+        let (_, second, reused) = cache.source(&path, Some([128, 128])).unwrap();
+        assert!(reused);
+        assert!(Arc::ptr_eq(&first, &second));
+        let (_, third, reused) = cache.source(&path, Some([256, 256])).unwrap();
+        assert!(!reused);
+        assert_eq!(third.render_size, Some((256, 256)));
+        let authored = parse_render_graph(source, None).unwrap();
+        assert!(authored.render_size.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        std::fs::remove_file(path).unwrap();
+    }
 }

@@ -6423,16 +6423,18 @@ fn perspective_camera_view(
         .depth_of_field
         .as_ref()
         .map(|value| {
-            Ok::<[f32; 4], WorldRenderError>([
+            let optics = crate::world::optics::ResolvedCameraOptics::new(
                 eval_number(&value.focus_distance, distance, time)?.max(0.05),
                 eval_number(&value.focal_length_mm, 50.0, time)?.clamp(1.0, 300.0),
                 eval_number(&value.f_stop, 2.8, time)?.clamp(0.7, 64.0),
+            );
+            Ok::<[f32; 4], WorldRenderError>(optics.preview_uniform(
                 if value.max_blur_percent_height {
                     eval_number(&value.max_blur_px, 10.0, time)?.clamp(0.0, 10.0) * height_f / 100.0
                 } else {
                     eval_number(&value.max_blur_px, 10.0, time)?.clamp(0.0, 32.0)
                 },
-            ])
+            ))
         })
         .transpose()?
         .unwrap_or([0.0; 4]);

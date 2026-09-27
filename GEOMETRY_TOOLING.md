@@ -56,7 +56,7 @@ signatures and triangle counts, compares another camera-orbit frame and checks
 GLB roundtrip coordinates.
 
 Supported containers include Timeline, Track, Sequence, Chain, Group and inline
-Layer. Model/Character, CompoundAsset, MeshAsset, HairAsset and model/bone sampling
+Layer. Model/Character, CompoundAsset, MeshAsset, Hair and model/bone sampling
 reuse renderer lowering. 2D Group presentation transforms are omitted because
 they act on the rendered island. Scene-referencing Layers, 2D Repeat/Use/Precompose
 and terrain/vegetation return typed unsupported errors. Camera-dependent terrain

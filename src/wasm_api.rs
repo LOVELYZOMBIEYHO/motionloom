@@ -38,6 +38,13 @@ fn js_error(message: String) -> JsValue {
     js_sys::Error::new(&message).into()
 }
 
+/// Format DSL with the native formatter; source edits use UTF-16 editor offsets.
+#[wasm_bindgen]
+pub fn motionloom_format_dsl(script: &str) -> Result<String, JsValue> {
+    let result = crate::api::format_dsl(script).map_err(|error| js_error(error.to_string()))?;
+    serde_json::to_string(&result).map_err(|error| js_error(error.to_string()))
+}
+
 /// CPU-only diagnostic handle; does not change any preview or renderer state.
 #[wasm_bindgen]
 pub struct WasmPoseDiagnostics {

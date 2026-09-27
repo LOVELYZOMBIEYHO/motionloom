@@ -109,14 +109,14 @@ fn view_distance(depth: f32) -> f32 {
     return near * far / max(near + depth * (far - near), 0.000001);
 }
 
-fn circle_of_confusion(distance: f32, image_height: f32) -> f32 {
+// Match Weaver's aperture disk projected through the authored vertical FOV.
+// optics0.y is aperture radius in meters, and camera0.w is focal length in pixels.
+fn circle_of_confusion(distance: f32) -> f32 {
     if (lighting.optics0.x <= 0.0 || lighting.optics0.w <= 0.0) { return 0.0; }
     let focus = max(lighting.optics0.x, 0.05);
-    let focal = clamp(lighting.optics0.y * 0.001, 0.001, focus * 0.95);
-    let aperture = focal / max(lighting.optics0.z, 0.7);
-    let sensor_coc = abs(aperture * focal * (focus - distance) /
-        max(distance * (focus - focal), 0.000001));
-    return clamp(sensor_coc / 0.024 * image_height, 0.0, lighting.optics0.w);
+    let radius_px = lighting.optics0.y * lighting.camera0.w * abs(focus - distance) /
+        max(distance * focus, 0.000001);
+    return clamp(radius_px, 0.0, lighting.optics0.w);
 }
 
 // FXAA resolves high-contrast edges without temporal history or extra buffers.
@@ -239,7 +239,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(clamp(sample_uv * dimensions, vec2<f32>(0.0), dimensions - 1.0));
     let center_depth = textureLoad(scene_depth, pixel, 0);
     let center_distance = view_distance(center_depth);
-    let radius_px = circle_of_confusion(center_distance, dimensions.y);
+    let radius_px = circle_of_confusion(center_distance);
     // Explicit LOD keeps the sample legal inside the depth-dependent branch
     // below. Browser WebGPU enforces derivative-uniformity more strictly than
     // native Metal; implicit `textureSample` there can invalidate the DoF pass
@@ -281,7 +281,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         );
         let sample_pixel = vec2<i32>(sample_uv * dimensions);
         let sample_distance = view_distance(textureLoad(scene_depth, sample_pixel, 0));
-        let sample_coc = circle_of_confusion(sample_distance, dimensions.y);
+        let sample_coc = circle_of_confusion(sample_distance);
         // Depth-aware weights keep foreground silhouettes from bleeding into a focused subject.
         let separation = abs(sample_distance - center_distance) /
             max(min(sample_distance, center_distance), 0.1);

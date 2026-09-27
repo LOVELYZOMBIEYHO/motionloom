@@ -22,7 +22,7 @@ fn cinematic_bokeh(uv: vec2<f32>, center: vec4<f32>, distance: f32, radius: f32)
         // Background gather rejects nearer occluders and sharp surfaces.
         let far_uv = clamp(uv + disk * radius / dimensions, 0.5 / dimensions, 1.0 - 0.5 / dimensions);
         let far_distance = view_distance(textureLoad(scene_depth, vec2<i32>(far_uv * dimensions), 0));
-        let far_coc = circle_of_confusion(far_distance, dimensions.y);
+        let far_coc = circle_of_confusion(far_distance);
         let behind = smoothstep(distance * 0.98, distance * 1.01, far_distance);
         let support = smoothstep(r * radius - 1.0, r * radius + 1.0, far_coc);
         let fw = behind * support;
@@ -33,7 +33,7 @@ fn cinematic_bokeh(uv: vec2<f32>, center: vec4<f32>, distance: f32, radius: f32)
         // normalized by each source footprint instead of darkening silhouettes.
         let near_uv = clamp(uv + disk * maximum / dimensions, 0.5 / dimensions, 1.0 - 0.5 / dimensions);
         let near_distance = view_distance(textureLoad(scene_depth, vec2<i32>(near_uv * dimensions), 0));
-        let near_coc = circle_of_confusion(near_distance, dimensions.y);
+        let near_coc = circle_of_confusion(near_distance);
         let is_near = 1.0 - smoothstep(focus * 0.98, focus, near_distance);
         let occludes = 1.0 - smoothstep(distance, distance * 1.03, near_distance);
         let footprint = 1.0 - smoothstep(near_coc - 0.75, near_coc + 0.75, r * maximum);

@@ -42,13 +42,16 @@ fn source() -> String {
     r##"<Graph fps={24} duration="1s" size={[320,240]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#888888" />
-<MeshAsset id="shape" material="clay">
+<GeometryAsset id="shape_geometry">
+<Mesh>
 <Vertex position={[-1,-1,0]} />
 <Vertex position={[1,-1,0]} />
 <Vertex position={[1,1,0]} />
 <Vertex position={[-1,1,0]} />
 <Face indices={[0,1,2,3]} />
-</MeshAsset>
+</Mesh>
+</GeometryAsset>
+<MeshAsset id="shape" material="clay" geometry="shape_geometry" />
 </Assets>
 <Background color="#111111" />
 <Present from="scene" />
@@ -60,7 +63,8 @@ fn evaluation_source() -> String {
     r##"<Graph fps={24} duration="1s" size={[64,48]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#888888" />
-<MeshAsset id="shape" material="clay">
+<GeometryAsset id="shape_geometry">
+<Mesh>
 <Vertex position={[-1,-1,0.5]} />
 <Vertex position={[1,-1,0.5]} />
 <Vertex position={[1,1,0.5]} />
@@ -75,7 +79,9 @@ fn evaluation_source() -> String {
 <Face indices={[1,2,6,5]} />
 <Face indices={[3,7,6,2]} />
 <Face indices={[0,4,7,3]} />
-</MeshAsset>
+</Mesh>
+</GeometryAsset>
+<MeshAsset id="shape" material="clay" geometry="shape_geometry" />
 </Assets>
 <Background color="#111111" />
 <Scene id="mesh_reference_test_scene">
@@ -100,7 +106,8 @@ fn feature_evaluation_source(center_x: f32) -> String {
         r##"<Graph fps={{24}} duration="1s" size={{[64,48]}}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#888888" />
-<MeshAsset id="shape" material="clay">
+<GeometryAsset id="shape_geometry">
+<Mesh>
 <Vertex position={{[-1,-1,0.5]}} />
 <Vertex position={{[1,-1,0.5]}} />
 <Vertex position={{[1,1,0.5]}} />
@@ -119,7 +126,9 @@ fn feature_evaluation_source(center_x: f32) -> String {
 <Face indices={{[1,2,6,5]}} />
 <Face indices={{[3,7,6,2]}} />
 <Face indices={{[0,4,7,3]}} />
-</MeshAsset>
+</Mesh>
+</GeometryAsset>
+<MeshAsset id="shape" material="clay" geometry="shape_geometry" />
 </Assets>
 <Background color="#111111" />
 <Scene id="mesh_reference_test_scene">

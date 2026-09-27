@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn component_proposal_patches_only_the_selected_eye_id() {
-    let s = source().replace("</HeadAsset>", "<FaceLayout>\n<Eye id=\"one\" position={[-0.23,0.16,0]} width=\"0.34\" />\n<Eye id=\"two\" position={[0.23,0.16,0]} width=\"0.34\" />\n</FaceLayout>\n</HeadAsset>");
+    let s = source().replace("</Head>", "<FaceLayout>\n<Eye id=\"one\" position={[-0.23,0.16,0]} width=\"0.34\" />\n<Eye id=\"two\" position={[0.23,0.16,0]} width=\"0.34\" />\n</FaceLayout>\n</Head>");
     let a = asset(&s, "head").unwrap();
     let mut b = a.clone();
     let PrimitiveGeometry::HeadSurface {
@@ -34,10 +34,13 @@ fn component_proposal_patches_only_the_selected_eye_id() {
 fn source() -> String {
     r##"<!-- preserve this <HeadAsset id="head"> verbatim -->
 <Graph fps={30} duration="1s" size={[64,64]}>
-<Assets><MaterialAsset id="clay" baseColor="#BBAAAA" /><HeadAsset material="clay" id="head" archetype="humanoid" symmetry="x" segments="32" rings="24">
+<Assets><MaterialAsset id="clay" baseColor="#BBAAAA" /><GeometryAsset id="head_geometry">
+<Head archetype="humanoid" symmetry="x" segments="32" rings="24">
 <HeadShape size={[0.8,1.4,0.9]} forehead="1" cheekWidth="1" jawWidth="1" chinLength="0" chinRoundness="0.5" />
 <HeadMorph headWidth="1" headHeight="1" headDepth="1" />
-</HeadAsset></Assets><Background color="#121212" /><Present from="scene" /></Graph>
+</Head>
+</GeometryAsset>
+<MeshAsset material="clay" id="head" geometry="head_geometry" /></Assets><Background color="#121212" /><Present from="scene" /></Graph>
 <!-- preserve suffix -->"##.replace("><", ">\n<")
 }
 fn request() -> HeadReferenceSet {
@@ -93,7 +96,7 @@ fn fit_improves_and_preserves_source_and_locks() {
     let new = asset(&p.candidate_dsl, "head").unwrap();
     assert_eq!(parameter(&old, 1), parameter(&new, 1));
     assert!(p.candidate_dsl.starts_with("<!-- preserve this"));
-    assert!(p.candidate_dsl.ends_with("<!-- preserve suffix -->"));
+    assert!(p.candidate_dsl.ends_with("<!-- preserve suffix -->\n"));
     assert_eq!(apply_head_fit_proposal(&s, &p).unwrap(), p.candidate_dsl);
     assert!(apply_head_fit_proposal(&(s.clone() + " "), &p).is_err());
     let mut forged = p.clone();
@@ -116,9 +119,10 @@ fn explicit_head_is_comparable_but_parameter_fitting_is_rejected() {
     let explicit = r##"<Graph fps={30} duration="1s" size={[64,64]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#BBAAAA" />
-<HeadAsset id="head" material="clay" archetype="humanoid" topology="explicit">
+<GeometryAsset id="head_geometry">
+<Head archetype="humanoid" topology="explicit">
 <HeadShape size={[1,1,1]} />
-<HeadCage subdivision="0">
+<HeadCage>
 <Vertex position={[-0.5,-0.5,-0.5]} />
 <Vertex position={[0.5,-0.5,-0.5]} />
 <Vertex position={[0.5,0.5,-0.5]} />
@@ -134,7 +138,9 @@ fn explicit_head_is_comparable_but_parameter_fitting_is_rejected() {
 <Face indices={[3,7,6,2]} />
 <Face indices={[0,4,7,3]} />
 </HeadCage>
-</HeadAsset>
+</Head>
+</GeometryAsset>
+<MeshAsset id="head" material="clay" geometry="head_geometry" />
 </Assets>
 <Background color="#121212" />
 <Present from="scene" />
@@ -327,7 +333,7 @@ fn synthetic_mesh_recovery() {
 
 #[test]
 fn actual_morph_changes_measurements_and_nose_is_surface_anchored() {
-    let s=source().replace("headWidth=\"1\"","headWidth=\"1.2\"").replace("</HeadAsset>","<HeadFeature id=\"nose\" kind=\"nose_tip\" center={[0,-0.25,0.96]} size={[0.2,0.2,0.2]} amount=\"0.3\" />\n</HeadAsset>");
+    let s=source().replace("headWidth=\"1\"","headWidth=\"1.2\"").replace("</Head>","<HeadFeature id=\"nose\" kind=\"nose_tip\" center={[0,-0.25,0.96]} size={[0.2,0.2,0.2]} amount=\"0.3\" />\n</Head>");
     let r = request();
     let original = evaluate_head_reference_fit(&source(), &r).unwrap();
     let changed = evaluate_head_reference_fit(&s, &r).unwrap();

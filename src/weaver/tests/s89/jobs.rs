@@ -14,6 +14,8 @@ pub(super) fn baseline() -> RenderJob {
         QualityPreset::Ultra,
     );
     job.scene_id = "S89MistCourtyard".into();
+    // This physical calibration fixture deliberately owns its legacy job lens.
+    job.lens_source = LensSource::Job;
     job.render_style = "courtyard_filmic_physical".into();
     let width = std::env::var("WEAVER_TEST_WIDTH")
         .map(|s| s.parse::<u32>().expect("numeric width"))

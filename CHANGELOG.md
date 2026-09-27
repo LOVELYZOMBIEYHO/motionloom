@@ -22,7 +22,7 @@
   and reflection rays. `CompositeScene` now converts authored AtmosphereFog by
   default instead of silently producing an unfogged final frame.
 
-- Add reusable spatial `CurveAsset` data and renderable `SweepAsset` geometry
+- Add reusable spatial `CurveAsset` data and renderable `GeometryAsset/Sweep` geometry
   with inline profiles, linear/Catmull-Rom interpolation, deterministic
   tessellation, parallel-transport or world-up frames, distance UVs, exact
   dash intervals, optional open-profile normal smoothing, caps, materials and
@@ -109,7 +109,7 @@
   and current front-surface generator limits.
 
 - Replace the eye-specific explicit cage DSL with generic polygon mesh nodes.
-- Add `HeadAsset topology="facialCage|explicit"`, a versioned Rust facial-cage
+- Add `Head topology="facialCage|explicit"`, a versioned Rust facial-cage
   generator, reusable profiled-surface internals, cage inspection APIs, and the
   corresponding WASM export.
 - Remove `EyeAsset`, `EyeVertex`, and `EyeFace` without a compatibility parser.
@@ -164,7 +164,7 @@
   Discrete `activeCamera` cuts with three or more keys now take effect on the
   exact intermediate key frame instead of one frame later.
 
-- Split retained PrimitiveAsset identity into geometry, material, decoded
+- Split retained MeshAsset identity into geometry, material, decoded
   ImageAsset, GPU texture, and per-instance UV variation layers. Compound
   children with different `materialSeed` values now share mesh buffers and
   immutable texture pixels while preserving deterministic visual variation.
@@ -182,14 +182,14 @@
   variation. Added visual-only rounded box bevels that preserve the original
   bounds and simple collider.
 
-- Added asset-owned universal PrimitiveAsset collision with disabled, solid,
+- Added asset-owned universal MeshAsset collision with disabled, solid,
   and sensor modes; auto or explicitly mismatched collider shapes; adjustable
   collider dimensions and transforms; collision filtering and material data;
   and reusable CompoundAsset composition. Solid primitive instances now feed
   the shared character collision world, including stair step-up and opt-in
   standing foot contact correction.
 
-- Breaking DSL migration: added first-class typed `PrimitiveAsset` resources
+- Breaking DSL migration: added first-class typed `GeometryAsset` resources
   for box, sphere, plane, cylinder, cone, and wedge geometry. Primitive Models
   share the GLB PBR, shadow, lighting, physics, bounds, and retained GPU cache
   paths. Removed the `motionloom:box` source shorthand with a migration error,
@@ -265,4 +265,4 @@ Initial public MotionLoom crate release.
 
 - Added an experimental read-only MeshAsset edit snapshot with runtime camera
   projection, exposed to WASM for source-preserving vertex editing in the landing
-  page's Model editing (MeshAsset only) panel. HeadAsset remains parametric.
+  page's Model editing (MeshAsset only) panel. Head remains parametric.

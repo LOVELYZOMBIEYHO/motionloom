@@ -2,6 +2,10 @@
 // =========================================
 // crates/motionloom/src/dsl.rs
 
+use crate::dsl_syntax::{
+    closing_tag_name, find_tag_end_byte, is_raw_self_closing_tag, opening_tag_name,
+};
+
 use std::collections::HashMap;
 
 pub use crate::error::GraphParseError;
@@ -68,6 +72,9 @@ pub struct GraphScript {
     /// Reusable spatial curves consumed by procedural geometry and future motion tools.
     #[serde(default)]
     pub curve_assets: Vec<CurveAssetNode>,
+    /// Canonical reusable geometry, independent of material-bound MeshAsset instances.
+    #[serde(default)]
+    pub geometry_assets: Vec<GeometryAssetNode>,
     pub inputs: Vec<InputNode>,
     pub textures: Vec<TexNode>,
     pub buffers: Vec<BufferNode>,
@@ -477,6 +484,33 @@ pub enum PrimitiveModifierNode {
     },
     Subdivision {
         levels: u32,
+        scheme: String,
+    },
+    RadialWave {
+        axis: PrimitiveAxis,
+        cycles: u32,
+        amplitude: f32,
+        height_range: Option<[f32; 2]>,
+        falloff: f32,
+    },
+    DisplaceNoise {
+        amplitude: f32,
+        frequency: f32,
+        seed: u64,
+    },
+    ThickenSurface {
+        thickness: f32,
+    },
+    Wireframe {
+        radius: f32,
+        segments: u32,
+    },
+    Partition {
+        u_range: [f32; 2],
+        v_range: [f32; 2],
+    },
+    Uv {
+        settings: GeometryUvNode,
     },
     Smooth {
         angle: f32,
@@ -642,7 +676,6 @@ pub struct MaterialAssetNode {
     pub depth_write: String,
     #[serde(default)]
     pub sort_priority: i32,
-    pub mapping: String,
     pub texture_scale: [f32; 2],
     pub texture_offset: [f32; 2],
     pub texture_rotation: f32,
@@ -790,6 +823,9 @@ pub struct FacialCageNode {
 
 #[path = "dsl_control_cage.rs"]
 mod control_cage_parser;
+#[path = "dsl_geometry_assets.rs"]
+mod geometry_asset_parser;
+pub use geometry_asset_parser::{GeometryAssetNode, GeometryUvNode};
 
 // Keep the public serialized geometry model direct and stable across all variants.
 #[allow(clippy::large_enum_variant)]
@@ -1533,52 +1569,6 @@ fn find_open_tag_byte(input: &str, tag_name: &str, start: usize) -> Option<usize
     None
 }
 
-fn find_tag_end_byte(input: &str, start: usize) -> Option<usize> {
-    let mut in_double_quote = false;
-    let mut in_single_quote = false;
-    let mut brace_depth = 0usize;
-    for (offset, ch) in input[start..].char_indices() {
-        match ch {
-            '"' if !in_single_quote && brace_depth == 0 => in_double_quote = !in_double_quote,
-            '\'' if !in_double_quote && brace_depth == 0 => in_single_quote = !in_single_quote,
-            '{' if !in_double_quote && !in_single_quote => brace_depth += 1,
-            '}' if !in_double_quote && !in_single_quote => {
-                brace_depth = brace_depth.saturating_sub(1)
-            }
-            '>' if !in_double_quote && !in_single_quote && brace_depth == 0 => {
-                return Some(start + offset);
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn opening_tag_name(tag: &str) -> Option<&str> {
-    let rest = tag.strip_prefix('<')?.trim_start();
-    if rest.starts_with('/') || rest.starts_with('!') || rest.starts_with('?') {
-        return None;
-    }
-    let end = rest
-        .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
-}
-
-fn closing_tag_name(tag: &str) -> Option<&str> {
-    let rest = tag.strip_prefix("</")?.trim_start();
-    let end = rest
-        .find(|ch: char| ch.is_whitespace() || ch == '>')
-        .unwrap_or(rest.len());
-    Some(&rest[..end])
-}
-
-fn is_raw_self_closing_tag(tag: &str) -> bool {
-    tag.trim_end()
-        .strip_suffix('>')
-        .is_some_and(|body| body.trim_end().ends_with('/'))
-}
-
 fn first_non_ws_or_comment(input: &str, mut start: usize, end: usize) -> Option<usize> {
     while start < end {
         let rest = &input[start..end];
@@ -1609,6 +1599,21 @@ fn line_of_byte(input: &str, byte_ix: usize) -> usize {
 }
 
 pub fn parse_graph_script(input: &str) -> Result<GraphScript, GraphParseError> {
+    // Shared lexical spans make parser results independent of sibling-tag line layout.
+    validate_graph_present_placement(input)?;
+    let logical = crate::dsl_syntax::logical_tag_lines(input).map_err(|error| GraphParseError {
+        line: error.line,
+        message: error.message,
+    })?;
+    let mut graph = parse_graph_script_logical(&logical.source).map_err(|mut error| {
+        error.line = logical.original_line(error.line);
+        error
+    })?;
+    graph.raw_script = Some(input.to_string());
+    Ok(graph)
+}
+
+fn parse_graph_script_logical(input: &str) -> Result<GraphScript, GraphParseError> {
     const DEFAULT_GRAPH_DURATION_MS: u64 = 2_000;
     let normalized = input.replace('＝', "=");
     validate_graph_present_placement(&normalized)?;
@@ -1674,7 +1679,8 @@ pub fn parse_graph_script(input: &str) -> Result<GraphScript, GraphParseError> {
     let mut assets = Vec::<GraphAssetNode>::new();
     let mut material_assets = Vec::<MaterialAssetNode>::new();
     let mut curve_assets = Vec::<CurveAssetNode>::new();
-    let mut pending_sweeps = Vec::<PendingSweepAsset>::new();
+    let mut geometry_assets = Vec::<GeometryAssetNode>::new();
+    let mut pending_meshes = Vec::<geometry_asset_parser::PendingMeshAsset>::new();
     let mut textures = Vec::<TexNode>::new();
     let mut buffers = Vec::<BufferNode>::new();
     let mut backgrounds = Vec::<BackgroundNode>::new();
@@ -1728,13 +1734,18 @@ pub fn parse_graph_script(input: &str) -> Result<GraphScript, GraphParseError> {
                 mut parsed_assets,
                 mut parsed_materials,
                 mut parsed_curves,
-                mut parsed_sweeps,
+                mut parsed_geometries,
+                mut parsed_meshes,
                 end_ix,
             ) = parse_assets_block(&lines, i)?;
+            for mesh in &mut parsed_meshes {
+                mesh.asset_index += assets.len() + pending_meshes.len();
+            }
             assets.append(&mut parsed_assets);
             material_assets.append(&mut parsed_materials);
             curve_assets.append(&mut parsed_curves);
-            pending_sweeps.append(&mut parsed_sweeps);
+            geometry_assets.append(&mut parsed_geometries);
+            pending_meshes.append(&mut parsed_meshes);
             i = end_ix + 1;
             continue;
         }
@@ -2122,9 +2133,13 @@ pub fn parse_graph_script(input: &str) -> Result<GraphScript, GraphParseError> {
     lower_parametric_component_uses(&mut scene_nodes, &mut scenes)?;
     resolve_lowered_puppet_targets(&mut scene_nodes, &mut scenes)?;
     validate_curve_asset_ids(&assets, &curve_assets, graph_start_ix + 1)?;
-    let sweep_assets =
-        resolve_sweep_assets(&assets, &curve_assets, pending_sweeps, graph_start_ix + 1)?;
-    assets.extend(sweep_assets);
+    geometry_asset_parser::resolve_assets(
+        &mut assets,
+        &geometry_assets,
+        pending_meshes,
+        &curve_assets,
+        graph_start_ix + 1,
+    )?;
     validate_scene_image_assets(&scene_nodes, &scenes, &assets, graph_start_ix + 1)?;
     resolve_primitive_material_assets(&mut assets, &material_assets, graph_start_ix + 1)?;
 
@@ -2174,6 +2189,7 @@ pub fn parse_graph_script(input: &str) -> Result<GraphScript, GraphParseError> {
         assets,
         material_assets,
         curve_assets,
+        geometry_assets,
         inputs,
         textures,
         buffers,
@@ -2467,6 +2483,17 @@ fn parse_action_library_node(
 
 /// Parse a standalone `<ActionLibrary>` document produced by the Action Editor.
 pub fn parse_action_library_document(input: &str) -> Result<Vec<ActionNode>, GraphParseError> {
+    let logical = crate::dsl_syntax::logical_tag_lines(input).map_err(|error| GraphParseError {
+        line: error.line,
+        message: error.message,
+    })?;
+    parse_action_library_logical(&logical.source).map_err(|mut error| {
+        error.line = logical.original_line(error.line);
+        error
+    })
+}
+
+fn parse_action_library_logical(input: &str) -> Result<Vec<ActionNode>, GraphParseError> {
     let normalized = input.replace('＝', "=");
     let lines = normalized.lines().collect::<Vec<_>>();
     let Some(start) = lines
@@ -3733,25 +3760,6 @@ fn parse_process_resource_alias(
     ))
 }
 
-#[derive(Debug)]
-struct PendingSweepAsset {
-    id: String,
-    curve: String,
-    material: Option<String>,
-    color: [f32; 4],
-    profile_closed: bool,
-    smooth_profile: bool,
-    cap_start: bool,
-    cap_end: bool,
-    frame: String,
-    uv_mode: String,
-    uv_scale: [f32; 2],
-    dash: Option<[f32; 2]>,
-    profile: Vec<SweepProfilePointNode>,
-    source_tag: String,
-    line: usize,
-}
-
 /// Parse spatial curves independently so SweepAsset references remain order-independent.
 fn parse_curve_asset_block(
     lines: &[&str],
@@ -3866,183 +3874,103 @@ fn parse_curve_asset_block(
     ))
 }
 
-/// Parse a sweep before resolving its curve so declarations may appear in any order.
-fn parse_sweep_asset_block(
+/// Parse the canonical sweep generator without appearance or collision settings.
+fn parse_sweep_geometry(
     lines: &[&str],
     start: usize,
-) -> Result<(PendingSweepAsset, usize), GraphParseError> {
-    let (tag, open_end) = collect_tag_block(lines, start, '>', false)?;
-    let collision_attributes = [
-        "collision",
-        "collider",
-        "colliderSize",
-        "colliderRadius",
-        "colliderHeight",
-        "colliderScale",
-        "colliderOffset",
-        "colliderRotation",
-        "colliderMargin",
-        "collisionGroup",
-        "collisionMask",
-        "friction",
-        "restitution",
-        "density",
-    ];
-    let mut allowed = vec![
-        "id",
-        "curve",
-        "material",
-        "color",
-        "frame",
-        "uvMode",
-        "uvScale",
-        "capStart",
-        "capEnd",
-        "dash",
-        "smoothProfile",
-    ];
-    allowed.extend(collision_attributes);
-    validate_hair_attributes(&tag, &allowed, "SweepAsset", start + 1)?;
+    id: &str,
+) -> Result<(PrimitiveGeometry, usize), GraphParseError> {
+    let (tag, open) = collect_tag_block(lines, start, '>', false)?;
+    validate_hair_attributes(
+        &tag,
+        &[
+            "curve",
+            "frame",
+            "capStart",
+            "capEnd",
+            "dash",
+            "smoothProfile",
+        ],
+        "Sweep",
+        start + 1,
+    )?;
     if is_self_closing_tag(&tag) {
         return Err(GraphParseError {
             line: start + 1,
-            message: "SweepAsset requires one Profile block.".to_string(),
+            message: "Sweep requires Profile children.".into(),
         });
     }
-    let id = strip_wrappers(&required_attr_value(&tag, "id", start + 1)?).to_string();
     let curve = strip_wrappers(&required_attr_value(&tag, "curve", start + 1)?).to_string();
     let frame = primitive_string_attribute(&tag, "frame", "paralleltransport");
     if !matches!(frame.as_str(), "paralleltransport" | "worldup") {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("SweepAsset \"{id}\" frame must be parallelTransport or worldUp."),
+            message: "Sweep frame must be parallelTransport or worldUp.".into(),
         });
     }
-    let uv_mode = primitive_string_attribute(&tag, "uvMode", "distance");
-    if !matches!(uv_mode.as_str(), "distance" | "normalized") {
+    let end = find_matching_close_tag(lines, open + 1, "Sweep")?;
+    let children = geometry_asset_parser::nonempty_children(lines, open + 1, end);
+    if children.len() != 1 {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("SweepAsset \"{id}\" uvMode must be distance or normalized."),
+            message: "Sweep requires exactly one Profile.".into(),
         });
     }
-    let uv_scale = parse_optional_primitive_vec::<2>(&tag, "uvScale", &id, start + 1, false)?
-        .unwrap_or([1.0, 1.0]);
-    if uv_scale.iter().any(|value| *value <= 0.0) {
+    let (mut profile, closed, interpolation, profile_end) =
+        geometry_asset_parser::parse_profile(lines, children[0], id)?;
+    if geometry_asset_parser::nonempty_children(lines, profile_end + 1, end).len() > 0 {
         return Err(GraphParseError {
-            line: start + 1,
-            message: format!("SweepAsset \"{id}\" uvScale values must be positive."),
+            line: profile_end + 1,
+            message: "Sweep only accepts one Profile.".into(),
         });
     }
-    let dash = parse_optional_primitive_vec::<2>(&tag, "dash", &id, start + 1, false)?;
-    if dash.is_some_and(|values| values.iter().any(|value| *value <= 0.0)) {
+    if interpolation == CurveInterpolation::CatmullRom {
+        let intervals = if closed {
+            profile.len()
+        } else {
+            profile.len() - 1
+        };
+        let samples = intervals * 8;
+        profile = (0..if closed { samples } else { samples + 1 })
+            .map(|i| SweepProfilePointNode {
+                position: crate::geometry_ops::profile_sample(
+                    &profile,
+                    interpolation,
+                    i as f32 / samples as f32,
+                    closed,
+                ),
+            })
+            .collect();
+    }
+    let dash = parse_optional_primitive_vec::<2>(&tag, "dash", id, start + 1, false)?;
+    if dash.is_some_and(|v| v.iter().any(|x| *x <= 0.0)) {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("SweepAsset \"{id}\" dash values must be positive."),
-        });
-    }
-    let close = find_matching_close_tag(lines, open_end + 1, "SweepAsset")?;
-    let mut profile = None;
-    let mut profile_closed = false;
-    let mut index = open_end + 1;
-    while index < close {
-        let line = lines[index].trim();
-        if line.is_empty() || line.starts_with("//") || line.starts_with("<!--") {
-            index += 1;
-            continue;
-        }
-        if !starts_open_tag(line, "Profile") || profile.is_some() {
-            return Err(GraphParseError {
-                line: index + 1,
-                message: format!("SweepAsset \"{id}\" accepts exactly one Profile block."),
-            });
-        }
-        let (profile_tag, profile_open_end) = collect_tag_block(lines, index, '>', false)?;
-        validate_hair_attributes(&profile_tag, &["closed"], "Profile", index + 1)?;
-        profile_closed =
-            parse_optional_primitive_bool(&profile_tag, "closed", &id, index + 1)?.unwrap_or(false);
-        let profile_close = find_matching_close_tag(lines, profile_open_end + 1, "Profile")?;
-        let mut points = Vec::new();
-        let mut point_index = profile_open_end + 1;
-        while point_index < profile_close {
-            let point_line = lines[point_index].trim();
-            if point_line.is_empty()
-                || point_line.starts_with("//")
-                || point_line.starts_with("<!--")
-            {
-                point_index += 1;
-                continue;
-            }
-            if !starts_open_tag(point_line, "ProfilePoint") {
-                return Err(GraphParseError {
-                    line: point_index + 1,
-                    message: format!(
-                        "SweepAsset \"{id}\" Profile only accepts ProfilePoint children."
-                    ),
-                });
-            }
-            let (point_tag, end) = collect_self_closing_block(lines, point_index)?;
-            validate_hair_attributes(&point_tag, &["position"], "ProfilePoint", point_index + 1)?;
-            points.push(SweepProfilePointNode {
-                position: parse_optional_primitive_vec::<2>(
-                    &point_tag,
-                    "position",
-                    &id,
-                    point_index + 1,
-                    false,
-                )?
-                .ok_or_else(|| GraphParseError {
-                    line: point_index + 1,
-                    message: format!("SweepAsset \"{id}\" ProfilePoint requires position."),
-                })?,
-            });
-            point_index = end + 1;
-        }
-        profile = Some(points);
-        index = profile_close + 1;
-    }
-    let profile = profile.ok_or_else(|| GraphParseError {
-        line: start + 1,
-        message: format!("SweepAsset \"{id}\" requires one Profile block."),
-    })?;
-    let minimum = if profile_closed { 3 } else { 2 };
-    if profile.len() < minimum {
-        return Err(GraphParseError {
-            line: start + 1,
-            message: format!(
-                "SweepAsset \"{id}\" Profile requires at least {minimum} ProfilePoint children."
-            ),
-        });
-    }
-    if profile.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(GraphParseError {
-            line: start + 1,
-            message: format!("SweepAsset \"{id}\" Profile contains a zero-length edge."),
+            message: "Sweep dash values must be positive.".into(),
         });
     }
     Ok((
-        PendingSweepAsset {
-            id: id.clone(),
-            curve,
-            material: attr_value(&tag, "material").map(|value| strip_wrappers(&value).to_string()),
-            color: attr_value(&tag, "color")
-                .map(|value| parse_primitive_color(&value, &id, start + 1))
-                .transpose()?
-                .unwrap_or([1.0; 4]),
-            profile_closed,
-            smooth_profile: parse_optional_primitive_bool(&tag, "smoothProfile", &id, start + 1)?
+        PrimitiveGeometry::Sweep {
+            curve: CurveAssetNode {
+                id: curve,
+                interpolation: CurveInterpolation::Linear,
+                closed: false,
+                max_segment_length: 0.5,
+                points: vec![],
+            },
+            profile_closed: closed,
+            smooth_profile: parse_optional_primitive_bool(&tag, "smoothProfile", id, start + 1)?
                 .unwrap_or(false),
-            cap_start: parse_optional_primitive_bool(&tag, "capStart", &id, start + 1)?
+            cap_start: parse_optional_primitive_bool(&tag, "capStart", id, start + 1)?
                 .unwrap_or(true),
-            cap_end: parse_optional_primitive_bool(&tag, "capEnd", &id, start + 1)?.unwrap_or(true),
+            cap_end: parse_optional_primitive_bool(&tag, "capEnd", id, start + 1)?.unwrap_or(true),
             frame,
-            uv_mode,
-            uv_scale,
+            uv_mode: "distance".into(),
+            uv_scale: [1.0; 2],
             dash,
             profile,
-            source_tag: tag,
-            line: start + 1,
         },
-        close,
+        end,
     ))
 }
 
@@ -4066,79 +3994,6 @@ fn validate_curve_asset_ids(
     Ok(())
 }
 
-/// Lower sweeps to the existing primitive renderer while preserving curve metadata.
-fn resolve_sweep_assets(
-    assets: &[GraphAssetNode],
-    curves: &[CurveAssetNode],
-    sweeps: Vec<PendingSweepAsset>,
-    line: usize,
-) -> Result<Vec<GraphAssetNode>, GraphParseError> {
-    let curve_by_id = curves
-        .iter()
-        .map(|curve| (curve.id.as_str(), curve))
-        .collect::<HashMap<_, _>>();
-    let mut ids = assets
-        .iter()
-        .map(|asset| asset.id.clone())
-        .chain(curves.iter().map(|curve| curve.id.clone()))
-        .collect::<HashSet<_>>();
-    let mut resolved = Vec::with_capacity(sweeps.len());
-    for sweep in sweeps {
-        if !ids.insert(sweep.id.clone()) {
-            return Err(GraphParseError {
-                line,
-                message: format!("Duplicate Asset id: {}", sweep.id),
-            });
-        }
-        let curve = curve_by_id
-            .get(sweep.curve.as_str())
-            .ok_or_else(|| GraphParseError {
-                line: sweep.line,
-                message: format!(
-                    "SweepAsset \"{}\" references unknown CurveAsset \"{}\".",
-                    sweep.id, sweep.curve
-                ),
-            })?;
-        let geometry = PrimitiveGeometry::Sweep {
-            curve: (*curve).clone(),
-            profile_closed: sweep.profile_closed,
-            smooth_profile: sweep.smooth_profile,
-            cap_start: sweep.cap_start,
-            cap_end: sweep.cap_end,
-            frame: sweep.frame,
-            uv_mode: sweep.uv_mode,
-            uv_scale: sweep.uv_scale,
-            dash: sweep.dash,
-            profile: sweep.profile,
-        };
-        let collision =
-            parse_primitive_collision(&sweep.source_tag, &sweep.id, &geometry, sweep.line)?;
-        resolved.push(GraphAssetNode {
-            id: sweep.id.clone(),
-            kind: GraphAssetKind::Model,
-            source: GraphAssetSource::Primitive(PrimitiveAssetNode {
-                id: sweep.id,
-                geometry,
-                color: sweep.color,
-                material: sweep.material,
-                material_definition: None,
-                bevel_radius: 0.0,
-                bevel_segments: 0,
-                material_seed: None,
-                collision,
-                modifiers: Vec::new(),
-                mesh_build: PrimitiveMeshBuildNode::default(),
-                lod: PrimitiveLodNode::default(),
-            }),
-            decoder: None,
-            color_space: None,
-            profile: None,
-            clip: None,
-        });
-    }
-    Ok(resolved)
-}
-
 fn parse_assets_block(
     lines: &[&str],
     start: usize,
@@ -4147,7 +4002,8 @@ fn parse_assets_block(
         Vec<GraphAssetNode>,
         Vec<MaterialAssetNode>,
         Vec<CurveAssetNode>,
-        Vec<PendingSweepAsset>,
+        Vec<GeometryAssetNode>,
+        Vec<geometry_asset_parser::PendingMeshAsset>,
         usize,
     ),
     GraphParseError,
@@ -4157,7 +4013,8 @@ fn parse_assets_block(
     let mut assets = Vec::new();
     let mut materials = Vec::new();
     let mut curves = Vec::new();
-    let mut sweeps = Vec::new();
+    let mut geometries = Vec::new();
+    let mut meshes = Vec::new();
     let mut i = open_end_ix + 1;
     while i < close_ix {
         let line = lines[i].trim();
@@ -4181,11 +4038,25 @@ fn parse_assets_block(
             i = end_ix + 1;
             continue;
         }
-        if starts_open_tag(line, "SweepAsset") {
-            let (sweep, end_ix) = parse_sweep_asset_block(lines, i)?;
-            sweeps.push(sweep);
+        if starts_open_tag(line, "GeometryAsset") {
+            let (geometry, end_ix) = geometry_asset_parser::parse_geometry(lines, i)?;
+            geometries.push(geometry);
             i = end_ix + 1;
             continue;
+        }
+        if starts_open_tag(line, "MeshAsset") {
+            let (mut mesh, end_ix) = geometry_asset_parser::parse_mesh_reference(lines, i)?;
+            mesh.asset_index = assets.len() + meshes.len();
+            meshes.push(mesh);
+            i = end_ix + 1;
+            continue;
+        }
+        if ["PrimitiveAsset", "SweepAsset", "HeadAsset", "HairAsset"]
+            .iter()
+            .any(|name| starts_open_tag(line, name))
+        {
+            return Err(GraphParseError { line: i + 1,
+                message: "Removed geometry asset syntax. Use GeometryAsset with Primitive/Sweep and a material-bound MeshAsset reference. See GEOMETRY_ASSETS.md.".into() });
         }
         let (kind, tag_name) = if starts_open_tag(line, "VideoAsset") {
             (GraphAssetKind::Video, "VideoAsset")
@@ -4197,14 +4068,6 @@ fn parse_assets_block(
             (GraphAssetKind::Audio, "AudioAsset")
         } else if starts_open_tag(line, "AnimationAsset") {
             (GraphAssetKind::Animation, "AnimationAsset")
-        } else if starts_open_tag(line, "PrimitiveAsset") {
-            (GraphAssetKind::Model, "PrimitiveAsset")
-        } else if starts_open_tag(line, "HairAsset") {
-            (GraphAssetKind::Model, "HairAsset")
-        } else if starts_open_tag(line, "MeshAsset") {
-            (GraphAssetKind::Model, "MeshAsset")
-        } else if starts_open_tag(line, "HeadAsset") {
-            (GraphAssetKind::Model, "HeadAsset")
         } else if starts_open_tag(line, "TerrainAsset") {
             (GraphAssetKind::Model, "TerrainAsset")
         } else if starts_open_tag(line, "VegetationAsset") {
@@ -4215,7 +4078,7 @@ fn parse_assets_block(
             return Err(GraphParseError {
                 line: i + 1,
                 message: format!(
-                    "<Assets> only accepts typed media/model assets, <CurveAsset>, <SweepAsset>, or <MaterialAsset>, got: {line}"
+                    "<Assets> only accepts typed media/model assets, <CurveAsset>, <GeometryAsset>, <MeshAsset>, or <MaterialAsset>, got: {line}"
                 ),
             });
         };
@@ -4233,52 +4096,7 @@ fn parse_assets_block(
             i = end_ix + 1;
             continue;
         }
-        if tag_name == "PrimitiveAsset" {
-            let (primitive, end_ix) = parse_primitive_asset_block(lines, i)?;
-            assets.push(GraphAssetNode {
-                id: primitive.id.clone(),
-                kind,
-                source: GraphAssetSource::Primitive(primitive),
-                decoder: None,
-                color_space: None,
-                profile: None,
-                clip: None,
-            });
-            i = end_ix + 1;
-            continue;
-        }
-        if tag_name == "HairAsset" {
-            let (hair, end_ix) = parse_hair_asset_block(lines, i)?;
-            assets.push(GraphAssetNode {
-                id: hair.id.clone(),
-                kind,
-                source: GraphAssetSource::Primitive(hair),
-                decoder: None,
-                color_space: None,
-                profile: None,
-                clip: None,
-            });
-            i = end_ix + 1;
-            continue;
-        }
-        if tag_name == "HeadAsset" || tag_name == "MeshAsset" {
-            let (head, end_ix) = if tag_name == "MeshAsset" {
-                control_cage_parser::parse_mesh_asset(lines, i)?
-            } else {
-                parse_head_asset_block(lines, i)?
-            };
-            assets.push(GraphAssetNode {
-                id: head.id.clone(),
-                kind,
-                source: GraphAssetSource::Primitive(head),
-                decoder: None,
-                color_space: None,
-                profile: None,
-                clip: None,
-            });
-            i = end_ix + 1;
-            continue;
-        }
+
         let (tag, end_ix) = collect_self_closing_block(lines, i)?;
         if !starts_open_tag(tag.trim(), tag_name) {
             return Err(GraphParseError {
@@ -4305,7 +4123,7 @@ fn parse_assets_block(
             if src.starts_with("motionloom:box:") {
                 return Err(GraphParseError {
                     line: i + 1,
-                    message: "motionloom:box shorthand has been removed. Declare <PrimitiveAsset shape=\"box\" size={...} color=\"...\" />.".to_string(),
+                    message: "motionloom:box shorthand has been removed. Declare a GeometryAsset/Primitive and a material-bound MeshAsset reference.".to_string(),
                 });
             }
             GraphAssetSource::External { src }
@@ -4342,31 +4160,6 @@ fn parse_assets_block(
             });
         }
     }
-    for asset in &assets {
-        let Some(compound) = asset.compound() else {
-            continue;
-        };
-        for instance in &compound.instances {
-            let Some(referenced) = assets.iter().find(|asset| asset.id == instance.asset) else {
-                return Err(GraphParseError {
-                    line: start + 1,
-                    message: format!(
-                        "CompoundAsset \"{}\" Instance \"{}\" references unknown asset \"{}\".",
-                        compound.id, instance.id, instance.asset
-                    ),
-                });
-            };
-            if referenced.primitive().is_none() {
-                return Err(GraphParseError {
-                    line: start + 1,
-                    message: format!(
-                        "CompoundAsset \"{}\" Instance \"{}\" must reference a PrimitiveAsset in V1.",
-                        compound.id, instance.id
-                    ),
-                });
-            }
-        }
-    }
     let mut material_ids = HashSet::new();
     if let Some(duplicate) = materials
         .iter()
@@ -4377,137 +4170,7 @@ fn parse_assets_block(
             message: format!("Duplicate MaterialAsset id: {}", duplicate.id),
         });
     }
-    Ok((assets, materials, curves, sweeps, close_ix))
-}
-
-fn parse_primitive_asset_block(
-    lines: &[&str],
-    start: usize,
-) -> Result<(PrimitiveAssetNode, usize), GraphParseError> {
-    let (open_tag, open_end_ix) = collect_tag_block(lines, start, '>', false)?;
-    let id = strip_wrappers(&required_attr_value(&open_tag, "id", start + 1)?).to_string();
-    let mut primitive = parse_primitive_asset(&open_tag, &id, start + 1)?;
-    if is_self_closing_tag(&open_tag) {
-        if matches!(
-            primitive.geometry,
-            PrimitiveGeometry::Loft { .. } | PrimitiveGeometry::Ribbon { .. }
-        ) {
-            return Err(GraphParseError {
-                line: start + 1,
-                message: format!(
-                    "PrimitiveAsset \"{id}\" requires a nested Loft or Ribbon geometry block."
-                ),
-            });
-        }
-        validate_primitive_build_budget(&primitive, start + 1)?;
-        return Ok((primitive, open_end_ix));
-    }
-
-    let close_ix = find_matching_close_tag(lines, open_end_ix + 1, "PrimitiveAsset")?;
-    let mut index = open_end_ix + 1;
-    let mut saw_modifiers = false;
-    let mut saw_mesh_build = false;
-    let mut saw_lod = false;
-    let mut saw_geometry_block = false;
-    while index < close_ix {
-        let line = lines[index].trim();
-        if line.is_empty() || line.starts_with("//") || line.starts_with("<!--") {
-            index += 1;
-            continue;
-        }
-        if starts_open_tag(line, "Modifiers") {
-            if saw_modifiers {
-                return Err(GraphParseError {
-                    line: index + 1,
-                    message: format!(
-                        "PrimitiveAsset \"{id}\" may declare only one <Modifiers> block."
-                    ),
-                });
-            }
-            let (modifiers, end_ix) = parse_primitive_modifiers(lines, index, &id)?;
-            primitive.modifiers = modifiers;
-            saw_modifiers = true;
-            index = end_ix + 1;
-            continue;
-        }
-        if starts_open_tag(line, "MeshBuild") {
-            if saw_mesh_build {
-                return Err(GraphParseError {
-                    line: index + 1,
-                    message: format!("PrimitiveAsset \"{id}\" may declare only one <MeshBuild />."),
-                });
-            }
-            let (tag, end_ix) = collect_self_closing_block(lines, index)?;
-            primitive.mesh_build = parse_primitive_mesh_build(&tag, &id, index + 1)?;
-            saw_mesh_build = true;
-            index = end_ix + 1;
-            continue;
-        }
-        if starts_open_tag(line, "LOD") {
-            if saw_lod {
-                return Err(GraphParseError {
-                    line: index + 1,
-                    message: format!("PrimitiveAsset \"{id}\" may declare only one <LOD />."),
-                });
-            }
-            let (tag, end_ix) = collect_self_closing_block(lines, index)?;
-            primitive.lod = parse_primitive_lod(&tag, &id, index + 1)?;
-            saw_lod = true;
-            index = end_ix + 1;
-            continue;
-        }
-        if starts_open_tag(line, "Loft") {
-            if saw_geometry_block || !matches!(primitive.geometry, PrimitiveGeometry::Loft { .. }) {
-                return Err(GraphParseError {
-                    line: index + 1,
-                    message: format!(
-                        "PrimitiveAsset \"{id}\" accepts one <Loft> block only when shape=\"loft\"."
-                    ),
-                });
-            }
-            let (geometry, end_ix) = parse_primitive_loft(lines, index, &id)?;
-            primitive.geometry = geometry;
-            saw_geometry_block = true;
-            index = end_ix + 1;
-            continue;
-        }
-        if starts_open_tag(line, "Ribbon") {
-            if saw_geometry_block || !matches!(primitive.geometry, PrimitiveGeometry::Ribbon { .. })
-            {
-                return Err(GraphParseError {
-                    line: index + 1,
-                    message: format!(
-                        "PrimitiveAsset \"{id}\" accepts one <Ribbon> block only when shape=\"ribbon\"."
-                    ),
-                });
-            }
-            let (geometry, end_ix) = parse_primitive_ribbon(lines, index, &id)?;
-            primitive.geometry = geometry;
-            saw_geometry_block = true;
-            index = end_ix + 1;
-            continue;
-        }
-        return Err(GraphParseError {
-            line: index + 1,
-            message: format!(
-                "PrimitiveAsset \"{id}\" accepts its Loft/Ribbon geometry block, <Modifiers>, <MeshBuild />, or <LOD /> children, got: {line}"
-            ),
-        });
-    }
-    if matches!(
-        primitive.geometry,
-        PrimitiveGeometry::Loft { .. } | PrimitiveGeometry::Ribbon { .. }
-    ) && !saw_geometry_block
-    {
-        return Err(GraphParseError {
-            line: start + 1,
-            message: format!(
-                "PrimitiveAsset \"{id}\" requires a matching Loft or Ribbon geometry block."
-            ),
-        });
-    }
-    validate_primitive_build_budget(&primitive, start + 1)?;
-    Ok((primitive, close_ix))
+    Ok((assets, materials, curves, geometries, meshes, close_ix))
 }
 
 /// Parse a procedural head as a generic anatomy surface. FaceLayout is an
@@ -4515,19 +4178,18 @@ fn parse_primitive_asset_block(
 fn parse_head_asset_block(
     lines: &[&str],
     start: usize,
+    geometry_id: &str,
 ) -> Result<(PrimitiveAssetNode, usize), GraphParseError> {
     let (tag, open_end_ix) = collect_tag_block(lines, start, '>', false)?;
     if is_self_closing_tag(&tag) {
         return Err(GraphParseError {
             line: start + 1,
-            message: "HeadAsset requires a HeadShape child.".to_string(),
+            message: "Head requires a HeadShape child.".to_string(),
         });
     }
     validate_head_attributes(
         &tag,
         &[
-            "id",
-            "material",
             "archetype",
             "variant",
             "bindBone",
@@ -4535,20 +4197,18 @@ fn parse_head_asset_block(
             "topology",
             "segments",
             "rings",
-            "seed",
         ],
-        "HeadAsset",
+        "Head",
         start + 1,
     )?;
-    let id = strip_wrappers(&required_attr_value(&tag, "id", start + 1)?).to_string();
-    let material = strip_wrappers(&required_attr_value(&tag, "material", start + 1)?).to_string();
+    let id = geometry_id.to_string();
     let archetype = strip_wrappers(&required_attr_value(&tag, "archetype", start + 1)?)
         .trim()
         .to_ascii_lowercase();
     if archetype.is_empty() {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("HeadAsset \"{id}\" archetype must not be empty."),
+            message: format!("Head \"{id}\" archetype must not be empty."),
         });
     }
     let variant = attr_value(&tag, "variant").map(|raw| strip_wrappers(&raw).to_string());
@@ -4557,16 +4217,14 @@ fn parse_head_asset_block(
     if !matches!(symmetry.as_str(), "x" | "none") {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("HeadAsset \"{id}\" symmetry must be x or none."),
+            message: format!("Head \"{id}\" symmetry must be x or none."),
         });
     }
     let topology = primitive_string_attribute(&tag, "topology", "procedural");
     if !matches!(topology.as_str(), "procedural" | "facialcage" | "explicit") {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!(
-                "HeadAsset \"{id}\" topology must be procedural, facialCage, or explicit."
-            ),
+            message: format!("Head \"{id}\" topology must be procedural, facialCage, or explicit."),
         });
     }
     if topology != "procedural"
@@ -4575,7 +4233,7 @@ fn parse_head_asset_block(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "HeadAsset \"{id}\" segments/rings apply only to procedural topology; use FacialCage segments for facialCage topology."
+                "Head \"{id}\" segments/rings apply only to procedural topology; use FacialCage segments for facialCage topology."
             ),
         });
     }
@@ -4587,12 +4245,12 @@ fn parse_head_asset_block(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "HeadAsset \"{id}\" requires segments 12..{maximum_resolution} and rings 8..{maximum_resolution}."
+                "Head \"{id}\" requires segments 12..{maximum_resolution} and rings 8..{maximum_resolution}."
             ),
         });
     }
-    let material_seed = parse_optional_primitive_u64(&tag, "seed", &id, start + 1)?;
-    let close_ix = find_matching_close_tag(lines, open_end_ix + 1, "HeadAsset")?;
+    let material_seed = None;
+    let close_ix = find_matching_close_tag(lines, open_end_ix + 1, "Head")?;
     let mut shape = None;
     let mut face_layout = None;
     let mut morph = None;
@@ -4612,7 +4270,7 @@ fn parse_head_asset_block(
             if !head_profile.is_empty() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one HeadProfile."),
+                    message: format!("Head \"{id}\" may contain one HeadProfile."),
                 });
             }
             let (profile, end_ix) = parse_head_profile(lines, index, &id)?;
@@ -4624,7 +4282,7 @@ fn parse_head_asset_block(
             if explicit_cage.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one HeadCage."),
+                    message: format!("Head \"{id}\" may contain one HeadCage."),
                 });
             }
             let (cage, end_ix) = control_cage_parser::parse_head_cage(lines, index, &id)?;
@@ -4636,7 +4294,7 @@ fn parse_head_asset_block(
             if face_layout.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one FaceLayout."),
+                    message: format!("Head \"{id}\" may contain one FaceLayout."),
                 });
             }
             let (layout, end) = face_layout_parser::parse(lines, index, &id)?;
@@ -4649,7 +4307,7 @@ fn parse_head_asset_block(
             if shape.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one HeadShape."),
+                    message: format!("Head \"{id}\" may contain one HeadShape."),
                 });
             }
             shape = Some(parse_head_shape(&child, &id, index + 1)?);
@@ -4657,7 +4315,7 @@ fn parse_head_asset_block(
             if facial_cage.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one FacialCage."),
+                    message: format!("Head \"{id}\" may contain one FacialCage."),
                 });
             }
             facial_cage = Some(parse_facial_cage(&child, &id, index + 1)?);
@@ -4665,7 +4323,7 @@ fn parse_head_asset_block(
             if head_dome.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one HeadDome."),
+                    message: format!("Head \"{id}\" may contain one HeadDome."),
                 });
             }
             head_dome = Some(parse_head_dome(&child, &id, index + 1)?);
@@ -4673,7 +4331,7 @@ fn parse_head_asset_block(
             if morph.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HeadAsset \"{id}\" may contain one HeadMorph."),
+                    message: format!("Head \"{id}\" may contain one HeadMorph."),
                 });
             }
             morph = Some(parse_head_morph(&child, &id, index + 1)?);
@@ -4683,7 +4341,7 @@ fn parse_head_asset_block(
             return Err(GraphParseError {
                 line: index + 1,
                 message: format!(
-                    "HeadAsset \"{id}\" accepts HeadShape, FaceLayout, FacialCage, HeadProfile, HeadDome, HeadCage, HeadMorph, and HeadFeature children, got: {line}"
+                    "Head \"{id}\" accepts HeadShape, FaceLayout, FacialCage, HeadProfile, HeadDome, HeadCage, HeadMorph, and HeadFeature children, got: {line}"
                 ),
             });
         }
@@ -4691,7 +4349,7 @@ fn parse_head_asset_block(
     }
     let shape = shape.ok_or_else(|| GraphParseError {
         line: start + 1,
-        message: format!("HeadAsset \"{id}\" requires HeadShape."),
+        message: format!("Head \"{id}\" requires HeadShape."),
     })?;
     match topology.as_str() {
         "facialcage"
@@ -4700,21 +4358,21 @@ fn parse_head_asset_block(
             return Err(GraphParseError {
                 line: start + 1,
                 message: format!(
-                    "HeadAsset \"{id}\" facialCage topology requires FacialCage, FaceLayout, and at least two HeadSection children."
+                    "Head \"{id}\" facialCage topology requires FacialCage, FaceLayout, and at least two HeadSection children."
                 ),
             });
         }
         "explicit" if explicit_cage.is_none() => {
             return Err(GraphParseError {
                 line: start + 1,
-                message: format!("HeadAsset \"{id}\" explicit topology requires HeadCage."),
+                message: format!("Head \"{id}\" explicit topology requires HeadCage."),
             });
         }
         "procedural" if facial_cage.is_some() || explicit_cage.is_some() => {
             return Err(GraphParseError {
                 line: start + 1,
                 message: format!(
-                    "HeadAsset \"{id}\" procedural topology cannot contain FacialCage or HeadCage."
+                    "Head \"{id}\" procedural topology cannot contain FacialCage or HeadCage."
                 ),
             });
         }
@@ -4730,7 +4388,7 @@ fn parse_head_asset_block(
         )
         .map_err(|error| GraphParseError {
             line: start + 1,
-            message: format!("HeadAsset \"{id}\": {error}"),
+            message: format!("Head \"{id}\": {error}"),
         })?;
         let min_y = head_profile.first().expect("validated profile").at;
         let max_y = head_dome
@@ -4755,7 +4413,7 @@ fn parse_head_asset_block(
             return Err(GraphParseError {
                 line: start + 1,
                 message: format!(
-                    "HeadAsset \"{id}\" facial features must have positive dimensions and fit inside HeadProfile/HeadDome bounds."
+                    "Head \"{id}\" facial features must have positive dimensions and fit inside HeadProfile/HeadDome bounds."
                 ),
             });
         }
@@ -4768,7 +4426,7 @@ fn parse_head_asset_block(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "HeadAsset \"{id}\" has duplicate HeadFeature id \"{}\".",
+                "Head \"{id}\" has duplicate HeadFeature id \"{}\".",
                 duplicate.id
             ),
         });
@@ -4793,7 +4451,7 @@ fn parse_head_asset_block(
             morph: morph.unwrap_or_else(default_head_morph),
         },
         color: [1.0; 4],
-        material: Some(material),
+        material: None,
         material_definition: None,
         bevel_radius: 0.0,
         bevel_segments: 0,
@@ -4818,11 +4476,9 @@ fn parse_facial_cage(
             "segments",
             "profileSegments",
             "samplesPerSection",
-            "subdivision",
             "orbitalRings",
             "mouthRings",
             "preserveProfile",
-            "uvMode",
         ],
         "FacialCage",
         line,
@@ -4835,7 +4491,7 @@ fn parse_facial_cage(
         return Err(GraphParseError {
             line,
             message: format!(
-                "HeadAsset \"{asset_id}\" FacialCage preserveProfile must be true or false."
+                "Head \"{asset_id}\" FacialCage preserveProfile must be true or false."
             ),
         });
     }
@@ -4844,11 +4500,11 @@ fn parse_facial_cage(
         segments: positive("segments", 96)?,
         profile_segments: positive("profileSegments", 96)?,
         samples_per_section: positive("samplesPerSection", 6)?,
-        subdivision: positive("subdivision", 1)?,
+        subdivision: 0,
         orbital_rings: positive("orbitalRings", 10)?,
         mouth_rings: positive("mouthRings", 8)?,
         preserve_profile: preserve_profile == "true",
-        uv_mode: primitive_string_attribute(tag, "uvMode", "frontBack"),
+        uv_mode: "frontback".into(),
     };
     if result.generator_version != 1
         || !(12..=256).contains(&result.segments)
@@ -4861,7 +4517,7 @@ fn parse_facial_cage(
     {
         return Err(GraphParseError {
             line,
-            message: format!("HeadAsset \"{asset_id}\" has invalid FacialCage limits."),
+            message: format!("Head \"{asset_id}\" has invalid FacialCage limits."),
         });
     }
     Ok(result)
@@ -4897,7 +4553,7 @@ fn parse_head_dome(
         return Err(GraphParseError {
             line,
             message: format!(
-                "HeadAsset \"{asset_id}\" HeadDome requires top > start and samples 4..256."
+                "Head \"{asset_id}\" HeadDome requires top > start and samples 4..256."
             ),
         });
     }
@@ -4950,7 +4606,7 @@ fn parse_head_profile(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "HeadAsset \"{asset_id}\" HeadSections must ascend and keep frontDepth > backDepth."
+                "Head \"{asset_id}\" HeadSections must ascend and keep frontDepth > backDepth."
             ),
         });
     }
@@ -5014,7 +4670,7 @@ fn parse_head_feature(
     if kind.is_empty() {
         return Err(GraphParseError {
             line,
-            message: format!("HeadAsset \"{asset_id}\" HeadFeature kind must not be empty."),
+            message: format!("Head \"{asset_id}\" HeadFeature kind must not be empty."),
         });
     }
     let falloff = primitive_string_attribute(tag, "falloff", "smooth");
@@ -5022,7 +4678,7 @@ fn parse_head_feature(
         return Err(GraphParseError {
             line,
             message: format!(
-                "HeadAsset \"{asset_id}\" HeadFeature falloff must be smooth, linear, or sharp."
+                "Head \"{asset_id}\" HeadFeature falloff must be smooth, linear, or sharp."
             ),
         });
     }
@@ -5030,7 +4686,7 @@ fn parse_head_feature(
     if !matches!(mirror.as_str(), "none" | "x") {
         return Err(GraphParseError {
             line,
-            message: format!("HeadAsset \"{asset_id}\" HeadFeature mirror must be none or x."),
+            message: format!("Head \"{asset_id}\" HeadFeature mirror must be none or x."),
         });
     }
     Ok(HeadFeatureNode {
@@ -5039,7 +4695,7 @@ fn parse_head_feature(
         center: parse_optional_primitive_vec::<3>(tag, "center", asset_id, line, false)?
             .ok_or_else(|| GraphParseError {
                 line,
-                message: format!("HeadAsset \"{asset_id}\" HeadFeature requires center."),
+                message: format!("Head \"{asset_id}\" HeadFeature requires center."),
             })?,
         size: parse_primitive_vec::<3>(tag, "size", asset_id, line)?,
         amount: parse_head_number(tag, "amount", asset_id, line, 0.0)?,
@@ -5127,7 +4783,7 @@ fn parse_unit_head_number(
     if !(0.0..=1.0).contains(&value) {
         return Err(GraphParseError {
             line,
-            message: format!("HeadAsset \"{asset_id}\" {attribute} must be from zero through one."),
+            message: format!("Head \"{asset_id}\" {attribute} must be from zero through one."),
         });
     }
     Ok(value)
@@ -5166,29 +4822,22 @@ struct HairCardParseSettings {
 fn parse_hair_asset_block(
     lines: &[&str],
     start: usize,
+    geometry_id: &str,
 ) -> Result<(PrimitiveAssetNode, usize), GraphParseError> {
     let (tag, open_end_ix) = collect_tag_block(lines, start, '>', false)?;
     if is_self_closing_tag(&tag) {
         return Err(GraphParseError {
             line: start + 1,
-            message: "HairAsset requires HairGroom and HairRepresentations children.".to_string(),
+            message: "Hair requires HairGroom and HairRepresentations children.".to_string(),
         });
     }
     validate_hair_attributes(
         &tag,
-        &[
-            "id",
-            "material",
-            "bindBone",
-            "space",
-            "defaultRepresentation",
-            "seed",
-        ],
-        "HairAsset",
+        &["bindBone", "space", "defaultRepresentation"],
+        "Hair",
         start + 1,
     )?;
-    let id = strip_wrappers(&required_attr_value(&tag, "id", start + 1)?).to_string();
-    let material = strip_wrappers(&required_attr_value(&tag, "material", start + 1)?).to_string();
+    let id = geometry_id.to_string();
     let bind_bone = attr_value(&tag, "bindBone").map(|raw| strip_wrappers(&raw).to_string());
     let space = attr_value(&tag, "space")
         .map(|raw| strip_wrappers(&raw).to_ascii_lowercase())
@@ -5196,13 +4845,13 @@ fn parse_hair_asset_block(
     if !matches!(space.as_str(), "bone_local" | "asset_local") {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("HairAsset \"{id}\" space must be bone_local or asset_local."),
+            message: format!("Hair \"{id}\" space must be bone_local or asset_local."),
         });
     }
     let default_representation =
         attr_value(&tag, "defaultRepresentation").map(|raw| strip_wrappers(&raw).to_string());
-    let material_seed = parse_optional_primitive_u64(&tag, "seed", &id, start + 1)?;
-    let close_ix = find_matching_close_tag(lines, open_end_ix + 1, "HairAsset")?;
+    let material_seed = None;
+    let close_ix = find_matching_close_tag(lines, open_end_ix + 1, "Hair")?;
     let mut guides = None;
     let mut cards = None;
     let mut lod_representation = None;
@@ -5217,7 +4866,7 @@ fn parse_hair_asset_block(
             if guides.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HairAsset \"{id}\" may contain one HairGroom."),
+                    message: format!("Hair \"{id}\" may contain one HairGroom."),
                 });
             }
             let (parsed, end_ix) = parse_hair_groom(lines, index, &id)?;
@@ -5229,7 +4878,7 @@ fn parse_hair_asset_block(
             if cards.is_some() {
                 return Err(GraphParseError {
                     line: index + 1,
-                    message: format!("HairAsset \"{id}\" may contain one HairRepresentations."),
+                    message: format!("Hair \"{id}\" may contain one HairRepresentations."),
                 });
             }
             let (parsed, end_ix) = parse_hair_representations(lines, index, &id)?;
@@ -5250,17 +4899,17 @@ fn parse_hair_asset_block(
         return Err(GraphParseError {
             line: index + 1,
             message: format!(
-                "HairAsset \"{id}\" accepts HairGroom, HairRepresentations, and HairLOD children, got: {line}"
+                "Hair \"{id}\" accepts HairGroom, HairRepresentations, and HairLOD children, got: {line}"
             ),
         });
     }
     let guides = guides.ok_or_else(|| GraphParseError {
         line: start + 1,
-        message: format!("HairAsset \"{id}\" requires HairGroom."),
+        message: format!("Hair \"{id}\" requires HairGroom."),
     })?;
     let cards = cards.ok_or_else(|| GraphParseError {
         line: start + 1,
-        message: format!("HairAsset \"{id}\" requires a HairCards representation."),
+        message: format!("Hair \"{id}\" requires a HairCards representation."),
     })?;
     for selected in [default_representation.as_ref(), lod_representation.as_ref()]
         .into_iter()
@@ -5270,7 +4919,7 @@ fn parse_hair_asset_block(
             return Err(GraphParseError {
                 line: start + 1,
                 message: format!(
-                    "HairAsset \"{id}\" selects unknown representation \"{selected}\"; V1 provides \"{}\".",
+                    "Hair \"{id}\" selects unknown representation \"{selected}\"; V1 provides \"{}\".",
                     cards.id
                 ),
             });
@@ -5290,7 +4939,7 @@ fn parse_hair_asset_block(
             guides,
         },
         color: [1.0; 4],
-        material: Some(material),
+        material: None,
         material_definition: None,
         bevel_radius: 0.0,
         bevel_segments: 0,
@@ -5322,7 +4971,7 @@ fn parse_hair_groom(
         if !starts_open_tag(line, "HairGroup") {
             return Err(GraphParseError {
                 line: index + 1,
-                message: format!("HairAsset \"{asset_id}\" HairGroom accepts HairGroup children."),
+                message: format!("Hair \"{asset_id}\" HairGroom accepts HairGroup children."),
             });
         }
         let (mut group_guides, end_ix) = parse_hair_group(lines, index, asset_id)?;
@@ -5332,7 +4981,7 @@ fn parse_hair_groom(
     if guides.is_empty() {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("HairAsset \"{asset_id}\" HairGroom requires at least one HairGuide."),
+            message: format!("Hair \"{asset_id}\" HairGroom requires at least one HairGuide."),
         });
     }
     let mut ids = HashSet::new();
@@ -5340,7 +4989,7 @@ fn parse_hair_groom(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "HairAsset \"{asset_id}\" has duplicate HairGuide id \"{}\".",
+                "Hair \"{asset_id}\" has duplicate HairGuide id \"{}\".",
                 duplicate.id
             ),
         });
@@ -5672,7 +5321,7 @@ fn parse_hair_representations(
             return Err(GraphParseError {
                 line: index + 1,
                 message: format!(
-                    "HairAsset \"{asset_id}\" V1 supports exactly one HairCards representation."
+                    "Hair \"{asset_id}\" V1 supports exactly one HairCards representation."
                 ),
             });
         }
@@ -5738,7 +5387,7 @@ fn parse_hair_representations(
         .map(|settings| (settings, close_ix))
         .ok_or_else(|| GraphParseError {
             line: start + 1,
-            message: format!("HairAsset \"{asset_id}\" HairRepresentations requires HairCards."),
+            message: format!("Hair \"{asset_id}\" HairRepresentations requires HairCards."),
         })
 }
 
@@ -5768,7 +5417,7 @@ fn validate_primitive_build_budget(
         .modifiers
         .iter()
         .filter_map(|modifier| match modifier {
-            PrimitiveModifierNode::Subdivision { levels } => Some(*levels),
+            PrimitiveModifierNode::Subdivision { levels, .. } => Some(*levels),
             _ => None,
         })
         .sum::<u32>();
@@ -5783,7 +5432,7 @@ fn validate_primitive_build_budget(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{}\" is estimated to generate {estimated} triangles, exceeding MeshBuild maxTriangles={max_triangles}.",
+                "GeometryAsset \"{}\" is estimated to generate {estimated} triangles, exceeding MeshBuild maxTriangles={max_triangles}.",
                 primitive.id
             ),
         });
@@ -5806,7 +5455,7 @@ fn parse_primitive_loft(
     if is_self_closing_tag(&tag) {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("PrimitiveAsset \"{asset_id}\" Loft must contain Section children."),
+            message: format!("GeometryAsset \"{asset_id}\" Loft must contain Section children."),
         });
     }
     let close = find_matching_close_tag(lines, open_end + 1, "Loft")?;
@@ -5828,7 +5477,7 @@ fn parse_primitive_loft(
         if !starts_open_tag(line, "Section") {
             return Err(GraphParseError {
                 line: index + 1,
-                message: format!("PrimitiveAsset \"{asset_id}\" Loft accepts Section children."),
+                message: format!("GeometryAsset \"{asset_id}\" Loft accepts Section children."),
             });
         }
         let (section_tag, end) = collect_self_closing_block(lines, index)?;
@@ -5846,7 +5495,7 @@ fn parse_primitive_loft(
             return Err(GraphParseError {
                 line: index + 1,
                 message: format!(
-                    "PrimitiveAsset \"{asset_id}\" Loft Section profile must be ellipse, rounded_rect, diamond, or capsule."
+                    "GeometryAsset \"{asset_id}\" Loft Section profile must be ellipse, rounded_rect, diamond, or capsule."
                 ),
             });
         }
@@ -5875,14 +5524,14 @@ fn parse_primitive_loft(
     if sections.len() < 2 {
         return Err(GraphParseError {
             line: start + 1,
-            message: format!("PrimitiveAsset \"{asset_id}\" Loft requires at least two Sections."),
+            message: format!("GeometryAsset \"{asset_id}\" Loft requires at least two Sections."),
         });
     }
     if sections.windows(2).any(|pair| pair[0].at >= pair[1].at) {
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" Loft Sections must use strictly increasing at values."
+                "GeometryAsset \"{asset_id}\" Loft Sections must use strictly increasing at values."
             ),
         });
     }
@@ -5914,7 +5563,7 @@ fn parse_primitive_ribbon(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" Ribbon must contain PathPoint children."
+                "GeometryAsset \"{asset_id}\" Ribbon must contain PathPoint children."
             ),
         });
     }
@@ -5923,7 +5572,7 @@ fn parse_primitive_ribbon(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" Ribbon facing must be stable or camera_safe."
+                "GeometryAsset \"{asset_id}\" Ribbon facing must be stable or camera_safe."
             ),
         });
     }
@@ -5947,9 +5596,7 @@ fn parse_primitive_ribbon(
         if !starts_open_tag(line, "PathPoint") {
             return Err(GraphParseError {
                 line: index + 1,
-                message: format!(
-                    "PrimitiveAsset \"{asset_id}\" Ribbon accepts PathPoint children."
-                ),
+                message: format!("GeometryAsset \"{asset_id}\" Ribbon accepts PathPoint children."),
             });
         }
         let (point_tag, end) = collect_self_closing_block(lines, index)?;
@@ -5969,7 +5616,7 @@ fn parse_primitive_ribbon(
             )?
             .ok_or_else(|| GraphParseError {
                 line: index + 1,
-                message: format!("PrimitiveAsset \"{asset_id}\" PathPoint requires position."),
+                message: format!("GeometryAsset \"{asset_id}\" PathPoint requires position."),
             })?,
             width: parse_optional_positive_primitive_number(
                 &point_tag,
@@ -5994,7 +5641,7 @@ fn parse_primitive_ribbon(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" Ribbon requires at least two PathPoints."
+                "GeometryAsset \"{asset_id}\" Ribbon requires at least two PathPoints."
             ),
         });
     }
@@ -6005,7 +5652,7 @@ fn parse_primitive_ribbon(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" Ribbon consecutive PathPoints must differ."
+                "GeometryAsset \"{asset_id}\" Ribbon consecutive PathPoints must differ."
             ),
         });
     }
@@ -6540,16 +6187,8 @@ fn parse_material_asset(tag: &str, line: usize) -> Result<MaterialAssetNode, Gra
         .map(|value| parse_primitive_color(&value, &id, line))
         .transpose()?
         .unwrap_or([1.0; 4]);
-    let mapping = attr_value(tag, "mapping")
-        .map(|value| strip_wrappers(&value).to_ascii_lowercase())
-        .unwrap_or_else(|| "uv".to_string());
-    if !matches!(mapping.as_str(), "uv" | "box" | "triplanar") {
-        return Err(GraphParseError {
-            line,
-            message: format!(
-                "MaterialAsset \"{id}\" mapping=\"{mapping}\" is invalid. Use uv, box, or triplanar."
-            ),
-        });
+    if attr_value(tag, "mapping").is_some() {
+        return Err(GraphParseError { line, message: "MaterialAsset.mapping has been removed. Declare UV on GeometryAsset; use mode=box for former box/triplanar projection.".into() });
     }
     let alpha_mode = attr_value(tag, "alphaMode")
         .map(|value| strip_wrappers(&value).to_ascii_lowercase())
@@ -6664,7 +6303,6 @@ fn parse_material_asset(tag: &str, line: usize) -> Result<MaterialAssetNode, Gra
         )?,
         depth_write,
         sort_priority,
-        mapping,
         texture_scale,
         texture_offset,
         texture_rotation: scalar("textureRotation", 0.0, -3600.0, 3600.0)?,
@@ -6866,7 +6504,7 @@ fn resolve_primitive_material_assets(
                     return Err(GraphParseError {
                         line,
                         message: format!(
-                            "PrimitiveAsset \"{}\" references unknown MaterialAsset \"{material_id}\".",
+                            "GeometryAsset \"{}\" references unknown MaterialAsset \"{material_id}\".",
                             primitive.id
                         ),
                     });
@@ -7448,7 +7086,7 @@ fn parse_primitive_modifiers(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" <Modifiers> must contain at least one modifier."
+                "GeometryAsset \"{asset_id}\" <Modifiers> must contain at least one modifier."
             ),
         });
     }
@@ -7469,7 +7107,7 @@ fn parse_primitive_modifiers(
         return Err(GraphParseError {
             line: start + 1,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" <Modifiers> must contain at least one modifier."
+                "GeometryAsset \"{asset_id}\" <Modifiers> must contain at least one modifier."
             ),
         });
     }
@@ -7481,6 +7119,9 @@ fn parse_primitive_modifier(
     asset_id: &str,
     line: usize,
 ) -> Result<PrimitiveModifierNode, GraphParseError> {
+    if let Some(modifier) = geometry_asset_parser::parse_new_modifier(tag, asset_id, line)? {
+        return Ok(modifier);
+    }
     let name = [
         "MeshTransform",
         "Taper",
@@ -7494,7 +7135,7 @@ fn parse_primitive_modifier(
     .find(|name| starts_open_tag(tag.trim(), name))
     .ok_or_else(|| GraphParseError {
         line,
-        message: format!("PrimitiveAsset \"{asset_id}\" has an invalid modifier tag."),
+        message: format!("GeometryAsset \"{asset_id}\" has an invalid modifier tag."),
     })?;
     let modifier = match name {
         "MeshTransform" => {
@@ -7544,17 +7185,26 @@ fn parse_primitive_modifier(
             }
         }
         "Subdivision" => {
-            validate_primitive_child_attributes(tag, &["levels"], asset_id, line)?;
+            validate_primitive_child_attributes(tag, &["levels", "scheme"], asset_id, line)?;
+            let scheme =
+                strip_wrappers(&required_attr_value(tag, "scheme", line)?).to_ascii_lowercase();
+            if !matches!(scheme.as_str(), "linear" | "catmullclark") {
+                return Err(GraphParseError {
+                    line,
+                    message: "Subdivision scheme must be linear or catmullClark.".into(),
+                });
+            }
+            let _ = required_attr_value(tag, "levels", line)?;
             let levels = parse_optional_primitive_u32(tag, "levels", asset_id, line)?.unwrap_or(1);
-            if !(1..=3).contains(&levels) {
+            if levels > if scheme == "catmullclark" { 2 } else { 3 } {
                 return Err(GraphParseError {
                     line,
                     message: format!(
-                        "PrimitiveAsset \"{asset_id}\" Subdivision levels must be from 1 through 3."
+                        "GeometryAsset \"{asset_id}\" Subdivision levels must be 0..2 for catmullClark or 0..3 for linear."
                     ),
                 });
             }
-            PrimitiveModifierNode::Subdivision { levels }
+            PrimitiveModifierNode::Subdivision { levels, scheme }
         }
         "Smooth" => {
             validate_primitive_child_attributes(tag, &["angle"], asset_id, line)?;
@@ -7563,7 +7213,7 @@ fn parse_primitive_modifier(
                 return Err(GraphParseError {
                     line,
                     message: format!(
-                        "PrimitiveAsset \"{asset_id}\" Smooth angle must be from 0 through 180 degrees."
+                        "GeometryAsset \"{asset_id}\" Smooth angle must be from 0 through 180 degrees."
                     ),
                 });
             }
@@ -7583,7 +7233,7 @@ fn parse_primitive_modifier(
                 return Err(GraphParseError {
                     line,
                     message: format!(
-                        "PrimitiveAsset \"{asset_id}\" WeightedNormals strength must be from zero through one."
+                        "GeometryAsset \"{asset_id}\" WeightedNormals strength must be from zero through one."
                     ),
                 });
             }
@@ -7602,7 +7252,7 @@ fn parse_primitive_modifier(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{asset_id}\" has unknown modifier <{name} />. Use MeshTransform, Taper, Bend, Twist, Subdivision, Smooth, or WeightedNormals."
+                    "GeometryAsset \"{asset_id}\" has unknown modifier <{name} />. Use MeshTransform, Taper, Bend, Twist, Subdivision, Smooth, or WeightedNormals."
                 ),
             });
         }
@@ -7626,7 +7276,7 @@ fn parse_primitive_mesh_build(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" MeshBuild topology must be auto, triangles, or quads."
+                "GeometryAsset \"{asset_id}\" MeshBuild topology must be auto, triangles, or quads."
             ),
         });
     }
@@ -7638,7 +7288,7 @@ fn parse_primitive_mesh_build(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" MeshBuild triangulation must be auto, shortestDiagonal, or fixed."
+                "GeometryAsset \"{asset_id}\" MeshBuild triangulation must be auto, shortestDiagonal, or fixed."
             ),
         });
     }
@@ -7650,7 +7300,7 @@ fn parse_primitive_mesh_build(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" MeshBuild quality must be draft, standard, high, or cinematic."
+                "GeometryAsset \"{asset_id}\" MeshBuild quality must be draft, standard, high, or cinematic."
             ),
         });
     }
@@ -7659,7 +7309,7 @@ fn parse_primitive_mesh_build(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" MeshBuild maxTriangles must be greater than zero."
+                "GeometryAsset \"{asset_id}\" MeshBuild maxTriangles must be greater than zero."
             ),
         });
     }
@@ -7686,14 +7336,15 @@ fn parse_primitive_lod(
     if !matches!(mode.as_str(), "none" | "auto") {
         return Err(GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{asset_id}\" LOD mode must be none or auto."),
+            message: format!("GeometryAsset \"{asset_id}\" LOD mode must be none or auto."),
         });
     }
+    let _ = required_attr_value(tag, "levels", line)?;
     let levels = parse_optional_primitive_u32(tag, "levels", asset_id, line)?.unwrap_or(1);
     if !(1..=8).contains(&levels) {
         return Err(GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{asset_id}\" LOD levels must be from 1 through 8."),
+            message: format!("GeometryAsset \"{asset_id}\" LOD levels must be from 1 through 8."),
         });
     }
     Ok(PrimitiveLodNode {
@@ -7720,7 +7371,7 @@ fn validate_primitive_child_attributes(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{asset_id}\" child does not support attribute \"{attribute}\"."
+                    "GeometryAsset \"{asset_id}\" child does not support attribute \"{attribute}\"."
                 ),
             });
         }
@@ -7743,7 +7394,7 @@ fn parse_primitive_axis(
         other => Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{asset_id}\" modifier axis=\"{other}\" is invalid. Use x, y, or z."
+                "GeometryAsset \"{asset_id}\" modifier axis=\"{other}\" is invalid. Use x, y, or z."
             ),
         }),
     }
@@ -7760,12 +7411,12 @@ fn parse_finite_primitive_number(
         .parse::<f32>()
         .map_err(|_| GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{asset_id}\" {attribute} must be a finite number."),
+            message: format!("GeometryAsset \"{asset_id}\" {attribute} must be a finite number."),
         })?;
     if !value.is_finite() {
         return Err(GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{asset_id}\" {attribute} must be a finite number."),
+            message: format!("GeometryAsset \"{asset_id}\" {attribute} must be a finite number."),
         });
     }
     Ok(value)
@@ -7785,7 +7436,7 @@ fn parse_optional_primitive_bool(
                 _ => Err(GraphParseError {
                     line,
                     message: format!(
-                        "PrimitiveAsset \"{asset_id}\" {attribute} must be true or false."
+                        "GeometryAsset \"{asset_id}\" {attribute} must be true or false."
                     ),
                 }),
             },
@@ -7799,56 +7450,33 @@ fn primitive_string_attribute(tag: &str, attribute: &str, default: &str) -> Stri
         .unwrap_or_else(|| default.to_string())
 }
 
-fn parse_primitive_asset(
+fn parse_primitive_geometry(
     tag: &str,
     id: &str,
     line: usize,
-) -> Result<PrimitiveAssetNode, GraphParseError> {
+) -> Result<(PrimitiveGeometry, f32, u32), GraphParseError> {
     let shape = strip_wrappers(&required_attr_value(tag, "shape", line)?).to_ascii_lowercase();
     let mut allowed = match shape.as_str() {
-        "box" | "wedge" => vec!["id", "shape", "size", "color"],
-        "roundedbox" => vec!["id", "shape", "size", "radius", "segments", "color"],
-        "ellipsoid" => vec!["id", "shape", "radii", "segments", "rings", "color"],
-        "frustum" => vec!["id", "shape", "topSize", "bottomSize", "height", "color"],
-        "sphere" => vec!["id", "shape", "radius", "segments", "rings", "color"],
-        "capsule" => vec![
-            "id", "shape", "radius", "height", "segments", "rings", "color",
-        ],
-        "plane" => vec!["id", "shape", "size", "segments", "color"],
+        "box" | "wedge" => vec!["shape", "size"],
+        "roundedbox" => vec!["shape", "size", "radius", "segments"],
+        "ellipsoid" => vec!["shape", "radii", "segments", "rings"],
+        "frustum" => vec!["shape", "topSize", "bottomSize", "height"],
+        "sphere" => vec!["shape", "radius", "segments", "rings"],
+        "capsule" => vec!["shape", "radius", "height", "segments", "rings"],
+        "plane" => vec!["shape", "size", "segments"],
         "cylinder" | "cone" => {
-            vec!["id", "shape", "radius", "height", "segments", "color"]
+            vec!["shape", "radius", "height", "segments"]
         }
-        "loft" => vec!["id", "shape", "color"],
-        "ribbon" => vec!["id", "shape", "color"],
         _ => {
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" has unknown shape=\"{shape}\". Use box, sphere, capsule, plane, cylinder, cone, wedge, ellipsoid, frustum, roundedBox, loft, or ribbon."
+                    "Primitive \"{id}\" has unknown shape=\"{shape}\". Use box, sphere, capsule, plane, cylinder, cone, wedge, ellipsoid, frustum, roundedBox."
                 ),
             });
         }
     };
-    allowed.extend([
-        "material",
-        "bevelRadius",
-        "bevelSegments",
-        "materialSeed",
-        "collision",
-        "collider",
-        "colliderSize",
-        "colliderRadius",
-        "colliderHeight",
-        "colliderScale",
-        "colliderOffset",
-        "colliderRotation",
-        "colliderMargin",
-        "collisionGroup",
-        "collisionMask",
-        "friction",
-        "restitution",
-        "density",
-    ]);
+    allowed.extend(["bevelRadius", "bevelSegments"]);
     for attribute in tag_attribute_names(tag) {
         if !allowed.contains(&attribute.as_str()) {
             let guidance = match shape.as_str() {
@@ -7866,7 +7494,7 @@ fn parse_primitive_asset(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" with shape=\"{shape}\" does not support \"{attribute}\". {guidance}"
+                    "Primitive \"{id}\" with shape=\"{shape}\" does not support \"{attribute}\". {guidance}"
                 ),
             });
         }
@@ -7927,27 +7555,8 @@ fn parse_primitive_asset(
             height: parse_positive_primitive_number(tag, "height", id, line)?,
             segments: parse_primitive_segments(tag, "segments", 32, id, line)?,
         },
-        "loft" => PrimitiveGeometry::Loft {
-            segments: 16,
-            closed: true,
-            cap_start: true,
-            cap_end: true,
-            sections: Vec::new(),
-        },
-        "ribbon" => PrimitiveGeometry::Ribbon {
-            width: 0.1,
-            thickness: 0.02,
-            cap_start: true,
-            cap_end: true,
-            points: Vec::new(),
-        },
         _ => unreachable!(),
     };
-    let color = attr_value(tag, "color")
-        .map(|value| parse_primitive_color(&value, id, line))
-        .transpose()?
-        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
-    let material = attr_value(tag, "material").map(|value| strip_wrappers(&value).to_string());
     let bevel_radius =
         parse_optional_nonnegative_primitive_number(tag, "bevelRadius", id, line)?.unwrap_or(0.0);
     let bevel_segments = parse_optional_primitive_u32(tag, "bevelSegments", id, line)?
@@ -7956,7 +7565,7 @@ fn parse_primitive_asset(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" bevel is currently supported for shape=\"box\" only."
+                "Primitive \"{id}\" bevel is currently supported for shape=\"box\" only."
             ),
         });
     }
@@ -7964,7 +7573,7 @@ fn parse_primitive_asset(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" bevelSegments must be from 1 through 8 when bevelRadius is greater than zero."
+                "Primitive \"{id}\" bevelSegments must be from 1 through 8 when bevelRadius is greater than zero."
             ),
         });
     }
@@ -7974,7 +7583,7 @@ fn parse_primitive_asset(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" bevelRadius must be less than half the smallest box dimension."
+                "Primitive \"{id}\" bevelRadius must be less than half the smallest box dimension."
             ),
         });
     }
@@ -7988,7 +7597,7 @@ fn parse_primitive_asset(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" roundedBox radius must be less than half the smallest dimension."
+                    "Primitive \"{id}\" roundedBox radius must be less than half the smallest dimension."
                 ),
             });
         }
@@ -7996,7 +7605,7 @@ fn parse_primitive_asset(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" roundedBox segments must be from 1 through 16."
+                    "Primitive \"{id}\" roundedBox segments must be from 1 through 16."
                 ),
             });
         }
@@ -8007,28 +7616,12 @@ fn parse_primitive_asset(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" capsule height must be at least twice its radius."
+                "Primitive \"{id}\" capsule height must be at least twice its radius."
             ),
         });
     }
-    let material_seed = parse_optional_primitive_u64(tag, "materialSeed", id, line)?;
-    let collision = parse_primitive_collision(tag, id, &geometry, line)?;
-    Ok(PrimitiveAssetNode {
-        id: id.to_string(),
-        geometry,
-        color,
-        material,
-        material_definition: None,
-        bevel_radius,
-        bevel_segments,
-        material_seed,
-        collision,
-        modifiers: Vec::new(),
-        mesh_build: PrimitiveMeshBuildNode::default(),
-        lod: PrimitiveLodNode::default(),
-    })
+    Ok((geometry, bevel_radius, bevel_segments))
 }
-
 fn parse_primitive_collision(
     tag: &str,
     id: &str,
@@ -8047,7 +7640,7 @@ fn parse_primitive_collision(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" collision=\"{other}\" is invalid. Use none, solid, or sensor."
+                    "GeometryAsset \"{id}\" collision=\"{other}\" is invalid. Use none, solid, or sensor."
                 ),
             });
         }
@@ -8070,7 +7663,7 @@ fn parse_primitive_collision(
             return Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" collider=\"{other}\" is invalid. Use auto, box, sphere, capsule, plane, cylinder, cone, convex, or mesh."
+                    "GeometryAsset \"{id}\" collider=\"{other}\" is invalid. Use auto, box, sphere, capsule, plane, cylinder, cone, convex, or mesh."
                 ),
             });
         }
@@ -8096,7 +7689,7 @@ fn parse_primitive_collision(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" has collision=\"none\" but also declares collider settings. Remove those settings or use collision=\"solid\" or \"sensor\"."
+                "GeometryAsset \"{id}\" has collision=\"none\" but also declares collider settings. Remove those settings or use collision=\"solid\" or \"sensor\"."
             ),
         });
     }
@@ -8138,7 +7731,7 @@ fn parse_primitive_collision(
             _ => Err(GraphParseError {
                 line,
                 message: format!(
-                    "PrimitiveAsset \"{id}\" colliderSize is only valid for box, plane, convex, or mesh colliders."
+                    "GeometryAsset \"{id}\" colliderSize is only valid for box, plane, convex, or mesh colliders."
                 ),
             }),
         })
@@ -8156,7 +7749,7 @@ fn parse_primitive_collision(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" colliderRadius requires a sphere, cylinder, or cone collider."
+                "GeometryAsset \"{id}\" colliderRadius requires a sphere, cylinder, or cone collider."
             ),
         });
     }
@@ -8172,7 +7765,7 @@ fn parse_primitive_collision(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" colliderHeight requires a capsule, cylinder, or cone collider."
+                "GeometryAsset \"{id}\" colliderHeight requires a capsule, cylinder, or cone collider."
             ),
         });
     }
@@ -8191,7 +7784,7 @@ fn parse_primitive_collision(
     if restitution > 1.0 {
         return Err(GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{id}\" restitution must be from zero through one."),
+            message: format!("GeometryAsset \"{id}\" restitution must be from zero through one."),
         });
     }
     let density =
@@ -8228,14 +7821,14 @@ fn parse_positive_primitive_number(
         .map_err(|_| GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be a finite number greater than zero."
+                "GeometryAsset \"{id}\" {attribute} must be a finite number greater than zero."
             ),
         })?;
     if !value.is_finite() || value <= 0.0 {
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be a finite number greater than zero."
+                "GeometryAsset \"{id}\" {attribute} must be a finite number greater than zero."
             ),
         });
     }
@@ -8294,7 +7887,7 @@ fn parse_primitive_vec_value<const N: usize>(
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must contain exactly {N} finite numbers."
+                "GeometryAsset \"{id}\" {attribute} must contain exactly {N} finite numbers."
             ),
         });
     }
@@ -8303,7 +7896,7 @@ fn parse_primitive_vec_value<const N: usize>(
         out[index] = part.parse::<f32>().map_err(|_| GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must contain exactly {N} finite numbers."
+                "GeometryAsset \"{id}\" {attribute} must contain exactly {N} finite numbers."
             ),
         })?;
         if !out[index].is_finite() || (positive && out[index] <= 0.0) {
@@ -8311,10 +7904,10 @@ fn parse_primitive_vec_value<const N: usize>(
                 line,
                 message: if positive {
                     format!(
-                        "PrimitiveAsset \"{id}\" {attribute} values must be finite and greater than zero."
+                        "GeometryAsset \"{id}\" {attribute} values must be finite and greater than zero."
                     )
                 } else {
-                    format!("PrimitiveAsset \"{id}\" {attribute} values must be finite.")
+                    format!("GeometryAsset \"{id}\" {attribute} values must be finite.")
                 },
             });
         }
@@ -8336,14 +7929,14 @@ fn parse_optional_positive_primitive_number(
         .map_err(|_| GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be a finite number greater than zero."
+                "GeometryAsset \"{id}\" {attribute} must be a finite number greater than zero."
             ),
         })?;
     if !value.is_finite() || value <= 0.0 {
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be a finite number greater than zero."
+                "GeometryAsset \"{id}\" {attribute} must be a finite number greater than zero."
             ),
         });
     }
@@ -8364,14 +7957,14 @@ fn parse_optional_nonnegative_primitive_number(
         .map_err(|_| GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be a finite number equal to or greater than zero."
+                "GeometryAsset \"{id}\" {attribute} must be a finite number equal to or greater than zero."
             ),
         })?;
     if !value.is_finite() || value < 0.0 {
         return Err(GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be a finite number equal to or greater than zero."
+                "GeometryAsset \"{id}\" {attribute} must be a finite number equal to or greater than zero."
             ),
         });
     }
@@ -8392,7 +7985,7 @@ fn parse_optional_primitive_u32(
         .map(Some)
         .map_err(|_| GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{id}\" {attribute} must be an unsigned integer."),
+            message: format!("GeometryAsset \"{id}\" {attribute} must be an unsigned integer."),
         })
 }
 
@@ -8429,13 +8022,13 @@ fn parse_primitive_segments(
         .map_err(|_| GraphParseError {
             line,
             message: format!(
-                "PrimitiveAsset \"{id}\" {attribute} must be an integer from 3 through 256."
+                "GeometryAsset \"{id}\" {attribute} must be an integer from 3 through 256."
             ),
         })?;
     if !(3..=256).contains(&value) {
         return Err(GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{id}\" {attribute} must be from 3 through 256."),
+            message: format!("GeometryAsset \"{id}\" {attribute} must be from 3 through 256."),
         });
     }
     Ok(value)
@@ -8446,7 +8039,7 @@ fn parse_primitive_color(raw: &str, id: &str, line: usize) -> Result<[f32; 4], G
     if !matches!(hex.len(), 6 | 8) || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(GraphParseError {
             line,
-            message: format!("PrimitiveAsset \"{id}\" color must use #RRGGBB or #RRGGBBAA."),
+            message: format!("GeometryAsset \"{id}\" color must use #RRGGBB or #RRGGBBAA."),
         });
     }
     let channel = |offset| u8::from_str_radix(&hex[offset..offset + 2], 16).unwrap() as f32 / 255.0;
@@ -11051,7 +10644,11 @@ Font note: this is not a structured XML comment.
         let script = r##"
 <Graph fps={30} duration="1s" size={[128,128]}>
   <Assets>
-    <PrimitiveAsset id="drop" shape="cylinder" radius="0.01" height="0.4" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="drop_geometry">
+    <Primitive shape="cylinder" radius="0.01" height="0.4" />
+    </GeometryAsset>
+    <MeshAsset id="drop" material="geometry_default" geometry="drop_geometry" />
   </Assets>
   <Scene id="rain_scene">
     <Timeline>
@@ -12991,8 +12588,12 @@ Font note: this is not a structured XML comment.
             r#"
 <Graph fps={30} duration="2s" size={[640,360]}>
   <Assets>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
     <ModelAsset id="character" src="character.glb" />
-    <PrimitiveAsset id="seat_asset" shape="box" size={[2,0.1,0.7]} />
+    <GeometryAsset id="seat_asset_geometry">
+    <Primitive shape="box" size={[2,0.1,0.7]} />
+    </GeometryAsset>
+    <MeshAsset id="seat_asset" material="geometry_default" geometry="seat_asset_geometry" />
   </Assets>
   <Action id="sit" skeleton="humanoid_v1" duration="2s">
     <Contact id="pelvis_seat" effector="pelvis" target="seat"
@@ -13381,7 +12982,11 @@ Font note: this is not a structured XML comment.
             r##"
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
-    <PrimitiveAsset id="box" shape="box" size={[2,3,4]} color="#FFFFFF" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="box_geometry">
+    <Primitive shape="box" size={[2,3,4]} />
+    </GeometryAsset>
+    <MeshAsset id="box" color="#FFFFFF" material="geometry_default" geometry="box_geometry" />
   </Assets>
   <Scene id="Main">
     <Timeline>
@@ -13439,13 +13044,35 @@ Font note: this is not a structured XML comment.
             r##"
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
-    <PrimitiveAsset id="box" shape="box" size={[1,2,3]} color="#FF000080" />
-    <PrimitiveAsset id="sphere" shape="sphere" radius="0.5" segments="32" rings="12" />
-    <PrimitiveAsset id="capsule" shape="capsule" radius="0.2" height="0.8" segments="24" rings="12" />
-    <PrimitiveAsset id="plane" shape="plane" size={[8,6]} segments="4" />
-    <PrimitiveAsset id="cylinder" shape="cylinder" radius="1" height="2" />
-    <PrimitiveAsset id="cone" shape="cone" radius="1" height="2" segments="16" />
-    <PrimitiveAsset id="wedge" shape="wedge" size={[4,1,3]} />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="box_geometry">
+    <Primitive shape="box" size={[1,2,3]} />
+    </GeometryAsset>
+    <MeshAsset id="box" color="#FF000080" material="geometry_default" geometry="box_geometry" />
+    <GeometryAsset id="sphere_geometry">
+    <Primitive shape="sphere" radius="0.5" segments="32" rings="12" />
+    </GeometryAsset>
+    <MeshAsset id="sphere" material="geometry_default" geometry="sphere_geometry" />
+    <GeometryAsset id="capsule_geometry">
+    <Primitive shape="capsule" radius="0.2" height="0.8" segments="24" rings="12" />
+    </GeometryAsset>
+    <MeshAsset id="capsule" material="geometry_default" geometry="capsule_geometry" />
+    <GeometryAsset id="plane_geometry">
+    <Primitive shape="plane" size={[8,6]} segments="4" />
+    </GeometryAsset>
+    <MeshAsset id="plane" material="geometry_default" geometry="plane_geometry" />
+    <GeometryAsset id="cylinder_geometry">
+    <Primitive shape="cylinder" radius="1" height="2" />
+    </GeometryAsset>
+    <MeshAsset id="cylinder" material="geometry_default" geometry="cylinder_geometry" />
+    <GeometryAsset id="cone_geometry">
+    <Primitive shape="cone" radius="1" height="2" segments="16" />
+    </GeometryAsset>
+    <MeshAsset id="cone" material="geometry_default" geometry="cone_geometry" />
+    <GeometryAsset id="wedge_geometry">
+    <Primitive shape="wedge" size={[4,1,3]} />
+    </GeometryAsset>
+    <MeshAsset id="wedge" material="geometry_default" geometry="wedge_geometry" />
   </Assets>
   <Scene id="canvas">
     <Timeline>
@@ -13487,23 +13114,29 @@ Font note: this is not a structured XML comment.
             r##"
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
-    <PrimitiveAsset id="body" shape="ellipsoid" radii={[0.8,1.2,0.55]}
-                    segments="24" rings="12" color="#C87848">
-      <Modifiers>
-        <Taper axis="y" start="1.08" end="0.82" />
-        <Twist axis="y" angle="8" />
-        <Bend axis="x" angle="-5" pivot={[0,0,0]} />
-        <Subdivision levels="1" />
-        <WeightedNormals strength="0.75" keepSharpEdges="true" />
-      </Modifiers>
-      <MeshBuild topology="quads" triangulation="shortestDiagonal"
-                 quality="high" maxTriangles="10000" />
-      <LOD mode="auto" levels="3" preserveSilhouette="true" />
-    </PrimitiveAsset>
-    <PrimitiveAsset id="base" shape="roundedBox" size={[2,0.3,1.2]}
-                    radius="0.08" segments="3" />
-    <PrimitiveAsset id="waist" shape="frustum" topSize={[0.8,0.5]}
-                    bottomSize={[0.6,0.42]} height="0.9" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="body_geometry">
+    <Primitive shape="ellipsoid" radii={[0.8,1.2,0.55]} segments="24" rings="12" />
+    <Modifiers>
+            <Taper axis="y" start="1.08" end="0.82" />
+            <Twist axis="y" angle="8" />
+            <Bend axis="x" angle="-5" pivot={[0,0,0]} />
+            <Subdivision levels="1"  scheme="linear" />
+            <WeightedNormals strength="0.75" keepSharpEdges="true" />
+          </Modifiers>
+    <MeshBuild topology="quads" triangulation="shortestDiagonal"
+                     quality="high" maxTriangles="10000" />
+    <LOD mode="auto" levels="3" preserveSilhouette="true" />
+    </GeometryAsset>
+    <MeshAsset id="body" color="#C87848" material="geometry_default" geometry="body_geometry" />
+    <GeometryAsset id="base_geometry">
+    <Primitive shape="roundedBox" size={[2,0.3,1.2]} radius="0.08" segments="3" />
+    </GeometryAsset>
+    <MeshAsset id="base" material="geometry_default" geometry="base_geometry" />
+    <GeometryAsset id="waist_geometry">
+    <Primitive shape="frustum" topSize={[0.8,0.5]} bottomSize={[0.6,0.42]} height="0.9" />
+    </GeometryAsset>
+    <MeshAsset id="waist" material="geometry_default" geometry="waist_geometry" />
   </Assets>
   <Scene id="canvas">
     <Timeline>
@@ -13543,12 +13176,15 @@ Font note: this is not a structured XML comment.
             r##"
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
-    <PrimitiveAsset id="too_dense" shape="sphere" radius="1" segments="32" rings="16">
-      <Modifiers>
-        <Subdivision levels="2" />
-      </Modifiers>
-      <MeshBuild maxTriangles="100" />
-    </PrimitiveAsset>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="too_dense_geometry">
+    <Primitive shape="sphere" radius="1" segments="32" rings="16" />
+    <Modifiers>
+            <Subdivision levels="2"  scheme="linear" />
+          </Modifiers>
+    <MeshBuild maxTriangles="100" />
+    </GeometryAsset>
+    <MeshAsset id="too_dense" material="geometry_default" geometry="too_dense_geometry" />
   </Assets>
   <Scene id="canvas">
     <Timeline>
@@ -13747,13 +13383,12 @@ Font note: this is not a structured XML comment.
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
     <ImageAsset id="stone_color" src="stone.jpg" colorSpace="srgb" />
-    <MaterialAsset id="stone" shading="pbr" baseColor="#D8D3CA"
-      baseColorTexture="stone_color" metallic="0" roughness="0.84"
-      specular="0.28" mapping="triplanar" textureScale={[2.4,2.4]}
-      variationAmount={[0.2,0.15]} />
-    <PrimitiveAsset id="step" shape="box" size={[4.4,0.32,0.9]}
-      material="stone" bevelRadius="0.025" bevelSegments="3"
-      materialSeed="76" collision="solid" collider="box" />
+    <MaterialAsset id="stone" shading="pbr" baseColor="#D8D3CA" baseColorTexture="stone_color" metallic="0" roughness="0.84" specular="0.28" textureScale={[2.4,2.4]} variationAmount={[0.2,0.15]} />
+    <GeometryAsset id="step_geometry">
+    <Primitive shape="box" size={[4.4,0.32,0.9]} bevelRadius="0.025" bevelSegments="3" />
+    <UV mode="box" />
+    </GeometryAsset>
+    <MeshAsset id="step" material="stone" materialSeed="76" collision="solid" collider="box" geometry="step_geometry" />
   </Assets>
   <Scene id="Main">
     <Timeline>
@@ -13786,7 +13421,9 @@ Font note: this is not a structured XML comment.
             material.base_color_texture_src.as_deref(),
             Some("stone.jpg")
         );
-        assert_eq!(material.mapping, "triplanar");
+        assert!(primitive.modifiers.iter().any(
+            |m| matches!(m, super::PrimitiveModifierNode::Uv { settings } if settings.mode == "box")
+        ));
         assert_eq!(primitive.collision.collider, PrimitiveColliderShape::Box);
     }
 
@@ -13864,8 +13501,10 @@ Font note: this is not a structured XML comment.
       roughness="0.08" specular="1" transmission="0.94" ior="1.52"
       thickness="0.012" attenuationColor="#B7DDE2" attenuationDistance="6"
       depthWrite="auto" sortPriority="3" doubleSided="true" />
-    <PrimitiveAsset id="pane" shape="box" size={[0.012,2.35,3.8]}
-      material="glass" collision="none" />
+    <GeometryAsset id="pane_geometry">
+    <Primitive shape="box" size={[0.012,2.35,3.8]} />
+    </GeometryAsset>
+    <MeshAsset id="pane" material="glass" collision="none" geometry="pane_geometry" />
   </Assets>
   <Scene id="Main">
     <Timeline>
@@ -13922,7 +13561,10 @@ Font note: this is not a structured XML comment.
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
     <MaterialAsset id="stone" baseColorTexture="missing" />
-    <PrimitiveAsset id="step" shape="box" size={[1,1,1]} material="stone" />
+    <GeometryAsset id="step_geometry">
+    <Primitive shape="box" size={[1,1,1]} />
+    </GeometryAsset>
+    <MeshAsset id="step" material="stone" geometry="step_geometry" />
   </Assets>
   <Scene id="Main">
     <Timeline>
@@ -13949,8 +13591,15 @@ Font note: this is not a structured XML comment.
             r##"
 <Graph fps={30} duration="1s" size={[320,180]}>
   <Assets>
-    <PrimitiveAsset id="auto_box" shape="box" size={[1,2,3]} collision="solid" />
-    <PrimitiveAsset id="sphere_with_box" shape="sphere" radius="1" collision="solid" collider="box" colliderSize={[2,3,4]} colliderOffset={[0,0.5,0]} />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="auto_box_geometry">
+    <Primitive shape="box" size={[1,2,3]} />
+    </GeometryAsset>
+    <MeshAsset id="auto_box" collision="solid" material="geometry_default" geometry="auto_box_geometry" />
+    <GeometryAsset id="sphere_with_box_geometry">
+    <Primitive shape="sphere" radius="1" />
+    </GeometryAsset>
+    <MeshAsset id="sphere_with_box" collision="solid" collider="box" colliderSize={[2,3,4]} colliderOffset={[0,0.5,0]} material="geometry_default" geometry="sphere_with_box_geometry" />
   </Assets>
   <Scene id="canvas">
     <Timeline>
@@ -13989,7 +13638,11 @@ Font note: this is not a structured XML comment.
         let disabled = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[1,1]}>
   <Assets>
-    <PrimitiveAsset id="x" shape="sphere" radius="1" collider="box" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="x_geometry">
+    <Primitive shape="sphere" radius="1" />
+    </GeometryAsset>
+    <MeshAsset id="x" collider="box" material="geometry_default" geometry="x_geometry" />
   </Assets>
   <Background color="#000000" />
   <Present from="scene" />
@@ -14001,7 +13654,11 @@ Font note: this is not a structured XML comment.
         let wrong_size = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[1,1]}>
   <Assets>
-    <PrimitiveAsset id="x" shape="sphere" radius="1" collision="solid" colliderRadius="1" colliderSize={[1,1,1]} />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="x_geometry">
+    <Primitive shape="sphere" radius="1" />
+    </GeometryAsset>
+    <MeshAsset id="x" collision="solid" colliderRadius="1" colliderSize={[1,1,1]} material="geometry_default" geometry="x_geometry" />
   </Assets>
   <Background color="#000000" />
   <Present from="scene" />
@@ -14016,7 +13673,11 @@ Font note: this is not a structured XML comment.
         let graph = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[1,1]}>
   <Assets>
-    <PrimitiveAsset id="step" shape="box" size={[2,0.2,0.5]} collision="solid" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="step_geometry">
+    <Primitive shape="box" size={[2,0.2,0.5]} />
+    </GeometryAsset>
+    <MeshAsset id="step" collision="solid" material="geometry_default" geometry="step_geometry" />
     <CompoundAsset id="stairs">
       <Instance id="low" asset="step" position={[0,0.1,0]} />
       <Instance id="high" asset="step" position={[0,0.3,-0.5]} scale="1" />
@@ -14054,7 +13715,11 @@ Font note: this is not a structured XML comment.
 </Graph>"##,
         )
         .expect_err("compound V1 must reference primitives");
-        assert!(invalid.message.contains("must reference a PrimitiveAsset"));
+        assert!(
+            invalid
+                .message
+                .contains("must reference a generated MeshAsset")
+        );
     }
 
     #[test]
@@ -14062,7 +13727,11 @@ Font note: this is not a structured XML comment.
         let conflict = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[1,1]}>
   <Assets>
-    <PrimitiveAsset id="x" shape="sphere" size={[1,1,1]} />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="x_geometry">
+    <Primitive shape="sphere" size={[1,1,1]} />
+    </GeometryAsset>
+    <MeshAsset id="x" material="geometry_default" geometry="x_geometry" />
   </Assets>
   <Background id="canvas" color="#000000" />
   <Present from="canvas" />
@@ -14077,7 +13746,11 @@ Font note: this is not a structured XML comment.
         let invalid = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[1,1]}>
   <Assets>
-    <PrimitiveAsset id="x" shape="cone" radius="0" height="2" segments="300" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="x_geometry">
+    <Primitive shape="cone" radius="0" height="2" segments="300" />
+    </GeometryAsset>
+    <MeshAsset id="x" material="geometry_default" geometry="x_geometry" />
   </Assets>
   <Background id="canvas" color="#000000" />
   <Present from="canvas" />
@@ -14092,8 +13765,11 @@ Font note: this is not a structured XML comment.
         let graph = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="limb" shape="capsule" radius="0.1" height="0.4"
-                    segments="20" rings="10" collision="solid" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="limb_geometry">
+    <Primitive shape="capsule" radius="0.1" height="0.4" segments="20" rings="10" />
+    </GeometryAsset>
+    <MeshAsset id="limb" collision="solid" material="geometry_default" geometry="limb_geometry" />
     <CompoundAsset id="actor" rig="rig">
       <Instance id="arm" asset="limb" bone="upper_arm_l" position={[0,-0.2,0]} />
     </CompoundAsset>
@@ -14151,7 +13827,11 @@ Font note: this is not a structured XML comment.
         let graph = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="limb" shape="capsule" radius="0.1" height="0.5" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="limb_geometry">
+    <Primitive shape="capsule" radius="0.1" height="0.5" />
+    </GeometryAsset>
+    <MeshAsset id="limb" material="geometry_default" geometry="limb_geometry" />
     <CompoundAsset id="hero" rig="rig">
       <SkinBinding mode="automatic" maxInfluences="3" falloff="2.25" normalize="true" />
       <Instance id="soft_arm" asset="limb" bone="arm" skin="smooth"
@@ -14179,7 +13859,11 @@ Font note: this is not a structured XML comment.
         let invalid = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="limb" shape="capsule" radius="0.1" height="0.5" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="limb_geometry">
+    <Primitive shape="capsule" radius="0.1" height="0.5" />
+    </GeometryAsset>
+    <MeshAsset id="limb" material="geometry_default" geometry="limb_geometry" />
     <CompoundAsset id="hero" rig="rig">
       <SkinBinding />
       <Instance id="missing_primary" asset="limb" skin="smooth" />
@@ -14201,18 +13885,21 @@ Font note: this is not a structured XML comment.
         let graph = parse_graph_script(
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="coat" shape="loft">
-      <Loft segments="12">
-        <Section at="-0.5" width="0.7" depth="0.4" profile="rounded_rect" />
-        <Section at="0.5" width="0.9" depth="0.45" profile="ellipse" offset={[0.1,0]} />
-      </Loft>
-    </PrimitiveAsset>
-    <PrimitiveAsset id="hair" shape="ribbon">
-      <Ribbon width="0.2" thickness="0.03" facing="camera_safe">
-        <PathPoint position={[0,0,0]} />
-        <PathPoint position={[0,-0.5,0.1]} width="0.08" roll="12" />
-      </Ribbon>
-    </PrimitiveAsset>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="coat_geometry">
+    <Loft segments="12">
+            <Section at="-0.5" width="0.7" depth="0.4" profile="rounded_rect" />
+            <Section at="0.5" width="0.9" depth="0.45" profile="ellipse" offset={[0.1,0]} />
+          </Loft>
+    </GeometryAsset>
+    <MeshAsset id="coat" material="geometry_default" geometry="coat_geometry" />
+    <GeometryAsset id="hair_geometry">
+    <Ribbon width="0.2" thickness="0.03" facing="camera_safe">
+            <PathPoint position={[0,0,0]} />
+            <PathPoint position={[0,-0.5,0.1]} width="0.08" roll="12" />
+          </Ribbon>
+    </GeometryAsset>
+    <MeshAsset id="hair" material="geometry_default" geometry="hair_geometry" />
     <CompoundAsset id="hero" rig="rig">
       <SkinBinding>
         <WeightRegion instance="coat" bone="root" center={[0,0,0]} radius="0.4" operation="replace" />
@@ -14254,23 +13941,25 @@ Font note: this is not a structured XML comment.
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
     <MaterialAsset id="hair" baseColor="#665C60" />
-    <HairAsset id="bangs" material="hair" bindBone="head"
-               defaultRepresentation="cards" seed="9">
-      <HairGroom>
-        <HairGroup id="front" role="bang">
-          <HairGuide id="center">
-            <HairPoint position={[0,0.3,0]} width="0.2" camber="0.1" />
-            <HairPoint position={[0,-0.1,0.1]} width="0.14" roll="4" />
-            <HairPoint position={[-0.04,-0.4,0.08]} width="0.02" />
-          </HairGuide>
-        </HairGroup>
-      </HairGroom>
-      <HairRepresentations>
-        <HairCards id="cards" lengthSegments="12" widthSegments="4"
-                   thickness="0.01" crossSection="arched" tipShape="point" />
-      </HairRepresentations>
-      <HairLOD representation="cards" />
-    </HairAsset>
+    <GeometryAsset id="bangs_geometry">
+    <Hair bindBone="head" defaultRepresentation="cards">
+          <HairGroom>
+            <HairGroup id="front" role="bang">
+              <HairGuide id="center">
+                <HairPoint position={[0,0.3,0]} width="0.2" camber="0.1" />
+                <HairPoint position={[0,-0.1,0.1]} width="0.14" roll="4" />
+                <HairPoint position={[-0.04,-0.4,0.08]} width="0.02" />
+              </HairGuide>
+            </HairGroup>
+          </HairGroom>
+          <HairRepresentations>
+            <HairCards id="cards" lengthSegments="12" widthSegments="4"
+                       thickness="0.01" crossSection="arched" tipShape="point" />
+          </HairRepresentations>
+          <HairLOD representation="cards" />
+        </Hair>
+    </GeometryAsset>
+    <MeshAsset id="bangs" material="hair" materialSeed="9" geometry="bangs_geometry" />
   </Assets>
   <Background color="#000000" />
   <Present from="scene" />
@@ -14300,15 +13989,18 @@ Font note: this is not a structured XML comment.
             r##"<Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
     <MaterialAsset id="scales" baseColor="#355A42" />
-    <HeadAsset id="dragon_head" material="scales" archetype="dragon" symmetry="x">
-      <HeadShape size={[1.2,0.8,1.5]} forehead="0.82" cheekWidth="0.9"
-                 jawWidth="0.72" chinLength="0.04" />
-      <HeadFeature id="muzzle" kind="muzzle" center={[0,-0.12,0.78]}
-                   size={[0.52,0.34,0.42]} amount="0.32" offset={[0,0,0.02]} />
-      <HeadFeature id="horn_l" kind="horn" center={[-0.48,0.68,-0.12]}
-                   size={[0.18,0.30,0.22]} amount="0.18" mirror="x" falloff="sharp" />
-      <HeadMorph headWidth="1.08" muzzleLength="1.25" />
-    </HeadAsset>
+    <GeometryAsset id="dragon_head_geometry">
+    <Head archetype="dragon" symmetry="x">
+          <HeadShape size={[1.2,0.8,1.5]} forehead="0.82" cheekWidth="0.9"
+                     jawWidth="0.72" chinLength="0.04" />
+          <HeadFeature id="muzzle" kind="muzzle" center={[0,-0.12,0.78]}
+                       size={[0.52,0.34,0.42]} amount="0.32" offset={[0,0,0.02]} />
+          <HeadFeature id="horn_l" kind="horn" center={[-0.48,0.68,-0.12]}
+                       size={[0.18,0.30,0.22]} amount="0.18" mirror="x" falloff="sharp" />
+          <HeadMorph headWidth="1.08" muzzleLength="1.25" />
+        </Head>
+    </GeometryAsset>
+    <MeshAsset id="dragon_head" material="scales" geometry="dragon_head_geometry" />
   </Assets>
   <Background color="#000000" />
   <Present from="scene" />
@@ -14574,15 +14266,19 @@ Font note: this is not a structured XML comment.
         let graph = parse_graph_script(
             r#"<Graph fps={24} duration="1s" size={[64,64]}>
   <Assets>
-    <SweepAsset id="pipe" curve="route" frame="parallelTransport"
-                uvMode="distance" uvScale={[1,0.25]} capStart="true" capEnd="true">
-      <Profile closed="true">
-        <ProfilePoint position={[-0.1,-0.1]} />
-        <ProfilePoint position={[0.1,-0.1]} />
-        <ProfilePoint position={[0.1,0.1]} />
-        <ProfilePoint position={[-0.1,0.1]} />
-      </Profile>
-    </SweepAsset>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="pipe_geometry">
+    <Sweep curve="route" frame="parallelTransport" capStart="true" capEnd="true">
+          <Profile closed="true">
+            <ProfilePoint position={[-0.1,-0.1]} />
+            <ProfilePoint position={[0.1,-0.1]} />
+            <ProfilePoint position={[0.1,0.1]} />
+            <ProfilePoint position={[-0.1,0.1]} />
+          </Profile>
+        </Sweep>
+    <UV mode="distance" scale={[1,0.25]} />
+    </GeometryAsset>
+    <MeshAsset id="pipe" material="geometry_default" geometry="pipe_geometry" />
     <CurveAsset id="route" interpolation="catmullRom" maxSegmentLength="0.25">
       <CurvePoint position={[0,0,0]} />
       <CurvePoint position={[1,0,0]} tilt="5" />
@@ -14626,7 +14322,8 @@ Font note: this is not a structured XML comment.
         assert_eq!(curve.id, "route");
         assert_eq!(profile.len(), 4);
         assert!(*profile_closed);
-        assert_eq!(*uv_scale, [1.0, 0.25]);
+        assert_eq!(*uv_scale, [1.0, 1.0]);
+        assert!(sweep.primitive().unwrap().modifiers.iter().any(|m| matches!(m, super::PrimitiveModifierNode::Uv { settings } if settings.scale == [1.0,0.25])));
     }
 
     #[test]
@@ -14634,12 +14331,17 @@ Font note: this is not a structured XML comment.
         let unknown = parse_graph_script(
             r##"<Graph fps={24} duration="1s" size={[64,64]}>
   <Assets>
-    <SweepAsset id="broken" curve="missing">
-      <Profile>
-        <ProfilePoint position={[-1,0]} />
-        <ProfilePoint position={[1,0]} />
-      </Profile>
-    </SweepAsset>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="broken_geometry">
+    <Sweep curve="missing">
+          <Profile>
+            <ProfilePoint position={[-1,0]} />
+            <ProfilePoint position={[1,0]} />
+          </Profile>
+        </Sweep>
+    <UV mode="distance" />
+    </GeometryAsset>
+    <MeshAsset id="broken" material="geometry_default" geometry="broken_geometry" />
   </Assets>
   <Background id="bg" color="#000000" />
   <Present from="bg" />

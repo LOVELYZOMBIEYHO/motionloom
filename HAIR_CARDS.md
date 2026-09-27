@@ -1,11 +1,12 @@
 # Guide-authored hair cards
 
-HairAsset compiles editable guides into closed, curved hair cards. The DSL is
+Hair compiles editable guides into closed, curved hair cards. The DSL is
 the source of truth. Native and WASM use the same CPU mesh generator; this
 extension adds no package, renderer quality setting, or runtime simulation.
 
 ```xml
-<HairAsset id="bob_bangs" material="hair_brown" space="asset_local">
+<GeometryAsset id="bob_bangs_geometry">
+<Hair space="asset_local">
   <HairGroom>
     <HairGroup id="bangs" role="silhouette">
       <HairDefaults width="0.18" camber="0.12" roll="0" />
@@ -22,7 +23,9 @@ extension adds no package, renderer quality setting, or runtime simulation.
     <HairCards id="cards" lengthSegments="24" widthSegments="5"
                thickness="0.012" crossSection="arched" tipShape="point" />
   </HairRepresentations>
-</HairAsset>
+</Hair>
+</GeometryAsset>
+<MeshAsset id="bob_bangs" material="hair_brown" geometry="bob_bangs_geometry" />
 ```
 
 Declare `hair_brown` as an ordinary MaterialAsset and instantiate `bob_bangs`
@@ -47,7 +50,7 @@ HairGuide accepts the same numeric settings as HairDefaults, plus id and normal.
 
 Positions remain required on HairPoint. Set camber explicitly when using an
 arched or v_shape section: camber=0 makes either section flat. Group role is
-metadata, not an automatic hairstyle preset. HairAsset seed affects the existing
+metadata, not an automatic hairstyle preset. Hair seed affects the existing
 material seed path, not procedural guide distribution.
 
 ## Root direction and mirroring
@@ -60,7 +63,7 @@ When omitted, a deterministic axis-based frame is used. Points run root to tip.
 HairMirror accepts id, source, and axis (x/y/z). Reflection is across the plane
 through zero in asset coordinates. Source must name an earlier guide or mirror
 in the same HairGroup. Guide ids, including generated ones, must be unique across
-the HairAsset. Forward references, cycles, missing sources and duplicate ids fail.
+the Hair. Forward references, cycles, missing sources and duplicate ids fail.
 Mirrors copy resolved point settings, reflect positions and the root normal, and
 negate roll. They expand into ordinary guides; they add no runtime node/resource.
 The symmetric card surface preserves outward normals and triangle winding.

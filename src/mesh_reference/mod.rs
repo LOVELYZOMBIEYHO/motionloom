@@ -23,7 +23,7 @@ pub use proposal::{
     apply_mesh_asset_proposal, apply_mesh_asset_proposal_json, mesh_source_fingerprint,
     mesh_topology_signature,
 };
-pub(crate) use proposal::{mesh_asset, rewrite_mesh_asset_cage};
+pub(crate) use proposal::{geometry_source_span, mesh_asset, rewrite_mesh_asset_cage};
 pub use schema::*;
 pub use topology::validate_mesh_topology;
 
@@ -31,6 +31,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MeshReferenceError {
+    #[error(transparent)]
+    Format(#[from] crate::FormatError),
     #[error("invalid image reference: {0}")]
     Image(String),
     #[error("invalid mesh reference request: {0}")]

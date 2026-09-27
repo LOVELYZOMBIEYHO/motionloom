@@ -33,7 +33,10 @@ fn fixture(ambient: f32, strength: f32, emission: f32, optics: &str) -> String {
 <Assets>
 <ImageAsset id="ao" src="{ao}" colorSpace="linear-srgb" />
 <MaterialAsset id="paint" baseColor="#B08050" metallic="0" roughness="0.5" occlusionTexture="ao" occlusionStrength="{strength}" emissive="#FFFFFF" emissiveStrength="{emission}" />
-<PrimitiveAsset id="ball" shape="sphere" radius="0.7" material="paint" />
+<GeometryAsset id="ball_geometry">
+<Primitive shape="sphere" radius="0.7" />
+</GeometryAsset>
+<MeshAsset id="ball" material="paint" geometry="ball_geometry" />
 </Assets>
 <Scene id="main" renderStyle="physical">
 <Timeline>
@@ -133,7 +136,7 @@ fn saturated_highlights_keep_energy_when_blurred_over_dark_surfaces() {
         // can retain their energy difference against an opaque black backdrop.
         let source = |emission| {
             fixture(0.0, 0.0, emission, optics)
-            .replace("</Assets>", "<PrimitiveAsset id=\"backdrop\" shape=\"box\" size={[10,10,0.1]} color=\"#000000\" />\n</Assets>")
+            .replace("</Assets>", "<GeometryAsset id=\"backdrop_geometry\">\n<Primitive shape=\"box\" size={[10,10,0.1]} />\n</GeometryAsset>\n<MeshAsset id=\"backdrop\" color=\"#000000\" material=\"geometry_default\" geometry=\"backdrop_geometry\" />\n</Assets>")
             .replace("<Model asset=\"ball\" />", "<Model asset=\"backdrop\" position={[0,0,-1]} />\n<Model asset=\"ball\" />")
         };
         let low = renderer

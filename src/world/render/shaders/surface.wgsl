@@ -141,6 +141,10 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
     let dielectric_f0 = vec3<f32>(ior_ratio * ior_ratio) *
         params.material0.w * params.material2.rgb;
     let f0 = mix(dielectric_f0, base_color, metallic);
+    let transmission = clamp(params.material6.x, 0.0, 1.0);
+    // Transmitted energy belongs to the scene behind the surface, not Lambert
+    // diffuse. Preserve the existing opaque BRDF when transmission is zero.
+    let diffuse_color = base_color * (1.0 - transmission);
     var lit = vec3<f32>(0.0);
     let light_count = u32(lighting.environment2.y + 0.5);
     var face_band = -1.0;
@@ -176,16 +180,16 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
                     }
                     lit += direct_pbr(
                         normal, view, area_direction_attenuation.xyz, area_radiance,
-                        base_color, metallic, roughness, f0, face_band
+                        diffuse_color, metallic, roughness, f0, face_band
                     );
                 }
             } else if (lighting.surface0.x > 3.5 && light_index > 0u) {
                 // Only the first authored light shapes cel bands; others provide soft fill.
-                lit += base_color * radiance * max(dot(normal, direction_attenuation.xyz), 0.0) * 0.15 / 3.14159265;
+                lit += diffuse_color * radiance * max(dot(normal, direction_attenuation.xyz), 0.0) * 0.15 / 3.14159265;
             } else {
                 lit += direct_pbr(
                     normal, view, direction_attenuation.xyz, radiance,
-                    base_color, metallic, roughness, f0, face_band
+                    diffuse_color, metallic, roughness, f0, face_band
                 );
             }
         }
@@ -194,11 +198,11 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
     if (light_count == 0u && lighting.environment0.w < 0.5) {
         lit += direct_pbr(
             normal, view, normalize(vec3<f32>(-0.42, 0.78, 0.47)), vec3<f32>(4.2, 4.0, 3.75),
-            base_color, metallic, roughness, f0, face_band
+            diffuse_color, metallic, roughness, f0, face_band
         );
         lit += direct_pbr(
             normal, view, normalize(vec3<f32>(0.68, 0.28, 0.51)), vec3<f32>(1.25, 1.45, 1.75),
-            base_color, metallic, roughness, f0, face_band
+            diffuse_color, metallic, roughness, f0, face_band
         );
     }
     if (lighting.surface0.x >= -0.5) { lit *= sample_shadow(input.world_position, normal); }
@@ -213,10 +217,10 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
     let contact = 1.0 - lighting.color1.x *
         (1.0 - smoothstep(0.0, max(lighting.color1.y, 0.001), max(input.world_position.y, 0.0))) *
         (0.45 + 0.55 * (1.0 - lighting.color1.z));
-    var diffuse_ambient = base_color * (1.0 - metallic) * diffuse_environment * lighting.surface2.rgb * lighting.surface2.w;
+    var diffuse_ambient = diffuse_color * (1.0 - metallic) * diffuse_environment * lighting.surface2.rgb * lighting.surface2.w;
     if (lighting.surface0.x < -0.5) {
         // Environment irradiance remains available when hemisphere fill is zero.
-        diffuse_ambient = base_color * (1.0 - metallic) * diffuse_environment;
+        diffuse_ambient = diffuse_color * (1.0 - metallic) * diffuse_environment;
     }
     let specular_ambient = environment_fresnel * specular_environment * lighting.surface1.y;
     let material_ao = material_channels(textureSample(occlusion_texture, actor_sampler, uv)).z;
@@ -250,7 +254,6 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
     let fog_radiance = lighting.fog1.rgb;
     display = mix(display, display_transform(fog_radiance), fog_amount);
     var output_alpha = alpha;
-    let transmission = clamp(params.material6.x, 0.0, 1.0);
     if (transmission > 0.001) {
         // Beer-Lambert attenuation gives thick glass stronger colour without
         // treating transmission as missing surface coverage.
@@ -404,9 +407,12 @@ fn fs_transmissive(input: VertexOut) -> @location(0) vec4<f32> {
     let ior_ratio = (ior - 1.0) / (ior + 1.0);
     let f0 = ior_ratio * ior_ratio;
     let fresnel = f0 + (1.0 - f0) * pow(1.0 - abs(dot(view_normal, view)), 5.0);
-    let reflected_weight = clamp((1.0 - transmission) + fresnel, 0.0, 1.0);
+    let transmitted_weight = transmission * (1.0 - fresnel);
     let transmitted_color = scene_color * attenuation;
-    let glass_color = mix(transmitted_color, surface.rgb, reflected_weight);
+    // The surface BRDF already contains Fresnel-weighted reflection. Applying
+    // Fresnel again erases dielectric highlights, especially water at IOR 1.333.
+    // Its diffuse lobe is reduced by transmission inside shade_surface.
+    let glass_color = transmitted_color * transmitted_weight + surface.rgb;
     // The sampled opaque scene is already inside glass_color, so full coverage
     // avoids blending the same background into the result a second time.
     return vec4<f32>(glass_color, params.style.x);

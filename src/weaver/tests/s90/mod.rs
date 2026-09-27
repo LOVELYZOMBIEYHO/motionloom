@@ -29,6 +29,8 @@ fn job() -> RenderJob {
     job.sampling.max_samples = samples;
     job.sampling.batch_samples = 4;
     job.lens.f_stop = 2.8;
+    // Retain the explicitly calibrated focus used by this physical fixture.
+    job.lens_source = LensSource::Job;
     job.lens.focus_distance = 0.685;
     job.frame = 0;
     job.denoiser_library = std::env::var_os("WEAVER_DENOISER_LIBRARY").map(Into::into);

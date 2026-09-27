@@ -2,7 +2,7 @@
 // =========================================
 // crates/motionloom/examples/author_textured_cavity.rs
 
-use motionloom::{ControlCageNode, api::mesh_authoring::mesh_asset_element};
+use motionloom::{ControlCageNode, api::mesh_authoring::bake_mesh_asset_geometry};
 use std::{env, fs};
 
 // Create a recessed UV surface for the existing articulated mouth presentation.
@@ -37,14 +37,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let start = source
-        .find("<PrimitiveAsset id=\"oral_shadow\"")
-        .ok_or("missing oral asset")?;
-    let end = start + source[start..].find("/>").ok_or("missing asset end")? + 2;
-    source.replace_range(
-        start..end,
-        &mesh_asset_element("oral_shadow", "oral", &cage),
-    );
+    source = bake_mesh_asset_geometry(
+        &source,
+        "oral_shadow",
+        &cage,
+        &motionloom::api::mesh_reference::mesh_source_fingerprint(&source),
+    )?;
     fs::write(path, source)?;
     Ok(())
 }

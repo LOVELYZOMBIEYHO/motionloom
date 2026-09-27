@@ -6968,18 +6968,28 @@ fn scene_camera_to_world_camera(
         .as_ref()
         .and_then(|optics| optics.enabled.then_some(optics))
         .map(|optics| {
-            let target_distance = optics
-                .focus_target
-                .as_deref()
-                .and_then(|value| resolve_scene_3d_reference(value, anchors, models))
-                .map(|focus| length_scene_vec3(sub_scene_vec3(position, focus)))
-                .unwrap_or(distance);
-            let focus_distance = optics
-                .focus_distance
-                .as_deref()
-                .map(|value| eval_scene_number(value, time_norm, time_sec))
-                .transpose()?
-                .unwrap_or(target_distance);
+            // Explicit rack focus wins; autofocus uses the same axial plane as both renderers.
+            let focus_distance = if let Some(value) = &optics.focus_distance {
+                eval_scene_number(value, time_norm, time_sec)?
+            } else if let Some(reference) = &optics.focus_target {
+                let focus = resolve_scene_3d_reference(reference, anchors, models)
+                    .ok_or_else(|| MotionLoomSceneRenderError::InvalidCameraOptics {
+                        id: node.id.clone().unwrap_or_else(|| "unnamed".into()),
+                        message: format!("focusTarget '{reference}' must reference an existing @Anchor3D or @Model3D"),
+                    })?;
+                let to_focus = sub_scene_vec3(focus, position);
+                let axial_depth = -(to_focus[0] * delta[0] + to_focus[1] * delta[1]
+                    + to_focus[2] * delta[2]) / distance;
+                if axial_depth <= 0.0 {
+                    return Err(MotionLoomSceneRenderError::InvalidCameraOptics {
+                        id: node.id.clone().unwrap_or_else(|| "unnamed".into()),
+                        message: format!("focusTarget '{reference}' is behind the camera"),
+                    });
+                }
+                axial_depth
+            } else {
+                distance
+            };
             Ok::<WorldDepthOfField, MotionLoomSceneRenderError>(WorldDepthOfField {
                 max_blur_percent_height: optics.max_blur_unit.as_deref() == Some("percentHeight"),
                 focus_distance: (focus_distance
@@ -6993,7 +7003,7 @@ fn scene_camera_to_world_camera(
                     .clamp(0.7, 64.0)
                     .to_string(),
                 max_blur_px: eval_scene_number(&optics.max_blur, time_norm, time_sec)?
-                    .clamp(0.0, 32.0)
+                    .clamp(0.0, if optics.max_blur_unit.as_deref() == Some("percentHeight") { 10.0 } else { 32.0 })
                     .to_string(),
             })
         })
@@ -23056,6 +23066,81 @@ fn scene_bool(value: &str) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     #[test]
+    fn camera_optics_autofocus_rack_focus_and_axial_targets() {
+        use crate::scene::model::SceneCamera3DNode;
+        use std::collections::HashMap;
+        // Use authored values so the test covers evaluation, not just lens arithmetic.
+        let mut camera: SceneCamera3DNode = serde_json::from_value(serde_json::json!({
+            "id": "focus_camera", "position": "[0,0,6]", "target": "[0,0,0]", "fov": "35",
+            "depthOfField": { "enabled": true, "focusOffset": "-0.5" }
+        }))
+        .unwrap();
+        let mut anchors = HashMap::from([("subject".into(), [3.0, 0.0, 2.0])]);
+        let models = HashMap::new();
+        let resolve = |camera: &SceneCamera3DNode, anchors: &HashMap<String, [f32; 3]>, sec| {
+            super::scene_camera_to_world_camera(camera, anchors, &models, sec / 2.0, sec)
+        };
+        assert_eq!(
+            resolve(&camera, &anchors, 0.0)
+                .unwrap()
+                .depth_of_field
+                .unwrap()
+                .focus_distance,
+            "5.5"
+        );
+        camera.position = "[0,0,curve(\"0:6:linear, 2:4:linear\")]".into();
+        assert_eq!(
+            resolve(&camera, &anchors, 1.0)
+                .unwrap()
+                .depth_of_field
+                .unwrap()
+                .focus_distance,
+            "4.5"
+        );
+        camera.depth_of_field.as_mut().unwrap().focus_target = Some("@subject".into());
+        assert_eq!(
+            resolve(&camera, &anchors, 1.0)
+                .unwrap()
+                .depth_of_field
+                .unwrap()
+                .focus_distance,
+            "2.5"
+        );
+        camera.depth_of_field.as_mut().unwrap().focus_distance =
+            Some("curve(\"0:2:linear, 2:4:linear\")".into());
+        assert_eq!(
+            resolve(&camera, &anchors, 1.0)
+                .unwrap()
+                .depth_of_field
+                .unwrap()
+                .focus_distance,
+            "2.5"
+        );
+        camera.depth_of_field.as_mut().unwrap().focus_distance = None;
+        anchors.clear();
+        assert!(
+            resolve(&camera, &anchors, 1.0)
+                .unwrap_err()
+                .to_string()
+                .contains("focusTarget")
+        );
+        anchors.insert("subject".into(), [0.0, 0.0, 8.0]);
+        assert!(
+            resolve(&camera, &anchors, 1.0)
+                .unwrap_err()
+                .to_string()
+                .contains("behind the camera")
+        );
+        camera.depth_of_field.as_mut().unwrap().enabled = false;
+        assert!(
+            resolve(&camera, &anchors, 1.0)
+                .unwrap()
+                .depth_of_field
+                .is_none()
+        );
+    }
+
+    #[test]
     fn contact_feather_preserves_legacy_bounds_and_nan_fallback() {
         // Lint cleanup must not change semantic contact blending at numerical boundaries.
         for maximum in [0.035_f32, 0.08] {
@@ -23122,7 +23207,11 @@ mod tests {
             r##"
 <Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="drop" shape="cylinder" radius="0.01" height="0.4" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="drop_geometry">
+    <Primitive shape="cylinder" radius="0.01" height="0.4" />
+    </GeometryAsset>
+    <MeshAsset id="drop" material="geometry_default" geometry="drop_geometry" />
   </Assets>
   <Scene id="rain">
     <Timeline>
@@ -23176,13 +23265,20 @@ mod tests {
             r##"
 <Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
     <ImageAsset id="height" src="height.png" colorSpace="linear-srgb" />
     <ImageAsset id="exclude" src="exclude.png" colorSpace="linear-srgb" />
     <MaterialAsset id="ground" baseColor="#808080" />
     <TerrainAsset id="terrain_asset" heightMap="height" size={[8,4]}
                   heightScale="2" heightOffset="-1" material="ground" />
-    <PrimitiveAsset id="tree_a" shape="cone" radius="0.2" height="1" />
-    <PrimitiveAsset id="tree_b" shape="cylinder" radius="0.1" height="1" />
+    <GeometryAsset id="tree_a_geometry">
+    <Primitive shape="cone" radius="0.2" height="1" />
+    </GeometryAsset>
+    <MeshAsset id="tree_a" material="geometry_default" geometry="tree_a_geometry" />
+    <GeometryAsset id="tree_b_geometry">
+    <Primitive shape="cylinder" radius="0.1" height="1" />
+    </GeometryAsset>
+    <MeshAsset id="tree_b" material="geometry_default" geometry="tree_b_geometry" />
   </Assets>
   <Scene id="scatter_scene">
     <Timeline>
@@ -23242,13 +23338,20 @@ mod tests {
         let source = r##"
 <Graph fps={30} duration="1s" size={[64,64]}>
   <Assets>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
     <ImageAsset id="height" src="height.png" colorSpace="linear-srgb" />
     <ImageAsset id="exclude" src="exclude.png" colorSpace="linear-srgb" />
     <MaterialAsset id="ground" baseColor="#808080" />
     <TerrainAsset id="terrain_asset" heightMap="height" size={[8,4]}
                   heightScale="2" heightOffset="-1" material="ground" />
-    <PrimitiveAsset id="tree_a" shape="cone" radius="0.2" height="1" />
-    <PrimitiveAsset id="tree_b" shape="cylinder" radius="0.1" height="1" />
+    <GeometryAsset id="tree_a_geometry">
+    <Primitive shape="cone" radius="0.2" height="1" />
+    </GeometryAsset>
+    <MeshAsset id="tree_a" material="geometry_default" geometry="tree_a_geometry" />
+    <GeometryAsset id="tree_b_geometry">
+    <Primitive shape="cylinder" radius="0.1" height="1" />
+    </GeometryAsset>
+    <MeshAsset id="tree_b" material="geometry_default" geometry="tree_b_geometry" />
   </Assets>
   <Scene id="scatter_scene">
     <Timeline>
@@ -23381,7 +23484,11 @@ mod tests {
             r##"
 <Graph fps={30} duration="2s" size={[64,64]}>
   <Assets>
-    <PrimitiveAsset id="part" shape="capsule" radius="0.1" height="0.3" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="part_geometry">
+    <Primitive shape="capsule" radius="0.1" height="0.3" />
+    </GeometryAsset>
+    <MeshAsset id="part" material="geometry_default" geometry="part_geometry" />
     <CompoundAsset id="body" rig="rig">
       <Instance id="part_instance" asset="part" bone="root" />
     </CompoundAsset>
@@ -29957,8 +30064,15 @@ mod tests {
             r##"
 <Graph fps={24} duration="1s" size={[128,96]}>
 <Assets>
-<PrimitiveAsset id="ground" shape="box" size={[300,0.2,900]} color="#707070" />
-<PrimitiveAsset id="car" shape="box" size={[2,1,4]} color="#FF0000" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+<GeometryAsset id="ground_geometry">
+<Primitive shape="box" size={[300,0.2,900]} />
+</GeometryAsset>
+<MeshAsset id="ground" color="#707070" material="geometry_default" geometry="ground_geometry" />
+<GeometryAsset id="car_geometry">
+<Primitive shape="box" size={[2,1,4]} />
+</GeometryAsset>
+<MeshAsset id="car" color="#FF0000" material="geometry_default" geometry="car_geometry" />
 </Assets>
 <Background color="#80C0FF" />
 <Scene id="test">
@@ -30020,8 +30134,11 @@ mod tests {
             r##"
 <Graph fps={30} duration="1s" size={[64,48]}>
   <Assets>
-    <PrimitiveAsset id="test_sphere" shape="sphere" radius="0.75"
-                    segments="12" rings="6" color="#FF6B6B" />
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="test_sphere_geometry">
+    <Primitive shape="sphere" radius="0.75" segments="12" rings="6" />
+    </GeometryAsset>
+    <MeshAsset id="test_sphere" color="#FF6B6B" material="geometry_default" geometry="test_sphere_geometry" />
   </Assets>
   <Background color="#080C16" />
   <Scene id="primitive_scene">

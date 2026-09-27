@@ -115,18 +115,35 @@ fn tags(s: &str) -> Result<Vec<Tag>, HeadFitError> {
 }
 pub(super) fn target_range(s: &str, id: &str) -> Result<Range<usize>, HeadFitError> {
     let tags = tags(s)?;
+    let attr = |t: &Tag, name: &str| {
+        t.attrs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| s[r.clone()].trim_matches(['\'', '"']))
+    };
+    let binding = tags
+        .iter()
+        .find(|t| t.name == "MeshAsset" && attr(t, "id") == Some(id))
+        .ok_or_else(|| HeadFitError::Source("MeshAsset binding was not found".into()))?;
+    let geometry_id = attr(binding, "geometry")
+        .ok_or_else(|| HeadFitError::Source("MeshAsset requires geometry".into()))?;
+    let geometry = tags
+        .iter()
+        .find(|t| t.name == "GeometryAsset" && attr(t, "id") == Some(geometry_id))
+        .ok_or_else(|| HeadFitError::Source("GeometryAsset was not found".into()))?;
+    let end = tags
+        .iter()
+        .find(|t| t.name == "/GeometryAsset" && t.range.start > geometry.range.start)
+        .ok_or_else(|| HeadFitError::Source("missing GeometryAsset close".into()))?;
     let mut ranges = vec![];
     for (i, t) in tags.iter().enumerate() {
-        if t.name == "HeadAsset"
-            && t.attrs
-                .iter()
-                .any(|(n, r)| n == "id" && s[r.clone()].trim_matches(['\'', '"']) == id)
+        if t.name == "Head" && t.range.start > geometry.range.start && t.range.end < end.range.start
         {
-            let end = tags[i + 1..]
+            let close = tags[i + 1..]
                 .iter()
-                .find(|t| t.name == "/HeadAsset")
-                .ok_or_else(|| HeadFitError::Source("missing HeadAsset close".into()))?;
-            ranges.push(t.range.start..end.range.end);
+                .find(|t| t.name == "/Head")
+                .ok_or_else(|| HeadFitError::Source("missing Head close".into()))?;
+            ranges.push(t.range.start..close.range.end);
         }
     }
     if ranges.len() != 1 {

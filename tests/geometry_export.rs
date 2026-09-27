@@ -9,7 +9,10 @@ fn source() -> String {
     r##"<Graph fps="30" duration="2s" size={[128,128]}>
 <Assets>
 <MaterialAsset id="paint" baseColor="#AF7050" roughness="0.6" />
-<PrimitiveAsset id="box" shape="box" size={[1,2,3]} material="paint" />
+<GeometryAsset id="box_geometry">
+<Primitive shape="box" size={[1,2,3]} />
+</GeometryAsset>
+<MeshAsset id="box" material="paint" geometry="box_geometry" />
 </Assets>
 <Scene id="main">
 <Timeline>
@@ -37,13 +40,19 @@ fn mesh_source(subdivision: u32) -> String {
         r##"<Graph fps="30" duration="1s" size={{[64,64]}}>
 <Assets>
 <MaterialAsset id="paint" baseColor="#AF7050" roughness="0.6" />
-<MeshAsset id="mesh" material="paint" subdivision="{subdivision}" subdivisionScheme="catmullClark">
+<GeometryAsset id="mesh_geometry">
+<Mesh>
 <Vertex position={{[-1,-1,0]}} uv={{[0,0]}} pinned="true" />
 <Vertex position={{[1,-1,0]}} uv={{[1,0]}} pinned="true" />
 <Vertex position={{[1,1,0]}} uv={{[1,1]}} />
 <Vertex position={{[-1,1,0]}} uv={{[0,1]}} />
 <Face indices={{[0,1,2,3]}} />
-</MeshAsset>
+</Mesh>
+<Modifiers>
+<Subdivision levels="{subdivision}" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="mesh" material="paint" geometry="mesh_geometry" />
 </Assets>
 <Scene id="main">
 <Timeline>
@@ -187,7 +196,7 @@ fn glb_roundtrip_keeps_vertex_color_brightness() {
     );
     let exported = src
         .replace(
-            "<PrimitiveAsset id=\"box\" shape=\"box\" size={[1,2,3]} material=\"paint\" />",
+            "<GeometryAsset id=\"box_geometry\">\n<Primitive shape=\"box\" size={[1,2,3]} />\n</GeometryAsset>\n<MeshAsset id=\"box\" material=\"paint\" geometry=\"box_geometry\" />",
             &format!("<ModelAsset id=\"box\" src=\"{uri}\" />"),
         )
         .replace(
@@ -326,7 +335,7 @@ fn mesh_editor_snapshot_preserves_authored_cage_and_rejects_procedural_assets() 
     let procedural =
         parse_graph_script(&source.replace("asset=\"mesh\"", "asset=\"box\"").replace(
             "</Assets>",
-            "<PrimitiveAsset id=\"box\" shape=\"box\" size={[1,1,1]} material=\"paint\" />\n</Assets>",
+            "<GeometryAsset id=\"box_geometry\">\n<Primitive shape=\"box\" size={[1,1,1]} />\n</GeometryAsset>\n<MeshAsset id=\"box\" material=\"paint\" geometry=\"box_geometry\" />\n</Assets>",
         ))
         .unwrap();
     assert!(

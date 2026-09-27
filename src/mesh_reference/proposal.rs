@@ -123,7 +123,12 @@ pub fn apply_mesh_asset_proposal(
         .iter()
         .map(|change| (change.vertex, change.after))
         .collect();
-    let next_source = rewrite_vertex_positions(source, &proposal.target_asset_id, &replacements)?;
+    let next_source = crate::format_dsl(&rewrite_vertex_positions(
+        source,
+        &proposal.target_asset_id,
+        &replacements,
+    )?)?
+    .source;
     let reparsed = mesh_asset(&next_source, &proposal.target_asset_id)?;
     if reparsed.positions != cage.positions || reparsed.faces != cage.faces {
         return Err(MeshReferenceError::Source(
@@ -282,7 +287,21 @@ pub(crate) fn mesh_asset(source: &str, id: &str) -> Result<ControlCageNode, Mesh
             "{id} is not a MeshAsset"
         )));
     };
-    Ok(cage.clone())
+    let mut cage = cage.clone();
+    // Preserve the public control-cage subdivision metadata while DSL owns one modifier form.
+    cage.subdivision = asset
+        .modifiers
+        .iter()
+        .filter_map(|m| match m {
+            crate::PrimitiveModifierNode::Subdivision { levels, scheme }
+                if scheme == "catmullclark" =>
+            {
+                Some(*levels)
+            }
+            _ => None,
+        })
+        .sum();
+    Ok(cage)
 }
 
 pub(crate) fn rewrite_mesh_asset_cage(
@@ -290,44 +309,12 @@ pub(crate) fn rewrite_mesh_asset_cage(
     asset_id: &str,
     cage: &ControlCageNode,
 ) -> Result<String, MeshReferenceError> {
-    let tags = scan_tags(source);
-    let open = tags
-        .iter()
-        .find(|tag| {
-            !tag.closing
-                && tag.name == "MeshAsset"
-                && attribute(&tag.raw, "id").as_deref() == Some(asset_id)
-        })
-        .ok_or_else(|| MeshReferenceError::Source(format!("MeshAsset {asset_id} was not found")))?;
-    let close = tags
-        .iter()
-        .find(|tag| tag.closing && tag.name == "MeshAsset" && tag.start > open.start)
-        .ok_or_else(|| MeshReferenceError::Source(format!("MeshAsset {asset_id} is not closed")))?;
-    let open_end = open.start + open.raw.len();
-    let close_end = close.start + close.raw.len();
-    let mut body = String::new();
-    for (index, position) in cage.positions.iter().enumerate() {
-        let uv = cage.uvs.get(index).copied().unwrap_or([0.0; 2]);
-        let pinned = cage.pinned.get(index).copied().unwrap_or(false);
-        body.push_str(&format!(
-            "\n  <Vertex position={{[{}]}} uv={{[{}]}} pinned=\"{}\" />",
-            format_vector(position),
-            format_vector(&uv),
-            pinned
-        ));
-    }
-    for face in &cage.faces {
-        body.push_str(&format!(
-            "\n  <Face indices={{[{}]}} />",
-            format_indices(face)
-        ));
-    }
-    body.push('\n');
-    let mut result = String::with_capacity(source.len() + body.len());
-    result.push_str(&source[..open_end]);
-    result.push_str(&body);
-    result.push_str(&source[close.start..close_end]);
-    result.push_str(&source[close_end..]);
+    let (open, close) = mesh_source_region(source, asset_id)?;
+    let mut result = source.to_string();
+    result.replace_range(
+        open.start..close.start + close.raw.len(),
+        &crate::mesh_authoring::mesh_generator_element(cage),
+    );
     Ok(result)
 }
 
@@ -336,15 +323,13 @@ fn rewrite_vertex_positions(
     asset_id: &str,
     changes: &HashMap<usize, [f32; 3]>,
 ) -> Result<String, MeshReferenceError> {
+    let (open, close) = mesh_source_region(source, asset_id)?;
     let tags = scan_tags(source);
-    let mut active = false;
+
     let mut vertex = 0;
     let mut patches = vec![];
     for tag in tags {
-        if tag.name == "MeshAsset" {
-            active = !tag.closing && attribute(&tag.raw, "id").as_deref() == Some(asset_id);
-            continue;
-        }
+        let active = tag.start > open.start && tag.start < close.start;
         if !active || tag.closing || tag.name != "Vertex" {
             continue;
         }
@@ -372,7 +357,51 @@ fn rewrite_vertex_positions(
     Ok(result)
 }
 
-#[derive(Debug)]
+/// Resolve edits through the material-bound asset to its sole explicit geometry source.
+pub(crate) fn geometry_source_span(
+    source: &str,
+    asset_id: &str,
+) -> Result<(String, usize, usize), MeshReferenceError> {
+    let tags = scan_tags(source);
+    let mesh = tags
+        .iter()
+        .find(|t| {
+            !t.closing
+                && t.name == "MeshAsset"
+                && attribute(&t.raw, "id").as_deref() == Some(asset_id)
+        })
+        .ok_or_else(|| MeshReferenceError::Source(format!("MeshAsset {asset_id} was not found")))?;
+    let id = attribute(&mesh.raw, "geometry").ok_or_else(|| {
+        MeshReferenceError::Source("MeshAsset requires geometry reference".into())
+    })?;
+    let geometry = tags
+        .iter()
+        .find(|t| {
+            !t.closing
+                && t.name == "GeometryAsset"
+                && attribute(&t.raw, "id").as_deref() == Some(&id)
+        })
+        .ok_or_else(|| MeshReferenceError::Source(format!("GeometryAsset {id} was not found")))?;
+    let end = tags
+        .iter()
+        .find(|t| t.closing && t.name == "GeometryAsset" && t.start > geometry.start)
+        .ok_or_else(|| MeshReferenceError::Source("GeometryAsset is not closed".into()))?;
+    Ok((id, geometry.start, end.start + end.raw.len()))
+}
+
+fn mesh_source_region(source: &str, asset_id: &str) -> Result<(Tag, Tag), MeshReferenceError> {
+    let (_, start, end) = geometry_source_span(source, asset_id)?;
+    let tags = scan_tags(source);
+    let open=tags.iter().find(|t| !t.closing && t.name=="Mesh" && t.start>start && t.start<end)
+        .ok_or_else(|| MeshReferenceError::Source("Parametric or derived geometry requires explicit conversion to Mesh before vertex editing".into()))?;
+    let close = tags
+        .iter()
+        .find(|t| t.closing && t.name == "Mesh" && t.start > open.start && t.start < end)
+        .ok_or_else(|| MeshReferenceError::Source("Mesh generator is not closed".into()))?;
+    Ok((open.clone(), close.clone()))
+}
+
+#[derive(Debug, Clone)]
 struct Tag {
     name: String,
     raw: String,
@@ -381,63 +410,35 @@ struct Tag {
 }
 
 fn scan_tags(source: &str) -> Vec<Tag> {
-    let bytes = source.as_bytes();
     let mut result = vec![];
-    let mut index = 0;
-    while index < bytes.len() {
-        if source[index..].starts_with("<!--") {
-            index = source[index + 4..]
+    let mut cursor = 0;
+    while let Some(offset) = source[cursor..].find('<') {
+        let start = cursor + offset;
+        if source[start..].starts_with("<!--") {
+            cursor = source[start + 4..]
                 .find("-->")
-                .map_or(bytes.len(), |offset| index + 4 + offset + 3);
+                .map_or(source.len(), |n| start + 4 + n + 3);
             continue;
         }
-        if bytes[index] != b'<' {
-            index += 1;
-            continue;
+        let Some(end) = crate::dsl_syntax::find_tag_end_byte(source, start) else {
+            break;
+        };
+        let raw = &source[start..=end];
+        let closing = raw.starts_with("</");
+        let name = if closing {
+            crate::dsl_syntax::closing_tag_name(raw)
+        } else {
+            crate::dsl_syntax::opening_tag_name(raw)
+        };
+        if let Some(name) = name {
+            result.push(Tag {
+                name: name.into(),
+                raw: raw.into(),
+                start,
+                closing,
+            });
         }
-        let start = index;
-        index += 1;
-        let closing = bytes.get(index) == Some(&b'/');
-        if closing {
-            index += 1;
-        }
-        let name_start = index;
-        while bytes
-            .get(index)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        {
-            index += 1;
-        }
-        if index == name_start {
-            continue;
-        }
-        let name = source[name_start..index].to_owned();
-        let mut quote = None;
-        let mut braces = 0_i32;
-        while index < bytes.len() {
-            let byte = bytes[index];
-            if let Some(expected) = quote {
-                if byte == expected && bytes.get(index.wrapping_sub(1)) != Some(&b'\\') {
-                    quote = None;
-                }
-            } else if byte == b'\'' || byte == b'"' {
-                quote = Some(byte);
-            } else if byte == b'{' {
-                braces += 1;
-            } else if byte == b'}' {
-                braces -= 1;
-            } else if byte == b'>' && braces == 0 {
-                index += 1;
-                result.push(Tag {
-                    name,
-                    raw: source[start..index].to_owned(),
-                    start,
-                    closing,
-                });
-                break;
-            }
-            index += 1;
-        }
+        cursor = end + 1;
     }
     result
 }
@@ -477,22 +478,6 @@ fn format_position(value: [f32; 3]) -> String {
         text
     });
     format!("position={{[{}, {}, {}]}}", values[0], values[1], values[2])
-}
-
-fn format_vector<const N: usize>(value: &[f32; N]) -> String {
-    value
-        .iter()
-        .map(f32::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_indices(value: &[u32]) -> String {
-    value
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn cage_extent(cage: &ControlCageNode) -> f32 {

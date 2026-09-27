@@ -270,9 +270,12 @@ fn s86_head() -> &'static str {
     r##"<Graph fps={30} duration="1s" size={[64,64]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#aaaaaa" />
-<HeadAsset id="s86_head" material="clay" archetype="humanoid" variant="anime" symmetry="x" topology="facialCage">
+<GeometryAsset id="s86_head_geometry">
+<UV mode="planar" uAxis="x" vAxis="y" />
+
+<Head archetype="humanoid" variant="anime" symmetry="x" topology="facialCage">
 <HeadShape size={[1.50,1.833,1.67]} forehead="1" cheekWidth="1" jawWidth="1" chinLength="0" chinRoundness="0.6" />
-<FacialCage generatorVersion="1" segments="192" profileSegments="96" samplesPerSection="6" subdivision="1" orbitalRings="10" mouthRings="8" preserveProfile="true" uvMode="fallbackXY" />
+<FacialCage generatorVersion="1" segments="192" profileSegments="96" samplesPerSection="6" orbitalRings="10" mouthRings="8" preserveProfile="true" />
 <HeadProfile>
 <HeadSection id="chin_point" at="-0.833" width="0.018" frontDepth="0.462" backDepth="0.450" />
 <HeadSection id="chin_side" at="-0.793" width="0.217" frontDepth="0.500" backDepth="-0.466" />
@@ -292,7 +295,13 @@ fn s86_head() -> &'static str {
   <Mouth id="mouth" position={[0,-0.561,0]} width="0.086" opening="0.014" upperLip="0.025" lowerLip="0.03" muzzleLength="0" muzzleWidth="0.3" />
 </FaceLayout>
 <HeadMorph headWidth="1" headHeight="1" headDepth="1" faceWidth="1" faceHeight="1" jawWidth="1" muzzleLength="1" featureScale="1" />
-</HeadAsset>
+</Head>
+
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="s86_head" material="clay" geometry="s86_head_geometry" />
 </Assets>
 <Scene id="review">
 <Timeline>
@@ -318,7 +327,8 @@ fn facial_cage_v1_reproduces_s86_topology_baseline() {
     assert_eq!(cage.positions.len(), 25_024);
     assert_eq!(cage.faces.len(), 25_336);
     assert_eq!(cage.pinned.iter().filter(|&&pin| pin).count(), 22_596);
-    assert_eq!(cage.subdivision, 1);
+    assert_eq!(cage.subdivision, 0);
+    assert!(asset.modifiers.iter().any(|m| matches!(m, motionloom::PrimitiveModifierNode::Subdivision {levels:1, scheme} if scheme=="catmullclark")));
     assert_eq!(cage.positions[24], [0.006364, -0.833, 0.460243]);
     assert!(cage.faces.iter().any(|f| f == &[7672, 7864, 7865, 7673]));
     let report = motionloom::inspect_control_cage(asset).unwrap();
@@ -326,7 +336,10 @@ fn facial_cage_v1_reproduces_s86_topology_baseline() {
     assert_eq!(report.control_faces, 25_336);
     assert_eq!(report.open_edges, 0);
     assert_eq!(report.non_manifold_edges, 0);
-    assert_eq!(report.uv_source, "fallback_xy");
+    assert_eq!(report.uv_source, "authored");
+    assert!(asset.modifiers.iter().any(
+        |m| matches!(m,motionloom::PrimitiveModifierNode::Uv {settings} if settings.mode=="planar")
+    ));
 }
 
 #[test]
@@ -441,7 +454,8 @@ fn facial_cage_is_known_to_the_authoring_schema() {
         "MeshAsset",
         "Vertex",
         "Face",
-        "HeadAsset",
+        "GeometryAsset",
+        "Head",
         "FacialCage",
         "HeadProfile",
         "HeadSection",
@@ -466,13 +480,19 @@ fn generic_and_explicit_head_cages_share_the_same_ir() {
     let generic = r##"<Graph fps={30} duration="1s" size={[64,64]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#aaaaaa" />
-<MeshAsset id="patch" material="clay" subdivision="1" subdivisionScheme="catmullClark">
+<GeometryAsset id="patch_geometry">
+<Mesh>
 <Vertex position={[-1,0,0]} pinned="true" />
 <Vertex position={[1,0,0]} uv={[1,0]} pinned="true" />
 <Vertex position={[1,1,0]} />
 <Vertex position={[-1,1,0]} />
 <Face indices={[0,1,2,3]} />
-</MeshAsset>
+</Mesh>
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="patch" material="clay" geometry="patch_geometry" />
 </Assets>
 <Scene id="review">
 <Timeline>
@@ -497,16 +517,23 @@ fn generic_and_explicit_head_cages_share_the_same_ir() {
     let explicit = r##"<Graph fps={30} duration="1s" size={[64,64]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#aaaaaa" />
-<HeadAsset id="head" material="clay" archetype="humanoid" topology="explicit">
+<GeometryAsset id="head_geometry">
+<Head archetype="humanoid" topology="explicit">
 <HeadShape size={[1,1,1]} />
-<HeadCage subdivision="1">
+<HeadCage>
 <Vertex position={[-1,0,0]} pinned="true" />
 <Vertex position={[1,0,0]} uv={[1,0]} pinned="true" />
 <Vertex position={[1,1,0]} />
 <Vertex position={[-1,1,0]} />
 <Face indices={[0,1,2,3]} />
 </HeadCage>
-</HeadAsset>
+</Head>
+
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="head" material="clay" geometry="head_geometry" />
 </Assets>
 <Scene id="review">
 <Timeline>

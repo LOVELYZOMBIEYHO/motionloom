@@ -1,4 +1,5 @@
 // =========================================
+// =========================================
 // crates/motionloom/src/lib.rs
 
 //! MotionLoom is a Rust parser and renderer for MotionLoom graph DSL.
@@ -103,8 +104,11 @@ mod authoring;
 mod common;
 mod compat;
 mod dsl;
+mod dsl_syntax;
 mod error;
 mod export;
+mod formatter;
+mod geometry_ops;
 pub mod mesh_authoring;
 pub mod mesh_reference;
 pub mod preview;
@@ -143,7 +147,12 @@ pub use compat::{
     GpuCompatibilityIssue, GpuCompatibilityReport, GpuCompatibilitySeverity,
     GpuCompatibilityTarget, ScenePreviewPath, inspect_gpu_compatibility,
 };
+pub use formatter::{FormatEdit, FormatError, FormatResult, format_dsl};
 pub mod audio;
+
+// Native command adapters share the library renderer and stay out of WASM.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cli;
 
 pub use export::{EncodeError, VideoEncoder, VideoFrame, create_encoder};
 pub use render_graph::{
@@ -170,18 +179,18 @@ pub use dsl::{
     AttachmentTargetNode, BackgroundNode, CompoundAssetInstanceNode, CompoundAssetNode,
     ContactSurfaceNode, ControlCageNode, CurveAssetNode, CurveInterpolation, CurvePointNode,
     EarNode, EyeNode, EyebrowNode, EyelinerNode, FaceLayoutNode, FaceTextureNode, FacialCageNode,
-    GraphAssetKind, GraphAssetNode, GraphAssetSource, GraphScript, HairGuideNode, HairPointNode,
-    HeadDomeNode, HeadFeatureNode, HeadMorphNode, HeadSectionNode, HeadShapeNode, ImageNode,
-    IrisNode, MaterialAssetNode, MaterialTextureChannel, ModelProfileBoneAxisMapNode,
-    ModelProfileBoneAxisNode, ModelProfileNode, ModelProfileRetargetMapNode,
-    ModelProfileRetargetNode, MouthNode, NativeSkinBindingNode, NativeSkinMode,
-    NativeWeightRegionNode, NoseNode, PrimitiveAssetNode, PrimitiveAxis, PrimitiveGeometry,
-    PrimitiveLodNode, PrimitiveLoftSectionNode, PrimitiveMeshBuildNode, PrimitiveModifierNode,
-    PrimitiveRibbonPointNode, ProcessDefinitionNode, SkeletonBoneNode, SkeletonConstraintNode,
-    SkeletonControlNode, SkeletonGuideNode, SkeletonLandmarkNode, SkeletonMeasureNode,
-    SkeletonNode, SkeletonRatioNode, SkeletonRegionNode, SvgNode, SweepProfilePointNode,
-    TerrainAssetNode, VegetationAssetNode, VegetationKind, VegetationLod, is_graph_script,
-    parse_action_library_document, parse_graph_script,
+    GeometryAssetNode, GeometryUvNode, GraphAssetKind, GraphAssetNode, GraphAssetSource,
+    GraphScript, HairGuideNode, HairPointNode, HeadDomeNode, HeadFeatureNode, HeadMorphNode,
+    HeadSectionNode, HeadShapeNode, ImageNode, IrisNode, MaterialAssetNode, MaterialTextureChannel,
+    ModelProfileBoneAxisMapNode, ModelProfileBoneAxisNode, ModelProfileNode,
+    ModelProfileRetargetMapNode, ModelProfileRetargetNode, MouthNode, NativeSkinBindingNode,
+    NativeSkinMode, NativeWeightRegionNode, NoseNode, PrimitiveAssetNode, PrimitiveAxis,
+    PrimitiveGeometry, PrimitiveLodNode, PrimitiveLoftSectionNode, PrimitiveMeshBuildNode,
+    PrimitiveModifierNode, PrimitiveRibbonPointNode, ProcessDefinitionNode, SkeletonBoneNode,
+    SkeletonConstraintNode, SkeletonControlNode, SkeletonGuideNode, SkeletonLandmarkNode,
+    SkeletonMeasureNode, SkeletonNode, SkeletonRatioNode, SkeletonRegionNode, SvgNode,
+    SweepProfilePointNode, TerrainAssetNode, VegetationAssetNode, VegetationKind, VegetationLod,
+    is_graph_script, parse_action_library_document, parse_graph_script,
 };
 pub use error::{GraphParseError, MotionLoomError, RootGraphError, RuntimeCompileError};
 #[cfg(not(target_arch = "wasm32"))]

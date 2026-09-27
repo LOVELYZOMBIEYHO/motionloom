@@ -163,7 +163,13 @@ pub async fn render_master_sequence<F: FnMut(SequenceProgress)>(
     let mut sequence_job = job.clone();
     sequence_job.scene = canonical_scene.clone();
     sequence_job.frame = *frames.start();
-    let sequence_hash = digest_serialized(&(sequence_job.clone(), frames.clone(), settings))?;
+    // A changed lens interpretation cannot resume previously blurred masters.
+    let sequence_hash = digest_serialized(&(
+        sequence_job.clone(),
+        frames.clone(),
+        settings,
+        super::super::camera::OPTICS_REVISION,
+    ))?;
     let root = job.output.join("sequences").join(&sequence_hash[..16]);
     let display_dir = root.join("frames/display-master");
     let scene_dir = root.join("frames/scene-composite");
@@ -224,7 +230,24 @@ pub async fn render_master_sequence<F: FnMut(SequenceProgress)>(
         frame_job.scene = canonical_scene.clone();
         frame_job.frame = frame;
         frame_job.output = checkpoint_dir.clone();
-        let signature = digest_serialized(&(frame_job.clone(), &script))?;
+        // Invalidate only transition frames from the old merged-island boundary bug.
+        let boundary = graph.scenes.iter().any(|scene| {
+            super::super::scene::has_hidden_boundary(&scene.children, frame as f32 / graph.fps)
+        });
+        let signature = if boundary {
+            digest_serialized(&(
+                frame_job.clone(),
+                &script,
+                "half-open-3d-sequences-v1",
+                super::super::camera::OPTICS_REVISION,
+            ))?
+        } else {
+            digest_serialized(&(
+                frame_job.clone(),
+                &script,
+                super::super::camera::OPTICS_REVISION,
+            ))?
+        };
         let resume = read_resume_record(&resume_path);
         let reusable = resume
             .as_ref()
@@ -326,61 +349,80 @@ pub async fn render_master_sequence<F: FnMut(SequenceProgress)>(
 
     manifest.status = "encoding".into();
     write_json_atomic(&manifest_path, &manifest)?;
-    let ffmpeg = resolve_runtime_binary("ANICA_FFMPEG_PATH", "ffmpeg", &canonical_scene);
-    let ffprobe = resolve_runtime_binary("ANICA_FFPROBE_PATH", "ffprobe", &canonical_scene);
-    let duration = total as f64 * fps[1] as f64 / fps[0] as f64;
-    if settings.include_audio {
-        let audio_plan =
-            compile_audio_plan(&graph).map_err(|error| WeaverError::Scene(error.to_string()))?;
-        if !audio_plan.clips.is_empty() {
-            let full_duration = (*frames.end() as f64 + 1.0) * fps[1] as f64 / fps[0] as f64;
-            let prepared = prepare_audio(
-                &ffmpeg.to_string_lossy(),
-                audio_plan,
-                canonical_scene.parent().unwrap_or_else(|| Path::new(".")),
-                full_duration,
-            )
-            .map_err(|error| WeaverError::Invalid(error.to_string()))?;
-            let audio_master = root.join("audio-master.wav");
-            encode_audio_master(
-                &ffmpeg,
-                &prepared.path(),
-                &audio_master,
-                *frames.start() as f64 * fps[1] as f64 / fps[0] as f64,
-                duration,
-            )?;
-            manifest.outputs.audio_master = Some(audio_master);
+    // Keep all rendered masters resumable when cancellation interrupts delivery.
+    let delivery = (|| -> Result<(), WeaverError> {
+        let ffmpeg = resolve_runtime_binary("ANICA_FFMPEG_PATH", "ffmpeg", &canonical_scene);
+        let ffprobe = resolve_runtime_binary("ANICA_FFPROBE_PATH", "ffprobe", &canonical_scene);
+        let duration = total as f64 * fps[1] as f64 / fps[0] as f64;
+        if settings.include_audio {
+            let audio_plan = compile_audio_plan(&graph)
+                .map_err(|error| WeaverError::Scene(error.to_string()))?;
+            if !audio_plan.clips.is_empty() {
+                let full_duration = (*frames.end() as f64 + 1.0) * fps[1] as f64 / fps[0] as f64;
+                let prepared = prepare_audio(
+                    &ffmpeg.to_string_lossy(),
+                    audio_plan,
+                    canonical_scene.parent().unwrap_or_else(|| Path::new(".")),
+                    full_duration,
+                )
+                .map_err(|error| WeaverError::Invalid(error.to_string()))?;
+                let audio_master = root.join("audio-master.wav");
+                encode_audio_master(
+                    &ffmpeg,
+                    &prepared.path(),
+                    &audio_master,
+                    *frames.start() as f64 * fps[1] as f64 / fps[0] as f64,
+                    duration,
+                    cancel,
+                )?;
+                manifest.outputs.audio_master = Some(audio_master);
+            }
         }
+        if settings.encode_prores {
+            let target = root.join("display-master-prores4444xq.mov");
+            encode_video(
+                &ffmpeg,
+                VideoKind::ProRes4444Xq,
+                &display_dir,
+                *frames.start(),
+                total,
+                fps,
+                manifest.outputs.audio_master.as_deref(),
+                &target,
+                cancel,
+            )?;
+            manifest.outputs.prores_master = Some(target);
+        }
+        if settings.encode_preview {
+            let target = root.join("preview.mp4");
+            encode_video(
+                &ffmpeg,
+                VideoKind::PreviewH264,
+                &display_dir,
+                *frames.start(),
+                total,
+                fps,
+                manifest.outputs.audio_master.as_deref(),
+                &target,
+                cancel,
+            )?;
+            manifest.outputs.preview_movie = Some(target);
+        }
+        manifest.validation = Some(validate_delivery(&ffmpeg, &ffprobe, &manifest)?);
+        Ok(())
+    })();
+    if cancel.is_cancelled() {
+        manifest.status = "cancelled".into();
+        write_json_atomic(&manifest_path, &manifest)?;
+        return Ok(report_from_manifest(
+            &manifest,
+            &root,
+            rendered_frames,
+            resumed_frames,
+            &manifest_path,
+        ));
     }
-    if settings.encode_prores {
-        let target = root.join("display-master-prores4444xq.mov");
-        encode_video(
-            &ffmpeg,
-            VideoKind::ProRes4444Xq,
-            &display_dir,
-            *frames.start(),
-            total,
-            fps,
-            manifest.outputs.audio_master.as_deref(),
-            &target,
-        )?;
-        manifest.outputs.prores_master = Some(target);
-    }
-    if settings.encode_preview {
-        let target = root.join("preview.mp4");
-        encode_video(
-            &ffmpeg,
-            VideoKind::PreviewH264,
-            &display_dir,
-            *frames.start(),
-            total,
-            fps,
-            manifest.outputs.audio_master.as_deref(),
-            &target,
-        )?;
-        manifest.outputs.preview_movie = Some(target);
-    }
-    manifest.validation = Some(validate_delivery(&ffmpeg, &ffprobe, &manifest)?);
+    delivery?;
     manifest.status = "complete".into();
     write_json_atomic(&manifest_path, &manifest)?;
     Ok(report_from_manifest(
@@ -501,6 +543,7 @@ fn encode_audio_master(
     target: &Path,
     start: f64,
     duration: f64,
+    cancel: &CancellationToken,
 ) -> Result<(), WeaverError> {
     let temporary = target.with_file_name("audio-master.tmp.wav");
     run_command(
@@ -514,6 +557,7 @@ fn encode_audio_master(
             .args(["-ar", "48000", "-ac", "2", "-c:a", "pcm_f32le"])
             .arg(&temporary),
         "audio master",
+        cancel,
     )?;
     fs::rename(temporary, target)?;
     Ok(())
@@ -534,6 +578,7 @@ fn encode_video(
     fps: [u32; 2],
     audio: Option<&Path>,
     target: &Path,
+    cancel: &CancellationToken,
 ) -> Result<(), WeaverError> {
     let temporary = match kind {
         VideoKind::ProRes4444Xq => target.with_file_name("display-master-prores4444xq.tmp.mov"),
@@ -550,15 +595,19 @@ fn encode_video(
         command.arg("-i").arg(audio);
     }
     command.args(["-frames:v", &count.to_string()]);
-    // FFmpeg's colorspace filter performs the linear-light transfer correctly.
-    // ProRes reattaches the independently converted alpha plane afterwards.
-    let bt709_color = "colorspace=ispace=gbr:iprimaries=bt709:itrc=linear:irange=pc:space=bt709:primaries=bt709:trc=bt709:range=tv";
+    // Stay in full-range RGB through the BT.709 transfer, then convert to YUV.
+    // colorspace silently negotiated limited YUV before interpreting linear RGB.
+    // A 16-bit LUT also works with the bundled runtime without requiring zscale.
+    let transfer = "if(lte(val/maxval,0.018),4.5*val,maxval*(1.099*pow(val/maxval,0.45)-0.099))";
+    let bt709_color = format!(
+        "format=gbrp16le,lutrgb=r='{transfer}':g='{transfer}':b='{transfer}',scale=in_range=pc:out_range=tv:out_color_matrix=bt709"
+    );
     let bt709_metadata =
         "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv";
     match kind {
         VideoKind::ProRes4444Xq => {
             let filter = format!(
-                "[0:v]split=2[color][alpha];[color]{bt709_color}:format=yuv444p10[color709];[alpha]format=rgba64le,alphaextract,format=gray16le[alpha16];[color709][alpha16]alphamerge,format=yuva444p10le,{bt709_metadata}[v]"
+                "[0:v]split=2[color][alpha];[color]{bt709_color},format=yuv444p10le[color709];[alpha]format=rgba64le,alphaextract,format=gray16le[alpha16];[color709][alpha16]alphamerge,format=yuva444p10le,{bt709_metadata}[v]"
             );
             command
                 .args(["-filter_complex", &filter, "-map", "[v]"])
@@ -588,7 +637,7 @@ fn encode_video(
             command
                 .args([
                     "-vf",
-                    &format!("{bt709_color}:format=yuv420p,{bt709_metadata}"),
+                    &format!("{bt709_color},format=yuv420p,{bt709_metadata}"),
                 ])
                 .args(["-map", "0:v:0"])
                 .args([
@@ -617,7 +666,7 @@ fn encode_video(
         command.arg("-an");
     }
     command.arg(&temporary);
-    run_command(&mut command, "video encode")?;
+    run_command(&mut command, "video encode", cancel)?;
     fs::rename(temporary, target)?;
     Ok(())
 }
@@ -635,14 +684,50 @@ fn preview_encoder() -> &'static str {
     "libopenh264"
 }
 
-fn run_command(command: &mut Command, label: &str) -> Result<(), WeaverError> {
-    let output = command.output()?;
-    if output.status.success() {
+// Drain stderr concurrently so a verbose encoder cannot block, and stop only this child.
+fn run_command(
+    command: &mut Command,
+    label: &str,
+    cancel: &CancellationToken,
+) -> Result<(), WeaverError> {
+    use std::{io::Read, process::Stdio, time::Duration};
+    if cancel.is_cancelled() {
+        return Err(WeaverError::Invalid(format!("{label} cancelled")));
+    }
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stderr = child.stderr.take().expect("requested piped stderr");
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let status = loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            break child.wait();
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(error);
+            }
+        }
+    };
+    let stderr = reader
+        .join()
+        .map_err(|_| WeaverError::Invalid("encoder stderr reader failed".into()))??;
+    let status = status?;
+    if status.success() && !cancel.is_cancelled() {
         Ok(())
     } else {
         Err(WeaverError::Invalid(format!(
             "{label} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         )))
     }
 }
@@ -898,6 +983,93 @@ fn report_from_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_stops_an_encoder_child_without_waiting_for_its_work() {
+        let cancel = CancellationToken::default();
+        let request = cancel.clone();
+        let requester = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            request.cancel();
+        });
+        let start = std::time::Instant::now();
+        let result = run_command(
+            Command::new("sh").args(["-c", "exec sleep 30"]),
+            "test encoder",
+            &cancel,
+        );
+        requester.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "encoder did not observe cancellation"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the FFmpeg delivery runtime"]
+    fn exr_video_encode_preserves_black_and_linear_color() {
+        // Exercise the real float-EXR encode/decode path, including automatic
+        // pixel-format negotiation that previously raised black to dark gray.
+        let root = std::env::temp_dir().join(format!("weaver-encode-color-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let bands = [[0.0, 0.0, 0.0], [0.18; 3], [0.5, 0.0, 0.0], [1.0; 3]];
+        let image = image::Rgb32FImage::from_fn(64, 64, |x, _| image::Rgb(bands[x as usize / 16]));
+        image.save(root.join("000000.exr")).unwrap();
+        let ffmpeg = resolve_runtime_binary("ANICA_FFMPEG_PATH", "ffmpeg", Path::new("."));
+        for (kind, name) in [
+            (VideoKind::PreviewH264, "preview.mp4"),
+            (VideoKind::ProRes4444Xq, "master.mov"),
+        ] {
+            let movie = root.join(name);
+            encode_video(
+                &ffmpeg,
+                kind,
+                &root,
+                0,
+                1,
+                [24, 1],
+                None,
+                &movie,
+                &CancellationToken::default(),
+            )
+            .unwrap();
+            let decoded = Command::new(&ffmpeg)
+                .args(["-v", "error", "-i"])
+                .arg(&movie)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                .output()
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "{}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            let pixel = |x: usize| &decoded.stdout[(32 * 64 + x) * 3..(32 * 64 + x) * 3 + 3];
+            assert!(
+                pixel(8).iter().all(|v| *v <= 3),
+                "{name}: black {:?}",
+                pixel(8)
+            );
+            assert!(
+                pixel(24).iter().all(|v| v.abs_diff(104) <= 4),
+                "{name}: gray {:?}",
+                pixel(24)
+            );
+            assert!(
+                pixel(40)[0].abs_diff(180) <= 4 && pixel(40)[1] <= 4 && pixel(40)[2] <= 4,
+                "{name}: red {:?}",
+                pixel(40)
+            );
+            assert!(
+                pixel(56).iter().all(|v| *v >= 251),
+                "{name}: white {:?}",
+                pixel(56)
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn fps_preserves_common_ntsc_rates() {

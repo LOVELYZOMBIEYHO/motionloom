@@ -106,12 +106,8 @@ async fn build_scene_gpu(job: &RenderJob) -> Result<SceneGpu, WeaverError> {
         f32::from_bits(packed.light_offset),
         packed.lights as f32,
     ];
-    camera::configure(&mut p, &snap.camera, job)?;
-    snap.diagnostics.push(format!(
-        "Physical lens: {:.2} mm equivalent focal length, f/{:.2}, focus {:.2} scene units; assumes one unit is one meter.",
-        job.lens.sensor_width_mm / (2.0 * p[3][3] * p[4][3]),
-        job.lens.f_stop, job.lens.focus_distance,
-    ));
+    let lens = camera::configure(&mut p, &snap.camera, job)?;
+    snap.diagnostics.push(lens.diagnostic());
     p[7] = [
         job.sampling.min_samples as f32,
         job.sampling.max_samples as f32,

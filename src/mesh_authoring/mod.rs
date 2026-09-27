@@ -4,7 +4,7 @@
 
 //! Deterministic, filesystem-free MeshAsset construction and fitting sessions.
 
-mod geometry;
+pub(crate) mod geometry;
 mod schema;
 
 pub use geometry::execute_geometry_recipe;
@@ -22,6 +22,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MeshAuthoringError {
+    #[error(transparent)]
+    Format(#[from] crate::FormatError),
     #[error("unsupported mesh-authoring schema version {0}")]
     SchemaVersion(String),
     #[error("duplicate operation id {0}")]
@@ -46,6 +48,8 @@ pub fn mesh_authoring_capabilities() -> MeshAuthoringCapabilities {
     MeshAuthoringCapabilities {
         schema_version: MESH_AUTHORING_SCHEMA_VERSION.into(),
         operations: [
+            "revolveProfile",
+            "applyModifier",
             "createLoop",
             "defineRegion",
             "loftLoops",
@@ -112,6 +116,8 @@ pub fn mesh_authoring_schema_json() -> String {
             }
         },
         "operationInputs": {
+            "revolveProfile": ["id", "axis", "segments", "samples", "interpolation", "points"],
+            "applyModifier": ["id", "modifier"],
             "createLoop": ["spec.id", "center", "radiusA", "radiusB", "segments", "normalAxis"],
             "defineRegion": ["id", "vertices", "faces"],
             "loftLoops": ["id", "loops", "capStart", "capEnd"],
@@ -179,11 +185,8 @@ pub fn apply_mesh_topology_proposal_json(
     )?)?)
 }
 
-pub fn mesh_asset_element(id: &str, material: &str, cage: &ControlCageNode) -> String {
-    let mut source = format!(
-        "<MeshAsset id=\"{id}\" material=\"{material}\" subdivision=\"{}\">",
-        cage.subdivision
-    );
+pub(crate) fn mesh_generator_element(cage: &ControlCageNode) -> String {
+    let mut source = String::from("<Mesh>");
     for (index, position) in cage.positions.iter().enumerate() {
         let uv = cage.uvs.get(index).copied().unwrap_or([0.0; 2]);
         let pinned = cage.pinned.get(index).copied().unwrap_or(false);
@@ -200,8 +203,77 @@ pub fn mesh_asset_element(id: &str, material: &str, cage: &ControlCageNode) -> S
             .join(",");
         source.push_str(&format!("\n  <Face indices={{[{indices}]}} />"));
     }
-    source.push_str("\n</MeshAsset>");
+    source.push_str("\n</Mesh>");
     source
+}
+
+fn raw_geometry_asset_element(id: &str, cage: &ControlCageNode) -> String {
+    let id = escape_asset_attribute(id);
+    let mut source = format!(
+        "<GeometryAsset id=\"{id}\">\n{}",
+        mesh_generator_element(cage)
+    );
+    if cage.subdivision > 0 {
+        source.push_str(&format!(
+            "\n<Modifiers>\n<Subdivision levels=\"{}\" scheme=\"catmullClark\" />\n</Modifiers>",
+            cage.subdivision
+        ));
+    }
+    source.push_str("\n</GeometryAsset>");
+    source
+}
+
+// Quoted identifiers cannot introduce malformed structure into generated output.
+fn escape_asset_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+pub fn geometry_asset_element(id: &str, cage: &ControlCageNode) -> String {
+    crate::format_dsl(&raw_geometry_asset_element(id, cage))
+        .expect("generated geometry has balanced structure")
+        .source
+}
+
+/// Emit the sole material-bound generated-asset form through the shared formatter.
+pub fn mesh_asset_element(id: &str, material: &str, cage: &ControlCageNode) -> String {
+    let geometry_id = format!("{id}_geometry");
+    let source = format!(
+        "{}\n<MeshAsset id=\"{}\" geometry=\"{}\" material=\"{}\" />",
+        raw_geometry_asset_element(&geometry_id, cage),
+        escape_asset_attribute(id),
+        escape_asset_attribute(&geometry_id),
+        escape_asset_attribute(material),
+    );
+    crate::format_dsl(&source)
+        .expect("generated model has balanced structure")
+        .source
+}
+
+/// Explicitly replace a procedural pipeline with a supplied cage, preserving bindings.
+pub fn bake_mesh_asset_geometry(
+    source: &str,
+    asset_id: &str,
+    cage: &ControlCageNode,
+    expected_fingerprint: &str,
+) -> Result<String, MeshAuthoringError> {
+    if mesh_source_fingerprint(source) != expected_fingerprint {
+        return Err(MeshAuthoringError::Session(
+            "source fingerprint changed before geometry conversion".into(),
+        ));
+    }
+    let topology = validate_mesh_topology(cage, &Default::default());
+    if !topology.valid {
+        return Err(MeshAuthoringError::Topology(topology));
+    }
+    let (geometry_id, start, end) = crate::mesh_reference::geometry_source_span(source, asset_id)?;
+    let mut next = source.to_string();
+    next.replace_range(start..end, &geometry_asset_element(&geometry_id, cage));
+    crate::parse_graph_script(&next).map_err(|e| MeshAuthoringError::Session(e.to_string()))?;
+    Ok(crate::format_dsl(&next)?.source)
 }
 
 pub fn create_mesh_authoring_session(
@@ -392,11 +464,12 @@ pub fn apply_mesh_topology_proposal(
         &proposal.operations,
         proposal.validation.clone(),
     )?;
-    let next_source = crate::mesh_reference::rewrite_mesh_asset_cage(
+    let next_source = crate::format_dsl(&crate::mesh_reference::rewrite_mesh_asset_cage(
         source,
         &proposal.target_asset_id,
         &result.cage,
-    )?;
+    )?)?
+    .source;
     let reparsed = crate::mesh_reference::mesh_asset(&next_source, &proposal.target_asset_id)?;
     if reparsed != result.cage {
         return Err(MeshAuthoringError::Session(
@@ -771,3 +844,35 @@ fn revision_mut<'a>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod geometry_asset_tests {
+    use super::*;
+    #[test]
+    fn explicit_conversion_preserves_shared_bindings_and_checks_the_fingerprint() {
+        let source=r##"<Graph fps={24} duration="1s" size={[64,64]}><Assets><MaterialAsset id="clay" /><GeometryAsset id="shape"><Primitive shape="sphere" radius="1" /></GeometryAsset><MeshAsset id="one" geometry="shape" material="clay" /><MeshAsset id="two" geometry="shape" material="clay" /></Assets><Background color="#000000" /><Present from="scene" /></Graph>"##.replace("><",">\n<");
+        let cage = ControlCageNode {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            pinned: vec![false; 3],
+            faces: vec![vec![0, 1, 2]],
+            subdivision: 0,
+        };
+        assert!(bake_mesh_asset_geometry(&source, "one", &cage, "stale").is_err());
+        let result =
+            bake_mesh_asset_geometry(&source, "one", &cage, &mesh_source_fingerprint(&source))
+                .unwrap();
+        assert_eq!(result.matches("<GeometryAsset ").count(), 1);
+        assert_eq!(result.matches("<MeshAsset ").count(), 2);
+        assert!(!result.contains("<Primitive "));
+        let graph = crate::parse_graph_script(&result).unwrap();
+        assert_eq!(
+            graph.assets[0].primitive().unwrap().geometry,
+            graph.assets[1].primitive().unwrap().geometry
+        );
+        assert_eq!(
+            crate::mesh_reference::mesh_asset(&result, "one").unwrap(),
+            cage
+        );
+    }
+}

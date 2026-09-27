@@ -76,6 +76,17 @@ impl RenderJob {
             return fail("invalid bounce budgets");
         }
         let l = &self.lens;
+        // Validate overrides even when DOF is disabled, so typos never hide in jobs.
+        let overrides = &self.lens_overrides;
+        for (value, min, max) in [
+            (overrides.focal_length_mm, 1.0, 300.0),
+            (overrides.f_stop, 0.7, 64.0),
+            (overrides.focus_distance, 0.05, f32::MAX),
+        ] {
+            if value.is_some_and(|v| !v.is_finite() || !(min..=max).contains(&v)) {
+                return fail("invalid camera lens override");
+            }
+        }
         if [l.sensor_width_mm, l.f_stop, l.focus_distance]
             .iter()
             .any(|v| !v.is_finite() || *v <= 0.0)

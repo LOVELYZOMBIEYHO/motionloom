@@ -1,5 +1,9 @@
 # MotionLoom LLM Authoring Guide
 
+Generated geometry uses the canonical [GeometryAsset structure](GEOMETRY_ASSETS.md).
+The previous asset forms are removed; migrate existing DSL with the offline tool.
+
+
 For S89 filmic physical rendering use `SurfaceStyle shading="filmic_physical_v1"`,
 `PostStyle toneMapping="filmic_aces_v1"`, and `DepthOfFieldStyle preset="filmic_bokeh_v1"
 aperture="0.00032" maxBlur="0.0025"`. Enable camera depthOfField and set
@@ -322,24 +326,31 @@ in browser and Desktop hosts. Browser hosts preload URL bytes; native hosts
 fetch and cache them. Prefer a self-contained `.glb`, and do not rewrite a
 portable URL to a machine-specific absolute path.
 
-Use `PrimitiveAsset` for reusable engine-generated geometry. It is an asset
+Use `GeometryAsset` for reusable engine-generated geometry. It is an asset
 resource and only enters the Scene through `Model`:
 
 ```xml
 <Assets>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
   <ImageAsset id="stone_color" src="stone.jpg" colorSpace="srgb" />
-  <MaterialAsset id="stone" shading="pbr" baseColorTexture="stone_color"
-                 metallic="0" roughness="0.84" mapping="triplanar"
-                 textureScale={[0.3,0.3]} variationAmount={[0.2,0.15]} />
-  <PrimitiveAsset id="ball" shape="sphere" radius="0.5"
-                  segments="32" color="#50E3E6" />
-  <PrimitiveAsset id="ground" shape="plane" size={[12,8]}
-                  color="#131B2E" collision="solid" />
-  <PrimitiveAsset id="stone_step" shape="box" size={[4,0.3,0.9]}
-                  material="stone" bevelRadius="0.025" bevelSegments="3"
-                  collision="solid" collider="box" />
-  <PrimitiveAsset id="trigger" shape="sphere" radius="1"
-                  collision="sensor" collider="box" colliderSize={[2,2,2]} />
+  <MaterialAsset id="stone" shading="pbr" baseColorTexture="stone_color" metallic="0" roughness="0.84" textureScale={[0.3,0.3]} variationAmount={[0.2,0.15]} />
+  <GeometryAsset id="ball_geometry">
+  <Primitive shape="sphere" radius="0.5" segments="32" />
+  </GeometryAsset>
+  <MeshAsset id="ball" color="#50E3E6" material="geometry_default" geometry="ball_geometry" />
+  <GeometryAsset id="ground_geometry">
+  <Primitive shape="plane" size={[12,8]} />
+  </GeometryAsset>
+  <MeshAsset id="ground" color="#131B2E" collision="solid" material="geometry_default" geometry="ground_geometry" />
+  <GeometryAsset id="stone_step_geometry">
+  <Primitive shape="box" size={[4,0.3,0.9]} bevelRadius="0.025" bevelSegments="3" />
+  <UV mode="box" />
+  </GeometryAsset>
+  <MeshAsset id="stone_step" material="stone" collision="solid" collider="box" geometry="stone_step_geometry" />
+  <GeometryAsset id="trigger_geometry">
+  <Primitive shape="sphere" radius="1" />
+  </GeometryAsset>
+  <MeshAsset id="trigger" collision="sensor" collider="box" colliderSize={[2,2,2]} material="geometry_default" geometry="trigger_geometry" />
   <CompoundAsset id="two_steps">
     <Instance id="lower" asset="ground" position={[0,0,0]} />
     <Instance id="upper" asset="ground" position={[0,0.3,-1]} scale="0.8" />
@@ -356,7 +367,7 @@ For packed maps, name the channels instead of assuming the source convention:
 `r|g|b|a|luminance`. Their matching `*Invert` flags default to `false`.
 Omitting all six attributes preserves glTF's B/G/R convention exactly.
 
-Use one `CurveAsset` plus one or more `SweepAsset` declarations for repeated
+Use one `CurveAsset` plus one or more `GeometryAsset/Sweep` declarations for repeated
 geometry along the same spatial route. Do not emit thousands of `Vertex`,
 `Face`, or duplicated path-point lines for roads, pipes, cables, rails, walls,
 or hair guides. Use `interpolation="linear"` for exact straight segments and
@@ -364,9 +375,9 @@ polylines, or `catmullRom` for a smooth curve through control points. Use
 `frame="parallelTransport"` for arbitrary 3D routes and `frame="worldUp"` for
 road-like profiles that must remain upright. Put the 2D cross-section inside
 `Profile`; `ProfilePoint.position` is `[side, up]`. A CurveAsset is not a Model
-and cannot be rendered directly; place the resulting SweepAsset with `Model`.
+and cannot be rendered directly; place the resulting GeometryAsset/Sweep with `Model`.
 
-For a native head without GLB geometry, use `HeadAsset`. `HeadShape` is the
+For a native head without GLB geometry, use `GeometryAsset/Head`. `HeadShape` is the
 required species-neutral volume; `FaceLayout` is optional and must not be
 forced onto creature heads. Use `HeadFeature center/size/amount` for sockets,
 muzzles, ridges, ear roots, horns, and invented anatomy. Use `mirror="x"` for
@@ -403,7 +414,7 @@ geometry or `sensor` for non-blocking contact metadata. When collision is enable
 differ from it. Collider dimensions can be overridden with `colliderSize`,
 `colliderRadius`, `colliderHeight`, `colliderScale`, `colliderOffset`,
 `colliderRotation`, and `colliderMargin`. `CompoundAsset` V1 composes only
-`PrimitiveAsset` instances, preserving each child's visual and collision data.
+`GeometryAsset` instances, preserving each child's visual and collision data.
 Use `MaterialAsset`, not Scene-local `Defs/Material` or `MaterialBinding`, for
 physical primitive surfaces. Supported PBR slots are `baseColorTexture`,
 `metallicRoughnessTexture`, `normalTexture`, `occlusionTexture`, and
@@ -488,7 +499,7 @@ Keep `depthWrite="auto"` unless a specialist effect deliberately owns depth.
 The renderer draws opaque/mask geometry first, then sorts blend/transmissive
 surfaces far-to-near without depth writes. `sortPriority` is an integer expert
 override for unavoidable overlapping transparent meshes. Material transmission
-and PrimitiveAsset collision remain independent.
+and MeshAsset collision remain independent.
 
 ### Cinematic 3D lighting and HDRI/IBL
 
@@ -832,7 +843,7 @@ Action target slot:
 ```
 
 Use `source` as a Scene Model id, not an asset id. Prefer `plane="top"` for a
-PrimitiveAsset seat. Use explicit `position`, `normal`, and `forward` when the
+MeshAsset seat. Use explicit `position`, `normal`, and `forward` when the
 support is imported geometry. Keep `ground` alongside `contactTargets` when
 feet must also follow terrain. A persistent seated idle should author the seat
 Contact from `0` to `1`; the solver then keeps support active at direct seeks

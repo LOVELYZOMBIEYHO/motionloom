@@ -9,8 +9,14 @@
   </RenderStyle>
   <Assets>
     <MaterialAsset id="stone" baseColor="#B7C5BC" roughness="0.8" />
-    <PrimitiveAsset id="rock" shape="sphere" radius="1" material="stone" />
-    <PrimitiveAsset id="floor" shape="box" size={[10,0.2,8]} material="stone" />
+    <GeometryAsset id="rock_geometry">
+    <Primitive shape="sphere" radius="1" />
+    </GeometryAsset>
+    <MeshAsset id="rock" material="stone" geometry="rock_geometry" />
+    <GeometryAsset id="floor_geometry">
+    <Primitive shape="box" size={[10,0.2,8]} />
+    </GeometryAsset>
+    <MeshAsset id="floor" material="stone" geometry="floor_geometry" />
   </Assets>
   <Background color="#F1EBDD" />
   <Scene id="ink_study" renderStyle="courtyard_ink">

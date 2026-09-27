@@ -2,8 +2,77 @@
 // =========================================
 // crates/motionloom/src/weaver/camera/mod.rs
 
-use crate::weaver::{RenderJob, WeaverError};
+use crate::weaver::{LensSource, RenderJob, WeaverError};
 use crate::world::WorldCamera;
+use crate::world::optics::ResolvedCameraOptics;
+
+/// Changes to optical interpretation invalidate tile and completed-frame caches.
+pub(crate) const OPTICS_REVISION: &str = "authored-camera-optics-v1";
+
+pub(crate) struct EffectiveLens {
+    pub enabled: bool,
+    pub optics: ResolvedCameraOptics,
+}
+
+impl EffectiveLens {
+    pub(crate) fn diagnostic(&self) -> String {
+        if self.enabled {
+            format!(
+                "Physical lens: {:.2} mm, f/{:.2}, focus {:.4} scene units (axial depth); assumes one unit is one meter.",
+                self.optics.focal_length_mm, self.optics.f_stop, self.optics.focus_distance,
+            )
+        } else {
+            "Camera depth of field disabled (pinhole).".into()
+        }
+    }
+}
+
+/// Resolve the evaluated camera once, then apply only deliberate export overrides.
+fn resolve_lens(
+    c: &WorldCamera,
+    job: &RenderJob,
+    tangent: f32,
+    aspect: f32,
+    distance: f32,
+) -> Result<EffectiveLens, WeaverError> {
+    let (enabled, focus, focal, f_stop) = match job.lens_source {
+        LensSource::AuthoredCamera => match &c.depth_of_field {
+            Some(dof) => (
+                true,
+                number(&dof.focus_distance)?,
+                number(&dof.focal_length_mm)?,
+                number(&dof.f_stop)?,
+            ),
+            None => (false, distance, 50.0, 2.8),
+        },
+        LensSource::Job => (
+            job.lens.enabled,
+            job.lens.focus_distance,
+            job.lens.sensor_width_mm / (2.0 * tangent * aspect),
+            job.lens.f_stop,
+        ),
+    };
+    let overrides = &job.lens_overrides;
+    // Numeric CLI overrides imply DOF unless --no-dof explicitly disables it.
+    let enabled = overrides.enabled.unwrap_or(
+        enabled
+            || overrides.focus_distance.is_some()
+            || overrides.f_stop.is_some()
+            || overrides.focal_length_mm.is_some(),
+    );
+    let mut optics = ResolvedCameraOptics::new(
+        overrides.focus_distance.unwrap_or(focus),
+        overrides.focal_length_mm.unwrap_or(focal),
+        overrides.f_stop.unwrap_or(f_stop),
+    );
+    // Preserve legacy physical job lenses outside the authored focal/f-stop limits.
+    if job.lens_source == LensSource::Job {
+        optics.focal_length_mm = overrides.focal_length_mm.unwrap_or(focal);
+        optics.f_stop = overrides.f_stop.unwrap_or(f_stop);
+        optics.focus_distance = overrides.focus_distance.unwrap_or(focus);
+    }
+    Ok(EffectiveLens { enabled, optics })
+}
 
 fn number(s: &str) -> Result<f32, WeaverError> {
     s.parse::<f32>()
@@ -28,7 +97,7 @@ pub(crate) fn configure(
     p: &mut crate::weaver::backend::wgpu::CameraParams,
     c: &WorldCamera,
     job: &RenderJob,
-) -> Result<(), WeaverError> {
+) -> Result<EffectiveLens, WeaverError> {
     if c.projection != crate::world::WorldCameraProjection::Perspective {
         return Err(WeaverError::Unsupported("orthographic camera".into()));
     }
@@ -61,8 +130,9 @@ pub(crate) fn configure(
     let u = std::array::from_fn::<_, 3, _>(|i| up[i] * roll.cos() - right[i] * roll.sin());
     let tangent = (fov.to_radians() * 0.5).tan();
     let aspect = job.resolution[0] as f32 / job.resolution[1] as f32;
-    let lens_radius = if job.lens.enabled {
-        job.lens.sensor_width_mm * 0.001 / (2.0 * tangent * aspect) / (2.0 * job.lens.f_stop)
+    let lens = resolve_lens(c, job, tangent, aspect, distance)?;
+    let lens_radius = if lens.enabled {
+        lens.optics.aperture_radius()
     } else {
         0.0
     };
@@ -71,8 +141,13 @@ pub(crate) fn configure(
     p[4] = [r[0], r[1], r[2], aspect];
     p[5] = [u[0], u[1], u[2], lens_radius];
     p[6] = [
-        job.lens.focus_distance,
-        job.lens.aperture_blades as f32,
+        lens.optics.focus_distance,
+        // Authored optics use the circular aperture sampled by WGPU Preview.
+        if job.lens_source == LensSource::Job {
+            job.lens.aperture_blades as f32
+        } else {
+            0.0
+        },
         0.0,
         0.0,
     ];
@@ -80,5 +155,5 @@ pub(crate) fn configure(
     if p[2..7].iter().flatten().any(|v| !v.is_finite()) {
         return Err(WeaverError::Invalid("degenerate camera basis".into()));
     }
-    Ok(())
+    Ok(lens)
 }

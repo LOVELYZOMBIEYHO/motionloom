@@ -1,5 +1,16 @@
 # MotionLoom
 
+Generated geometry uses the canonical [GeometryAsset structure](GEOMETRY_ASSETS.md).
+
+Use `motionloom fmt main.motionloom` to format DSL, or `motionloom fmt --check
+showcase/` to check a directory. The [formatter](FORMATTING.md) is shared by the
+CLI, Rust API, WASM and source editors.
+
+The [native CLI](CLI.md) also provides `motionloom render main.motionloom
+--renderer weaver --frame 1 --samples 128` and `motionloom export main.motionloom
+--renderer weaver --samples 64 --out output/`. Resolution, timeline and camera
+settings follow the DSL; the CLI and examples share the library Weaver API.
+
 Native high-quality rendering is available through the opt-in `weaver` feature
 and `motionloom::api::weaver`; see [Weaver](src/weaver/README.md) for its current
 capabilities and validation notes. Immediate preview remains a separate path.
@@ -58,6 +69,16 @@ being consolidated under `motionloom::api`.
 
 The public authoring root is `<Scene>`. True-3D content is placed in a
 `space="3d"` Scene track; `<World>` is not part of the current public DSL.
+
+`Camera3D` owns optical depth of field for WGPU Preview and new Weaver jobs:
+omitted/false `depthOfField` keeps a sharp pinhole camera. Enable it with
+`depthOfField="true" focalLength="50" fStop="8"` to autofocus on camera
+`target`; `focusTarget="@id"` tracks a named Anchor or Model origin, while
+animated `focusDistance` takes precedence and `focusOffset` shifts the plane.
+Focus is axial depth in scene units (meters). FOV controls framing; both
+backends derive aperture from the same focal length and f-stop. WGPU's
+`maxBlur` caps preview radius; Weaver traces the physical lens. See
+[camera examples and export migration](src/weaver/README.md#camera-optics-and-migration).
 
 First-person and editorial camera cuts reuse `Camera3D`, `Anchor`, and the
 Scene `activeCamera` animation property. A first-person camera may declare
@@ -194,45 +215,46 @@ Reusable generated 3D geometry uses typed assets:
 
 ```xml
 <Assets>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
   <ImageAsset id="stone_color" src="stone.jpg" colorSpace="srgb" />
-  <MaterialAsset id="stone" shading="pbr" baseColorTexture="stone_color"
-                 metallic="0" roughness="0.84" mapping="triplanar"
-                 textureScale={[0.3,0.3]} variationAmount={[0.2,0.15]} />
-  <PrimitiveAsset id="ball" shape="sphere" radius="0.5"
-                  segments="32" color="#50E3E6"
-                  collision="solid" collider="auto" />
-  <PrimitiveAsset id="step" shape="box" size={[4,0.3,0.9]}
-                  material="stone" bevelRadius="0.025" bevelSegments="3"
-                  collision="solid" collider="box" />
+  <MaterialAsset id="stone" shading="pbr" baseColorTexture="stone_color" metallic="0" roughness="0.84" textureScale={[0.3,0.3]} variationAmount={[0.2,0.15]} />
+  <GeometryAsset id="ball_geometry">
+  <Primitive shape="sphere" radius="0.5" segments="32" />
+  </GeometryAsset>
+  <MeshAsset id="ball" color="#50E3E6" collision="solid" collider="auto" material="geometry_default" geometry="ball_geometry" />
+  <GeometryAsset id="step_geometry">
+  <Primitive shape="box" size={[4,0.3,0.9]} bevelRadius="0.025" bevelSegments="3" />
+  <UV mode="box" />
+  </GeometryAsset>
+  <MeshAsset id="step" material="stone" collision="solid" collider="box" geometry="step_geometry" />
 </Assets>
 <Model id="ball_model" asset="ball" position={[0,4,0]} />
 <RigidBody id="ball_body" target="ball_model"
            dimension="3d" type="dynamic" shape="auto" />
 ```
 
-`PrimitiveAsset` supports `box`, `sphere`, `capsule`, `plane`, `cylinder`,
+`GeometryAsset` supports `box`, `sphere`, `capsule`, `plane`, `cylinder`,
 `cone`, `wedge`, `ellipsoid`, `frustum`, and `roundedBox`. It shares the normal
-Model PBR, lighting, shadow, bounds, cache, and physics paths. The former
-encoded `motionloom:box` ModelAsset source has been removed.
+Model PBR, lighting, shadow, bounds, cache, and physics paths.
 
-Existing self-closing assets remain the compact form. Advanced procedural
-assets can use a block without changing the meaning of any existing field:
+Procedural assets combine a generator with modifiers:
 
 ```xml
-<PrimitiveAsset id="sculpture" shape="ellipsoid"
-                radii={[0.8,1.2,0.55]} material="copper">
-  <Modifiers>
+<GeometryAsset id="sculpture_geometry">
+<Primitive shape="ellipsoid" radii={[0.8,1.2,0.55]} />
+<Modifiers>
     <Taper axis="y" start="1.08" end="0.78" />
     <Twist axis="y" angle="12" />
     <Bend axis="x" angle="-6" pivot={[0,0,0]} />
-    <Subdivision levels="1" />
+    <Subdivision levels="1"  scheme="linear" />
     <Smooth angle="76" />
     <WeightedNormals strength="0.85" keepSharpEdges="true" />
   </Modifiers>
-  <MeshBuild topology="quads" triangulation="shortestDiagonal"
+<MeshBuild topology="quads" triangulation="shortestDiagonal"
              quality="high" maxTriangles="10000" />
-  <LOD mode="auto" levels="3" preserveSilhouette="true" />
-</PrimitiveAsset>
+<LOD mode="auto" levels="3" preserveSilhouette="true" />
+</GeometryAsset>
+<MeshAsset id="sculpture" material="copper" geometry="sculpture_geometry" />
 ```
 
 Modifier order is authored order and is part of the deterministic asset
@@ -244,7 +266,7 @@ can evolve without rewriting the source asset.
 Collision is disabled by default. `collision="solid|sensor"` enables it;
 omitted `collider` means `auto`, while an explicit collider shape and size may
 intentionally differ from the visual primitive. `CompoundAsset` groups
-transformed PrimitiveAsset instances into one reusable visual/collision asset.
+transformed MeshAsset instances into one reusable visual/collision asset.
 `MaterialAsset shading="pbr"` exposes the existing glTF material pipeline to
 typed primitives, including base-color, metallic/roughness, normal, occlusion
 and emissive texture slots. `color` remains a multiplicative tint. Box bevels
@@ -268,7 +290,7 @@ are resolved identically by Immediate Preview, native/WASM rendering, terrain
 layer baking, and Weaver.
 
 Reusable spatial paths and curve-to-mesh geometry use `CurveAsset` and
-`SweepAsset`. A curve is non-rendering data; every sweep that references it
+`GeometryAsset/Sweep`. A curve is non-rendering data; every sweep that references it
 lowers to the same retained primitive mesh, material, shadow, collision,
 native, WASM, and Weaver paths as other generated geometry:
 
@@ -280,16 +302,18 @@ native, WASM, and Weaver paths as other generated geometry:
   <CurvePoint position={[6,0,-7]} scale="0.8" />
 </CurveAsset>
 
-<SweepAsset id="pipe" curve="route" material="steel"
-            frame="parallelTransport" uvMode="distance"
-            uvScale={[1,0.5]} capStart="true" capEnd="true">
+<GeometryAsset id="pipe_geometry">
+<Sweep curve="route" frame="parallelTransport" capStart="true" capEnd="true">
   <Profile closed="true">
     <ProfilePoint position={[-0.1,-0.1]} />
     <ProfilePoint position={[0.1,-0.1]} />
     <ProfilePoint position={[0.1,0.1]} />
     <ProfilePoint position={[-0.1,0.1]} />
   </Profile>
-</SweepAsset>
+</Sweep>
+<UV mode="distance" scale={[1,0.5]} />
+</GeometryAsset>
+<MeshAsset id="pipe" material="steel" geometry="pipe_geometry" />
 ```
 
 `interpolation="linear"` represents straight lines and polylines;
@@ -305,7 +329,7 @@ Curves require at least two distinct points; open profiles
 require two points and closed profiles require three. Dynamic expressions are
 not accepted in asset geometry.
 
-`HeadAsset` is an additive procedural model asset for continuous cranium and
+`GeometryAsset/Head` is an additive procedural model asset for continuous cranium and
 facial geometry. `HeadShape` is species-neutral, `FaceLayout` is optional, and
 generic mirrored `HeadFeature` fields support humanoid, feline, canine, dragon,
 or custom anatomy. `HeadMorph` varies proportions without rewriting features.
@@ -352,7 +376,7 @@ The authoring analyzer warns when a position-animated humanoid uses an Action
 in a scene with solid terrain but omits `collision="kinematic"`.
 
 Terrain migration is not required. Before this addition, existing
-`ModelAsset`, `PrimitiveAsset`, and `CompoundAsset` ground scenes render as
+`ModelAsset`, `GeometryAsset`, and `CompoundAsset` ground scenes render as
 authored. After it, those declarations remain unchanged; authors opt in only
 by declaring a new `TerrainAsset` and referencing it from a normal `Model`.
 
@@ -403,12 +427,12 @@ Model:
 `densityMap` and `exclusionMap` reference linear `ImageAsset` masks. White in
 the exclusion mask forbids placement; density controls deterministic acceptance
 from black to white. Variants may reference any existing Model-compatible
-asset, so Scatter reuses PrimitiveAsset, MeshAsset, CompoundAsset,
+asset, so Scatter reuses MeshAsset, MeshAsset, CompoundAsset,
 VegetationAsset, and imported ModelAsset rendering rather than defining a new
 geometry path. V1 requires a TerrainAsset surface. Biome simulation and
 runtime-growing plants remain out of scope.
 
-Vegetation migration is not required. Existing ModelAsset, PrimitiveAsset,
+Vegetation migration is not required. Existing ModelAsset, MeshAsset,
 CompoundAsset, and TerrainAsset declarations remain unchanged. Authors opt in
 by declaring a VegetationAsset and placing it through a normal Model node.
 
@@ -438,7 +462,7 @@ Visual parts normally keep collision disabled and share one kinematic capsule
 feet-rooted capsule when a timeline animates the parent position. MotionLoom
 then sweeps the native rig from its authored start to the current target and
 expands the primitive children from the collision-resolved root, so direct
-timeline motion cannot tunnel through solid PrimitiveAsset walls.
+timeline motion cannot tunnel through solid MeshAsset walls.
 
 Authored and imported humanoid Actions share one contact pipeline:
 
@@ -483,7 +507,7 @@ sized props and differently proportioned humanoids:
              contactTargets={{ seat: "bench_seat" }} />
 ```
 
-`plane="top"` derives the plane from a PrimitiveAsset Model; explicit
+`plane="top"` derives the plane from a MeshAsset Model; explicit
 `position`, `normal`, and `forward` are available for imported or compound
 props. The renderer resolves the plane in world space, clamps correction to its
 bounds, and estimates a scale-aware pelvis contact offset. Contacts beginning
@@ -598,7 +622,7 @@ fade. Opaque and mask draws fill depth first; blend and transmissive draws are
 then sorted far-to-near. `depthWrite="auto"` therefore writes depth for opaque
 materials and disables it for transparent ones. `true|false` and integer
 `sortPriority` are expert overrides. Visual transmission never enables or
-changes PrimitiveAsset collision.
+changes MeshAsset collision.
 The transmissive pass samples one renderer-owned opaque-scene snapshot for IOR
 normal refraction and thickness attenuation. That snapshot is reused by every
 glass draw and across frames; adding panes does not allocate another target.
@@ -762,8 +786,8 @@ children add independently textured geometry.
 Authored UVs use the same Catmull–Clark interpolation as positions and feed the
 standard `MaterialAsset baseColorTexture` path. Omitting `uv` preserves the
 position-derived coordinates used before this addition.
-`HeadAsset topology="explicit"` contains the same representation in `HeadCage`.
-`HeadAsset topology="facialCage"` uses compact, semantic `HeadProfile`,
+`Head topology="explicit"` contains the same representation in `HeadCage`.
+`Head topology="facialCage"` uses compact, semantic `HeadProfile`,
 `HeadDome`, `FaceLayout`, and `FacialCage` declarations; Rust expands them to the
 same control-cage IR on native and WASM. This is not automatic retopology or a
 facial rig. See [Facial and subdivision cages](FACIAL_CAGES.md),
@@ -777,8 +801,7 @@ children. Iris is omitted for eyes that intentionally have no iris. Iris positio
 is Eye-local; shape accepts circle, ellipse, or square, and its scale reshapes the
 generated geometry independently from nested Texture UV transforms.
 Each component owns its position and dimensions. Nested `Texture asset="..."`
-follows that component's generated surface. Flat FaceLayout attributes are
-removed and rejected. See [Face components](FACE_COMPONENTS.md).
+follows that component's generated surface. See [Face components](FACE_COMPONENTS.md).
 
 ### Audio editing
 

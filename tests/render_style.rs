@@ -261,7 +261,7 @@ fn character1_opaque_glb_has_visible_outline() {
     let source = script(
         "<RenderStyle id=\"c\">\n<SurfaceStyle shading=\"cel\" />\n<OutlineStyle width=\"3\" />\n</RenderStyle>",
         "renderStyle=\"c\"",
-    ).replace("<PrimitiveAsset id=\"ball\" shape=\"sphere\" radius=\"1\" material=\"paint\" />",
+    ).replace("<GeometryAsset id=\"ball_geometry\">\n<Primitive shape=\"sphere\" radius=\"1\" />\n</GeometryAsset>\n<MeshAsset id=\"ball\" material=\"paint\" geometry=\"ball_geometry\" />",
         &format!("<ModelAsset id=\"ball\" src=\"{}\" />", asset.display()))
      .replace("<Model id=\"hero\" asset=\"ball\" />", "<Model id=\"hero\" asset=\"ball\" scaleMode=\"normalize_height\" scale=\"2\" />")
      .replace("target={[0,0,0]}", "target={[0,1,0]}");
@@ -301,7 +301,10 @@ fn script(resource: &str, reference: &str) -> String {
 {resource}
 <Assets>
 <MaterialAsset id="paint" baseColor="#38ACB8" roughness="0.32" />
-<PrimitiveAsset id="ball" shape="sphere" radius="1" material="paint" />
+<GeometryAsset id="ball_geometry">
+<Primitive shape="sphere" radius="1" />
+</GeometryAsset>
+<MeshAsset id="ball" material="paint" geometry="ball_geometry" />
 </Assets>
 <Scene id="main" {reference}>
 <Timeline>

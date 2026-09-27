@@ -2,10 +2,13 @@
 <Graph fps={30} duration="1s" size={[512,512]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#BBAAAA" />
-<HeadAsset material="clay" id="demo_head" archetype="humanoid" symmetry="x" segments="48" rings="32">
+<GeometryAsset id="demo_head_geometry">
+<Head archetype="humanoid" symmetry="x" segments="48" rings="32">
 <HeadShape size={[0.9994999766349792,1.399999976158142,1.0994999408721924]} forehead="1" cheekWidth="1" jawWidth="1" chinLength="0" chinRoundness="0.5" />
 <HeadMorph headWidth="1" headHeight="1" headDepth="1" />
-</HeadAsset>
+</Head>
+</GeometryAsset>
+<MeshAsset material="clay" id="demo_head" geometry="demo_head_geometry" />
 </Assets>
 <Background color="#17202D" />
 <Scene id="review">

@@ -1,8 +1,13 @@
+// =========================================
+// =========================================
+// crates/motionloom/src/world/mod.rs
+
 pub mod dsl;
 pub mod error;
 pub mod gltf_loader;
 pub mod model;
 pub mod model_inspection;
+pub(crate) mod optics;
 pub mod primitive;
 pub mod render;
 pub mod terrain;

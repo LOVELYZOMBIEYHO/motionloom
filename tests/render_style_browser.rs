@@ -19,7 +19,10 @@ async fn style_modes_render_on_browser_webgpu() {
 </RenderStyle>
 <Assets>
 <MaterialAsset id="paint" baseColor="#38ACB8" roughness="0.32" />
-<PrimitiveAsset id="ball" shape="sphere" radius="1" material="paint" />
+<GeometryAsset id="ball_geometry">
+<Primitive shape="sphere" radius="1" />
+</GeometryAsset>
+<MeshAsset id="ball" material="paint" geometry="ball_geometry" />
 </Assets>
 <Scene id="main" renderStyle="s">
 <Timeline>

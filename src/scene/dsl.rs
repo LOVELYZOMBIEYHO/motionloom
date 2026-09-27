@@ -3798,7 +3798,7 @@ fn parse_composite_group_block(
             if asset.starts_with("motionloom:box:") {
                 return Err(GraphParseError {
                     line: i + 1,
-                    message: "motionloom:box shorthand has been removed. Declare <PrimitiveAsset shape=\"box\" size={...} color=\"...\" /> and reference its id from Model.asset."
+                    message: "motionloom:box shorthand has been removed. Declare a GeometryAsset/Primitive and a material-bound MeshAsset; reference its id from Model.asset."
                         .to_string(),
                 });
             }

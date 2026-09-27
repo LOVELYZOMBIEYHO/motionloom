@@ -169,6 +169,78 @@ fn execute_operations(
             return Err(MeshAuthoringError::DuplicateOperation(id.into()));
         }
         match operation {
+            GeometryOperation::RevolveProfile {
+                id,
+                axis,
+                segments,
+                samples,
+                interpolation,
+                points,
+            } => {
+                if !state.cage.positions.is_empty() {
+                    return Err(MeshAuthoringError::Operation(
+                        "RevolveProfile must start an empty recipe".into(),
+                    ));
+                }
+                state.cage = crate::geometry_ops::revolve(
+                    *axis,
+                    *segments,
+                    *samples,
+                    *interpolation,
+                    points,
+                )?;
+                state.correspondence.created_vertices =
+                    (0..state.cage.positions.len() as u64).collect();
+                state.correspondence.created_faces = (0..state.cage.faces.len() as u64).collect();
+                state.regions.insert(
+                    id.clone(),
+                    SemanticRegion {
+                        id: id.clone(),
+                        vertices: state.correspondence.created_vertices.clone(),
+                        faces: state.correspondence.created_faces.clone(),
+                    },
+                );
+                state.record(id, "revolveProfile", 0, 0);
+            }
+            GeometryOperation::ApplyModifier { id, modifier } => {
+                let before_v = state.cage.positions.len();
+                let before_f = state.cage.faces.len();
+                let next =
+                    crate::world::primitive::apply_control_cage_modifier(&state.cage, modifier)?;
+                let changed = next.faces != state.cage.faces || next.positions.len() != before_v;
+                if changed {
+                    state.correspondence.old_to_new_vertices.clear();
+                    state.correspondence.old_to_new_faces.clear();
+                    state
+                        .correspondence
+                        .removed_vertices
+                        .extend(0..before_v as u64);
+                    state
+                        .correspondence
+                        .removed_faces
+                        .extend(0..before_f as u64);
+                    state
+                        .correspondence
+                        .created_vertices
+                        .extend(0..next.positions.len() as u64);
+                    state
+                        .correspondence
+                        .created_faces
+                        .extend(0..next.faces.len() as u64);
+                    state
+                        .correspondence
+                        .invalidated_regions
+                        .extend(state.regions.keys().cloned());
+                    state.regions.clear();
+                }
+                state.cage = next;
+                state.record(
+                    id,
+                    "applyModifier",
+                    if changed { 0 } else { before_v },
+                    if changed { 0 } else { before_f },
+                );
+            }
             GeometryOperation::CreateLoop { spec } => create_loop(state, spec)?,
             GeometryOperation::DefineRegion {
                 id,
@@ -269,6 +341,8 @@ fn execute_operations(
 fn operation_id(operation: &GeometryOperation) -> &str {
     match operation {
         GeometryOperation::CreateLoop { spec } => &spec.id,
+        GeometryOperation::RevolveProfile { id, .. }
+        | GeometryOperation::ApplyModifier { id, .. } => id,
         GeometryOperation::DefineRegion { id, .. }
         | GeometryOperation::LoftLoops { id, .. }
         | GeometryOperation::CreateSurface { id, .. }
@@ -423,49 +497,49 @@ fn sweep_profile(
     }
     let before_v = state.cage.positions.len();
     let before_f = state.cage.faces.len();
-    let mut loops = vec![];
-    for (index, &point) in path.iter().enumerate() {
-        let tangent = normalize(sub(
-            path[(index + 1).min(path.len() - 1)],
-            path[index.saturating_sub(1)],
-        ))?;
-        let reference = if tangent[2].abs() < 0.9 {
-            [0.0, 0.0, 1.0]
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-        let right = normalize(cross(tangent, reference))?;
-        let up = cross(right, tangent);
-        let mut ring = vec![];
-        for segment in 0..segments {
-            let angle = segment as f32 / segments as f32 * TAU;
-            ring.push(state.add_vertex(add(
-                point,
-                add(
-                    scale(right, radius * angle.cos()),
-                    scale(up, radius * angle.sin()),
-                ),
-            )));
-        }
-        loops.push(ring);
+    if path.iter().any(|p| p.iter().any(|v| !v.is_finite()))
+        || path.windows(2).any(|p| p[0] == p[1])
+        || !radius.is_finite()
+    {
+        return Err(MeshAuthoringError::Operation(
+            "sweep points must be finite and distinct".into(),
+        ));
     }
-    for pair in loops.windows(2) {
-        for index in 0..segments {
-            state.add_face(vec![
-                pair[0][index],
-                pair[1][index],
-                pair[1][(index + 1) % segments],
-                pair[0][(index + 1) % segments],
-            ])?;
-        }
+    let curve = crate::CurveAssetNode {
+        id: id.into(),
+        interpolation: crate::CurveInterpolation::Linear,
+        closed: false,
+        max_segment_length: f32::MAX,
+        points: path
+            .iter()
+            .map(|&position| crate::CurvePointNode {
+                position,
+                tilt: 0.0,
+                scale: 1.0,
+            })
+            .collect(),
+    };
+    let profile: Vec<_> = (0..segments)
+        .map(|i| {
+            let angle = i as f32 / segments as f32 * TAU;
+            crate::SweepProfilePointNode {
+                position: [radius * angle.cos(), radius * angle.sin()],
+            }
+        })
+        .collect();
+    let cage = crate::world::primitive::sweep_control_cage(&curve, &profile);
+    for (i, &position) in cage.positions.iter().enumerate() {
+        let index = state.add_vertex(position);
+        state.cage.uvs[index as usize] = cage.uvs[i];
     }
-    cap_vertices(state, &loops[0], false)?;
-    cap_vertices(state, loops.last().expect("sweep has loops"), true)?;
+    for face in &cage.faces {
+        state.add_face(face.iter().map(|&v| v as u64 + before_v as u64).collect())?;
+    }
     state.regions.insert(
         id.into(),
         SemanticRegion {
             id: id.into(),
-            vertices: loops.into_iter().flatten().collect(),
+            vertices: (before_v as u64..state.cage.positions.len() as u64).collect(),
             faces: (before_f as u64..state.cage.faces.len() as u64).collect(),
         },
     );
@@ -612,13 +686,14 @@ fn thicken_surface(
     let mut duplicate = HashMap::new();
     for vertex in vertices {
         let normal = normalize(normals[&vertex])?;
-        duplicate.insert(
-            vertex,
-            state.add_vertex(add(
-                state.cage.positions[vertex as usize],
-                scale(normal, thickness),
-            )),
+        let position = add(
+            state.cage.positions[vertex as usize],
+            scale(normal, thickness),
         );
+        let uv = state.cage.uvs[vertex as usize];
+        let next = state.add_vertex(position);
+        state.cage.uvs[next as usize] = uv;
+        duplicate.insert(vertex, next);
     }
     for &face_id in &selected_faces {
         let face = &state.cage.faces[face_id].clone();
@@ -894,9 +969,18 @@ fn generate_uv(
     } else {
         (0..state.cage.positions.len()).collect()
     };
+    let mut normals = vec![[0.0; 3]; state.cage.positions.len()];
+    for face in &state.cage.faces {
+        let normal = face_normal(&state.cage, face)?;
+        for &vertex in face {
+            for axis in 0..3 {
+                normals[vertex as usize][axis] += normal[axis];
+            }
+        }
+    }
     for vertex in vertices {
         let point = state.cage.positions[vertex];
-        state.cage.uvs[vertex] = project_uv(point, projection)?;
+        state.cage.uvs[vertex] = project_uv(point, normals[vertex], projection)?;
     }
     state.record(
         id,
@@ -907,8 +991,23 @@ fn generate_uv(
     Ok(())
 }
 
-fn project_uv(point: [f32; 3], projection: &UvProjection) -> Result<[f32; 2], MeshAuthoringError> {
+pub(crate) fn project_uv(
+    point: [f32; 3],
+    normal: [f32; 3],
+    projection: &UvProjection,
+) -> Result<[f32; 2], MeshAuthoringError> {
     Ok(match projection {
+        UvProjection::Box { scale, offset } => {
+            let a = normal.map(f32::abs);
+            let uv = if a[1] >= a[0] && a[1] >= a[2] {
+                [point[0], point[2]]
+            } else if a[0] >= a[2] {
+                [point[2], point[1]]
+            } else {
+                [point[0], point[1]]
+            };
+            [uv[0] * scale[0] + offset[0], uv[1] * scale[1] + offset[1]]
+        }
         UvProjection::Planar {
             u_axis,
             v_axis,

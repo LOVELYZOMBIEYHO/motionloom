@@ -10,12 +10,10 @@ thousands of DSL lines.
 ## Compact semantic head
 
 ```xml
-<HeadAsset id="hero_head" material="skin" archetype="humanoid"
-           topology="facialCage" symmetry="x">
+<GeometryAsset id="hero_head_geometry">
+<Head archetype="humanoid" topology="facialCage" symmetry="x">
   <HeadShape size={[1.50,1.833,1.67]} />
-  <FacialCage generatorVersion="1" segments="192" profileSegments="96"
-              samplesPerSection="6" subdivision="1" orbitalRings="10"
-              mouthRings="8" preserveProfile="true" uvMode="frontBack" />
+  <FacialCage generatorVersion="1" segments="192" profileSegments="96" samplesPerSection="6" orbitalRings="10" mouthRings="8" preserveProfile="true" />
   <HeadProfile>
     <HeadSection id="chin" at="-0.833" width="0.018"
                  frontDepth="0.462" backDepth="0.450" />
@@ -32,7 +30,13 @@ thousands of DSL lines.
   <Nose id="nose" position={[0,-0.363,0]} length="0.180" width="0.100" projection="0.060" />
   <Mouth id="mouth" position={[0,-0.561,0]} width="0.086" opening="0.014" upperLip="0.025" lowerLip="0.03" muzzleLength="0" muzzleWidth="0.3" />
 </FaceLayout>
-</HeadAsset>
+</Head>
+
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="hero_head" material="skin" geometry="hero_head_geometry" />
 ```
 
 The Rust generator samples the ordered profile with Catmull–Rom interpolation,
@@ -48,16 +52,23 @@ starting layout. Run the UV checker before painting.
 ## Explicit semantic head
 
 ```xml
-<HeadAsset id="sculpt" material="skin" archetype="humanoid" topology="explicit">
+<GeometryAsset id="sculpt_geometry">
+<Head archetype="humanoid" topology="explicit">
   <HeadShape size={[1,1,1]} />
-  <HeadCage subdivision="1">
+  <HeadCage>
     <Vertex position={[-1,0,0]} uv={[0,0]} pinned="true" />
     <Vertex position={[1,0,0]} uv={[1,0]} pinned="true" />
     <Vertex position={[1,1,0]} uv={[1,1]} />
     <Vertex position={[-1,1,0]} uv={[0,1]} />
     <Face indices={[0,1,2,3]} />
   </HeadCage>
-</HeadAsset>
+</Head>
+
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="sculpt" material="skin" geometry="sculpt_geometry" />
 ```
 
 This level can contain a complete 25,000-vertex custom model. It preserves head
@@ -94,10 +105,16 @@ fail parsing. Rename the container and children; geometry values do not change:
 </SubdivisionSurfaceAsset>
 
 <!-- After -->
-<MeshAsset id="part" material="skin" subdivision="1" subdivisionScheme="catmullClark">
+<GeometryAsset id="part_geometry">
+<Mesh>
   <Vertex position={[0,0,0]} uv={[0,0]} />
   <Face indices={[0,1,2]} />
-</MeshAsset>
+</Mesh>
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="part" material="skin" geometry="part_geometry" />
 ```
 
 ## Inspection

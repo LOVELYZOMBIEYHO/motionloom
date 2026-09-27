@@ -1,5 +1,11 @@
 # MotionLoom Main Public API
 
+Generated geometry uses the canonical [GeometryAsset structure](GEOMETRY_ASSETS.md).
+Source formatting is available through `api::format_dsl`, returning typed
+`FormatResult` and `FormatError` values. The native CLI and WASM use this same
+implementation. See [DSL formatting](FORMATTING.md).
+
+
 With the native-only `weaver` feature, `motionloom::api::weaver` exposes the initial
 offline renderer API (`RenderJob`, `QualityPreset`, `render`, `RenderProgress`,
 `RenderReport`, `CancellationToken`, `WeaverError`). Professional sequence
@@ -7,6 +13,8 @@ delivery uses `MasterSequenceSettings`, `render_master_sequence`, and
 `MasterSequenceReport`; it emits resumable compositor EXRs, ProRes 4444 XQ, an
 H.264 review movie, authored audio, and machine-checked delivery metadata. This API is provisional;
 its detailed contract and limitations live in [Weaver](src/weaver/README.md).
+The native [CLI render/export commands](CLI.md) delegate to these same APIs;
+`motionloom::cli` is a command adapter, while integrations should use `api::weaver`.
 
 `DepthOfFieldStyleNode` (via `motionloom::api`) supports the opt-in
 `filmic_bokeh_v1` preset with optional `aperture` and `max_blur` values in
@@ -77,21 +85,21 @@ control over rendering.
 `VegetationKind`, `VegetationLod`, and `CompoundAssetNode` expose the typed asset
 representation used by generated geometry. External GLB, individual
 primitives, and compound primitive assets remain distinct through parsing and
-asset resolution. A resolved PrimitiveAsset retains its referenced PBR
+asset resolution. A resolved MeshAsset retains its referenced PBR
 MaterialAsset so native and WASM world renderers consume the same self-contained
 material definition after CompoundAsset expansion.
 `GraphScript::curve_assets` retains reusable non-rendering spatial curves for
-editor inspection and dependency tracking. During parsing, each `SweepAsset`
+editor inspection and dependency tracking. During parsing, each `GeometryAsset/Sweep`
 resolves its literal curve reference and lowers to `PrimitiveGeometry::Sweep`;
 the geometry cache key includes the curve, profile, frame, UV, cap, and dash
 settings. Existing renderer integrations therefore need no second asset loader.
-The advanced PrimitiveAsset block is additive: compact self-closing assets
-deserialize with empty modifiers and default build/LOD policies. Native and
+GraphScript::geometry_assets retains generator/source declarations and operations.
+MeshAsset binds geometry to a material; modifiers and build/LOD belong to GeometryAsset. Native and
 WASM renderers consume the same generated triangle mesh and stable cache key.
 `TerrainAssetNode` retains its resolved height map, optional RGBA blend map,
 and up to four resolved PBR layer definitions. Terrain is an additive
 `GraphAssetSource::Terrain` variant and therefore does not change existing
-PrimitiveAsset, external ModelAsset, or CompoundAsset behavior.
+MeshAsset, external ModelAsset, or CompoundAsset behavior.
 `VegetationAssetNode` retains its resolved kind-specific MaterialAssets and
 bounded generation, LOD, wind, and collision settings. Vegetation is an
 additive `GraphAssetSource::Vegetation` variant and does not change existing
@@ -103,7 +111,7 @@ weighted placement on a TerrainAsset-backed Model. Scatter is an additive
 or lower it through ordinary Model actors without changing authored semantics.
 `MaterialAssetNode` also carries transmissive PBR controls (`transmission`,
 `ior`, optical `thickness`, attenuation, depth-write policy, and sort priority)
-without coupling the visual material to PrimitiveAsset collision.
+without coupling the visual material to MeshAsset collision.
 It also carries typed metallic, roughness, and occlusion channel selectors plus
 independent inversion flags. Defaults preserve glTF B/G/R channel semantics;
 preview, native/WASM, terrain baking, and Weaver consume the same compiled
@@ -260,6 +268,18 @@ contract is used by `SceneRenderer`, GPU-texture rendering, native export, and
 WASM WebGPU rendering. Existing scenes with no authored light retain the
 legacy studio-light fallback. Existing cameras without `depthOfField="true"`
 skip the depth-aware post pass and retain their previous output path.
+
+Weaver jobs created with `RenderJob::new` follow the same evaluated camera
+optics (`LensSource::AuthoredCamera`), including DOF disabled when omitted.
+Autofocus uses camera `target`, or the axial depth of `focusTarget="@id"`;
+explicit numeric/animated `focusDistance` takes precedence, then `focusOffset`
+is added. `focalLength` is in mm, focus is in scene units (meters), and `fStop`
+sets the physical aperture. FOV remains the framing control. WGPU projects the
+same aperture into pixels, with `maxBlur` as its preview performance cap;
+Weaver uses physical lens rays. Both resolve optics per active shot and frame.
+Use `job.lens_overrides` for deliberate offline overrides, or `LensSource::Job`
+for a legacy explicit job lens. Old JSON jobs missing the source field retain
+that legacy mode. See [Weaver camera migration](src/weaver/README.md#camera-optics-and-migration).
 
 ## Process / Layer FX APIs
 
@@ -818,16 +838,15 @@ weights as geometry. Pinned geometry stays fixed while its UVs remain explicitly
 authored, so fitted silhouettes can receive atlas textures without changing shape.
 
 Use `MeshAsset` for arbitrary explicit meshes,
-`HeadAsset topology="explicit"` for a semantic head with a complete `HeadCage`,
-or `HeadAsset topology="facialCage"` for a compact versioned Rust-generated
+`Head topology="explicit"` for a semantic head with a complete `HeadCage`,
+or `Head topology="facialCage"` for a compact versioned Rust-generated
 cage. `api::generated_control_cage` and `api::inspect_control_cage` expose the
 resolved topology without rendering. WASM offers
-`motionloom_inspect_control_cage_json`. The removed `EyeAsset`, `EyeVertex`, and
-`EyeFace` names are a deliberate breaking change.
+`motionloom_inspect_control_cage_json`.
 
-`MeshAsset` defaults to `subdivision="0"`. Levels 1–2 select Catmull–Clark;
-`subdivisionScheme="catmullClark"` is accepted explicitly. `Vertex` and `Face`
-replace the former subdivision-specific child names without changing the mesh IR.
+Subdivision belongs to `GeometryAsset/Modifiers/Subdivision`, with explicit
+`levels` and `scheme="linear"` or `scheme="catmullClark"`. Authored topology
+belongs to `GeometryAsset/Mesh/Vertex` and `Face`.
 
 FaceLayoutNode contains eyes, eyebrows, noses, mouths, and ears vectors. Each
 component owns its position, dimensions, and optional FaceTextureNode.

@@ -425,6 +425,11 @@ fn collect(
             SceneNode::Timeline(v) => collect(&v.children, sec, norm, out)?,
             SceneNode::Track(v) => collect(&v.children, sec, norm, out)?,
             SceneNode::Sequence(v) => {
+                // Expired hide islands must not become coincident physical solids
+                // with the incoming island at the exact timeline cut.
+                if crate::weaver::scene::hidden_sequence_ends_here(v, sec) {
+                    continue;
+                }
                 if let Some((n, s)) = scene_sequence_local_time(v, None, sec) {
                     collect(&v.children, s, n, out)?;
                 }

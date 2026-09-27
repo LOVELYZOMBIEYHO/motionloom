@@ -248,6 +248,7 @@ fn default_humanoid_skeleton() -> String {
 /// Typed failures distinguish malformed commands from invalid generated DSL.
 #[derive(Debug)]
 pub enum ActionEditError {
+    Format(crate::FormatError),
     Parse(GraphParseError),
     InvalidCommand(String),
     ActionNotFound(String),
@@ -261,6 +262,7 @@ impl fmt::Display for ActionEditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(err) => write!(f, "{err}"),
+            Self::Format(err) => write!(f, "{err}"),
             Self::InvalidCommand(message) => write!(f, "Invalid Action edit: {message}"),
             Self::ActionNotFound(id) => write!(f, "Action not found: {id}"),
             Self::PoseNotFound { action, time_ms } => {
@@ -1456,7 +1458,7 @@ pub fn apply_action_edit(
     script: &str,
     command: ActionEditCommand,
 ) -> Result<String, ActionEditError> {
-    match command {
+    let edited = match command {
         ActionEditCommand::CreateAction {
             id,
             skeleton,
@@ -1533,7 +1535,10 @@ pub fn apply_action_edit(
             attribute,
             value,
         } => set_binding(script, &target, &action, &attribute, value.as_deref()),
-    }
+    }?;
+    crate::format_dsl(&edited)
+        .map(|result| result.source)
+        .map_err(ActionEditError::Format)
 }
 
 #[cfg(test)]

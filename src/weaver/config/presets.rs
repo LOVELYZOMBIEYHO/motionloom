@@ -51,6 +51,9 @@ impl RenderJob {
                 focus_distance: 16.2,
                 aperture_blades: 9,
             },
+            // Presets affect quality, while optics belong to the active DSL camera.
+            lens_source: LensSource::AuthoredCamera,
+            lens_overrides: LensOverrides::default(),
             seed: 89,
             lighting: LightingOverrides::default(),
             sun_angular_diameter_degrees: 0.53,

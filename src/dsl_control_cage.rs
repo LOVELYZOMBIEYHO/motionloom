@@ -4,12 +4,23 @@
 
 use super::*;
 
-/// Parse a standalone polygon mesh with optional Catmull-Clark subdivision.
-pub(super) fn parse_mesh_asset(
+/// Parse the canonical explicit mesh generator, independent of material binding.
+pub(super) fn parse_mesh_geometry(
     lines: &[&str],
     start: usize,
-) -> Result<(PrimitiveAssetNode, usize), GraphParseError> {
-    parse_asset(lines, start, "MeshAsset", "Vertex", "Face")
+    id: &str,
+) -> Result<(ControlCageNode, usize), GraphParseError> {
+    let (tag, open) = collect_tag_block(lines, start, '>', false)?;
+    validate_head_attributes(&tag, &[], "Mesh", start + 1)?;
+    if is_self_closing_tag(&tag) {
+        return Err(GraphParseError {
+            line: start + 1,
+            message: "Mesh requires Vertex and Face children.".into(),
+        });
+    }
+    let end = find_matching_close_tag(lines, open + 1, "Mesh")?;
+    let cage = parse_cage_children(lines, open + 1, end, start, id, "Mesh", "Vertex", "Face", 0)?;
+    Ok((cage, end))
 }
 
 /// Parse a HeadCage child through the same topology validator as generic surfaces.
@@ -19,15 +30,14 @@ pub(super) fn parse_head_cage(
     asset_id: &str,
 ) -> Result<(ControlCageNode, usize), GraphParseError> {
     let (tag, open) = collect_tag_block(lines, start, '>', false)?;
-    validate_head_attributes(&tag, &["subdivision"], "HeadCage", start + 1)?;
+    validate_head_attributes(&tag, &[], "HeadCage", start + 1)?;
     if is_self_closing_tag(&tag) {
         return Err(GraphParseError {
             line: start + 1,
             message: "HeadCage requires Vertex and Face children.".into(),
         });
     }
-    let subdivision =
-        parse_optional_primitive_u32(&tag, "subdivision", asset_id, start + 1)?.unwrap_or(2);
+    let subdivision = 0;
     let end = find_matching_close_tag(lines, open + 1, "HeadCage")?;
     let cage = parse_cage_children(
         lines,
@@ -41,71 +51,6 @@ pub(super) fn parse_head_cage(
         subdivision,
     )?;
     Ok((cage, end))
-}
-
-fn parse_asset(
-    lines: &[&str],
-    start: usize,
-    asset_tag: &str,
-    vertex_tag: &str,
-    face_tag: &str,
-) -> Result<(PrimitiveAssetNode, usize), GraphParseError> {
-    let (tag, open) = collect_tag_block(lines, start, '>', false)?;
-    let fail = |message: &str| GraphParseError {
-        line: start + 1,
-        message: message.into(),
-    };
-    validate_head_attributes(
-        &tag,
-        &["id", "material", "subdivision", "subdivisionScheme"],
-        asset_tag,
-        start + 1,
-    )?;
-    if is_self_closing_tag(&tag) {
-        return Err(fail(&format!("{asset_tag} requires a control cage.")));
-    }
-    let id = strip_wrappers(&required_attr_value(&tag, "id", start + 1)?).to_string();
-    let material = strip_wrappers(&required_attr_value(&tag, "material", start + 1)?).to_string();
-    let subdivision =
-        parse_optional_primitive_u32(&tag, "subdivision", &id, start + 1)?.unwrap_or(0);
-    if subdivision > 2 {
-        return Err(fail(&format!("{asset_tag} subdivision must be 0..2.")));
-    }
-    let subdivision_scheme = primitive_string_attribute(&tag, "subdivisionScheme", "catmullclark");
-    if subdivision_scheme != "catmullclark" {
-        return Err(fail(
-            "MeshAsset subdivisionScheme currently accepts catmullClark only.",
-        ));
-    }
-    let end = find_matching_close_tag(lines, open + 1, asset_tag)?;
-    let cage = parse_cage_children(
-        lines,
-        open + 1,
-        end,
-        start,
-        &id,
-        asset_tag,
-        vertex_tag,
-        face_tag,
-        subdivision,
-    )?;
-    Ok((
-        PrimitiveAssetNode {
-            id,
-            geometry: PrimitiveGeometry::Mesh { cage },
-            color: [1.0; 4],
-            material: Some(material),
-            material_definition: None,
-            bevel_radius: 0.0,
-            bevel_segments: 0,
-            material_seed: None,
-            collision: PrimitiveCollisionNode::default(),
-            modifiers: vec![],
-            mesh_build: PrimitiveMeshBuildNode::default(),
-            lod: PrimitiveLodNode::default(),
-        },
-        end,
-    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -217,13 +162,19 @@ mod tests {
         r##"<Graph fps={30} duration="1s" size={[64,64]}>
 <Assets>
 <MaterialAsset id="clay" baseColor="#aaaaaa" />
-<MeshAsset id="surface" material="clay" subdivision="1" subdivisionScheme="catmullClark">
+<GeometryAsset id="surface_geometry">
+<Mesh>
 <Vertex position={[-1,0,0]} pinned="true" />
 <Vertex position={[1,0,0]} uv={[1,0]} pinned="true" />
 <Vertex position={[1,1,0]} />
 <Vertex position={[-1,1,0]} />
 <Face indices={[0,1,2,3]} />
-</MeshAsset>
+</Mesh>
+<Modifiers>
+<Subdivision levels="1" scheme="catmullClark" />
+</Modifiers>
+</GeometryAsset>
+<MeshAsset id="surface" material="clay" geometry="surface_geometry" />
 </Assets>
 <Background color="#111111" />
 <Present from="scene" />
@@ -269,7 +220,7 @@ mod tests {
     #[test]
     fn mesh_asset_supports_zero_through_two_subdivision_levels() {
         for (level, expected_indices) in [(0, 6), (1, 24), (2, 96)] {
-            let script = source().replace("subdivision=\"1\"", &format!("subdivision=\"{level}\""));
+            let script = source().replace("levels=\"1\"", &format!("levels=\"{level}\""));
             let graph = parse_graph_script(&script).unwrap();
             let asset = graph.assets[0].primitive().unwrap();
             assert_eq!(
@@ -279,7 +230,10 @@ mod tests {
                 expected_indices
             );
         }
-        let defaulted = source().replace(" subdivision=\"1\"", "");
+        let defaulted = source().replace(
+            "<Modifiers>\n<Subdivision levels=\"1\" scheme=\"catmullClark\" />\n</Modifiers>",
+            "",
+        );
         let graph = parse_graph_script(&defaulted).unwrap();
         let PrimitiveGeometry::Mesh { cage } = &graph.assets[0].primitive().unwrap().geometry
         else {
@@ -309,9 +263,9 @@ mod tests {
         for (a, b) in [
             ("0,1,2,3", "0,1,2,99"),
             ("0,1,2,3", "0,1,1,3"),
-            ("subdivision=\"1\"", "subdivision=\"3\""),
+            ("levels=\"1\"", "levels=\"3\""),
             ("pinned=\"true\"", "pinned=\"perhaps\""),
-            ("</MeshAsset>", "<Face indices={[0,1,2]} />\n</MeshAsset>"),
+            ("</Mesh>", "<Face indices={[0,1,2]} />\n</Mesh>"),
         ] {
             assert!(
                 parse_graph_script(&source().replace(a, b)).is_err(),

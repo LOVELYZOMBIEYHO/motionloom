@@ -44,6 +44,12 @@ pub struct LoopSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum UvProjection {
+    Box {
+        #[serde(default = "unit2")]
+        scale: [f32; 2],
+        #[serde(default)]
+        offset: [f32; 2],
+    },
     Planar {
         u_axis: Axis,
         v_axis: Axis,
@@ -83,6 +89,18 @@ fn unit2() -> [f32; 2] {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum GeometryOperation {
+    RevolveProfile {
+        id: String,
+        axis: crate::PrimitiveAxis,
+        segments: u32,
+        samples: u32,
+        interpolation: crate::CurveInterpolation,
+        points: Vec<crate::SweepProfilePointNode>,
+    },
+    ApplyModifier {
+        id: String,
+        modifier: crate::PrimitiveModifierNode,
+    },
     CreateLoop {
         spec: LoopSpec,
     },

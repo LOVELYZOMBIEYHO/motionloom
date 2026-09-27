@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Fully resolved settings: JSON has no implicit preset/override ambiguity.
+/// Export settings with an explicit source for camera optics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderJob {
@@ -24,6 +24,12 @@ pub struct RenderJob {
     pub sampling: Sampling,
     pub light_paths: LightPaths,
     pub lens: Lens,
+    /// Old JSON jobs retain their explicit lens; new jobs follow the DSL camera.
+    #[serde(default)]
+    pub lens_source: LensSource,
+    /// Only supplied fields override the selected camera optics.
+    #[serde(default)]
+    pub lens_overrides: LensOverrides,
     /// Offline-only look controls; never mutate the authored preview scene.
     #[serde(default)]
     pub lighting: LightingOverrides,
@@ -88,6 +94,25 @@ pub struct Lens {
     pub f_stop: f32,
     pub focus_distance: f32,
     pub aperture_blades: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LensSource {
+    /// Compatibility mode for serialized jobs that predate DSL camera optics.
+    #[default]
+    Job,
+    AuthoredCamera,
+}
+
+/// Explicit export overrides preserve the DSL value for every omitted field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LensOverrides {
+    pub enabled: Option<bool>,
+    pub focal_length_mm: Option<f32>,
+    pub f_stop: Option<f32>,
+    pub focus_distance: Option<f32>,
 }
 
 /// Delivery settings for a resumable, compositor-complete master sequence.

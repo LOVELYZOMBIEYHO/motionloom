@@ -11,6 +11,7 @@ use std::sync::Arc;
 #[test]
 fn lens_preserves_focus_and_fov() {
     let mut job = RenderJob::new("scene", QualityPreset::Ultra);
+    job.lens_source = LensSource::Job;
     job.scene_id = "scene".into();
     let camera = WorldCamera::default();
     let mut p = [[0.0; 4]; 26];
@@ -21,6 +22,122 @@ fn lens_preserves_focus_and_fov() {
     super::super::camera::configure(&mut p, &camera, &job).unwrap();
     assert!((p[5][3] * 2.0 - radius).abs() < 1e-8);
     assert_eq!(p[6][0], job.lens.focus_distance);
+}
+
+#[test]
+fn authored_optics_and_overrides_match_preview_aperture() {
+    use crate::world::{WorldDepthOfField, optics::ResolvedCameraOptics};
+    let mut job = RenderJob::new("scene", QualityPreset::Ultra);
+    let mut camera = WorldCamera::default();
+    let mut p = [[0.0; 4]; 26];
+    super::super::camera::configure(&mut p, &camera, &job).unwrap();
+    assert_eq!(p[5][3], 0.0, "an omitted DSL DOF must stay sharp");
+    camera.depth_of_field = Some(WorldDepthOfField {
+        focus_distance: "6".into(),
+        focal_length_mm: "50".into(),
+        f_stop: "8".into(),
+        max_blur_px: "10".into(),
+        max_blur_percent_height: false,
+    });
+    let optics = ResolvedCameraOptics::new(6.0, 50.0, 8.0);
+    let uniform = optics.preview_uniform(10.0);
+    // Sensor dimensions follow projection, so portrait and landscape use one aperture.
+    for resolution in [[1920, 1080], [1080, 1920]] {
+        job.resolution = resolution;
+        super::super::camera::configure(&mut p, &camera, &job).unwrap();
+        assert_eq!(p[5][3], uniform[1]);
+        assert_eq!(p[6][0], uniform[0]);
+    }
+    let tangent = p[3][3];
+    job.lens_overrides.focus_distance = Some(3.0);
+    super::super::camera::configure(&mut p, &camera, &job).unwrap();
+    assert_eq!(p[6][0], 3.0);
+    assert_eq!(p[5][3], uniform[1], "focus does not override aperture");
+    assert_eq!(p[3][3], tangent, "focus does not change framing");
+    job.lens_overrides.enabled = Some(false);
+    super::super::camera::configure(&mut p, &camera, &job).unwrap();
+    assert_eq!(p[5][3], 0.0);
+    camera.depth_of_field = None;
+    job.lens_overrides.enabled = None;
+    super::super::camera::configure(&mut p, &camera, &job).unwrap();
+    assert!(p[5][3] > 0.0, "an explicit numeric override enables DOF");
+}
+
+#[test]
+fn legacy_jobs_keep_explicit_lenses_and_overrides_are_validated() {
+    let mut job = RenderJob::new("scene", QualityPreset::Ultra);
+    job.scene_id = "auto".into();
+    let mut json = serde_json::to_value(&job).unwrap();
+    json.as_object_mut().unwrap().remove("lens_source");
+    json.as_object_mut().unwrap().remove("lens_overrides");
+    let legacy: RenderJob = serde_json::from_value(json).unwrap();
+    assert_eq!(legacy.lens_source, LensSource::Job);
+    let mut p = [[0.0; 4]; 26];
+    super::super::camera::configure(&mut p, &WorldCamera::default(), &legacy).unwrap();
+    assert!(p[5][3] > 0.0);
+    assert_eq!(p[6][0], legacy.lens.focus_distance);
+    for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+        job.lens_overrides.focus_distance = Some(bad);
+        assert!(job.validate().is_err());
+    }
+}
+
+#[test]
+fn active_shots_and_animated_optics_reach_weaver_each_frame() {
+    // Exercise the real scene bridge, including local sequence time and the cut.
+    let graph = crate::parse_graph_script(r#"
+<Graph fps={24} duration="3s" size={[64,64]}>
+  <Assets>
+<MaterialAsset id="geometry_default" shading="pbr" roughness="0.82" specular="1" emissiveStrength="1" />
+    <GeometryAsset id="subject_asset_geometry">
+    <Primitive shape="sphere" radius="0.2" />
+    </GeometryAsset>
+    <MeshAsset id="subject_asset" material="geometry_default" geometry="subject_asset_geometry" />
+  </Assets>
+  <Scene id="focus_scene">
+    <Timeline>
+      <Track id="optics" space="3d">
+        <Sequence from="0s" duration="2s" out="hide">
+          <CompositeGroup id="focused" space="3d">
+            <Camera3D position={[0,0,curve("0:6:linear, 2:4:linear")]} target={[0,0,0]}
+                      depthOfField="true" focalLength="50" fStop={curve("0:8:linear, 2:4:linear")}
+                      focusTarget="@subject" focusDistance={curve("0:6:linear, 2:3:linear")} focusOffset="-0.1" />
+            <Model id="subject" asset="subject_asset" position={[2,0,1]} />
+          </CompositeGroup>
+        </Sequence>
+        <Sequence from="2s" duration="1s" out="hide">
+          <CompositeGroup id="sharp" space="3d">
+            <Camera3D position={[0,0,4]} target={[0,0,0]} depthOfField="false" />
+            <Model asset="subject_asset" />
+          </CompositeGroup>
+        </Sequence>
+      </Track>
+    </Timeline>
+  </Scene>
+  <Present from="focus_scene" />
+</Graph>
+"#).unwrap();
+    let mut job = RenderJob::new("scene", QualityPreset::Ultra);
+    job.scene_id = "focus_scene".into();
+    job.resolution = [64, 64];
+    for (frame, focus, f_stop) in [(0, 5.9, 8.0), (24, 4.4, 6.0), (48, 4.0, 0.0)] {
+        job.frame = frame;
+        let snapshot = pollster::block_on(crate::scene::render::weaver_snapshot(
+            &graph,
+            &job,
+            Arc::new(crate::asset::MemoryAssetResolver::default()),
+        ))
+        .unwrap();
+        let mut p = [[0.0; 4]; 26];
+        let lens = super::super::camera::configure(&mut p, &snapshot.camera, &job).unwrap();
+        assert!((p[6][0] - focus).abs() < 1e-5);
+        if f_stop == 0.0 {
+            assert_eq!(p[5][3], 0.0);
+        } else {
+            assert_eq!(lens.optics.f_stop, f_stop);
+            assert!((p[5][3] - 0.05 / (2.0 * f_stop)).abs() < 1e-6);
+        }
+    }
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 Import `motionloom::api::head_fitting`. This opt-in, filesystem-free module
 accepts annotations, not images or natural-language instructions. The existing
-HeadAsset DSL is extended in place with semantic face measurements; the fitted
+Head DSL is extended in place with semantic face measurements; the fitted
 ordinary DSL remains the complete playback artifact.
 
 ```rust,ignore
@@ -120,7 +120,7 @@ than rewriting arbitrary `Vertex` positions.
 Source fingerprints use SHA-256 over exact UTF-8 bytes. Changes carry original and
 new numeric values. The editor patches only unique target child attribute spans,
 skipping comments/quoted text; existing Action-only source editors cannot locate
-HeadAsset nodes, so a dedicated scanner is used. Text outside the target is
+Head nodes, so a dedicated scanner is used. Text outside the target is
 unchanged. Apply verifies fingerprint, replays allowed changes, checks before/after
 values and candidate text equality, then reparses, compiles and authoring-validates.
 Input scenes with existing authoring errors must be repaired first.
@@ -206,13 +206,13 @@ still matches. Visual inspection of the held-out three-quarter view shows an
 excessively pointed nasal projection, shallow eye/mouth relief and no represented
 hair. It does not resemble the illustrated character sufficiently. These are
 observed limitations of this candidate and its sparse constraints, not proof that
-all possible HeadAsset parameters fail. Additional reliable surface annotations,
+all possible Head parameters fail. Additional reliable surface annotations,
 more expressive geometry and an improved nasal correspondence require separate
  assessment before claiming character reconstruction.
 
 ## Semantic face constraints (schema 1.0 extension)
 
-The same HeadAsset API now accepts more than a silhouette. A view may contain
+The same Head API now accepts more than a silhouette. A view may contain
 one closed head_outline plus open semantic curves for upper/lower eyelids,
 iris_left/right, nose_profile, upper_lip and lower_lip. Curves are scored with
 bidirectional point-to-curve distance and are returned in ViewFit.curves.

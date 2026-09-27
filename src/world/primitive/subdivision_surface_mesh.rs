@@ -40,7 +40,7 @@ fn average_uv<'a>(items: impl Iterator<Item = &'a [f32; 2]>) -> [f32; 2] {
 
 /// Catmull-Clark operates on polygon faces before triangulation. Pinned host
 /// vertices/edges keep the fitted silhouette fixed while orbital rings relax.
-fn subdivide(cage: &ControlCageNode) -> ControlCageNode {
+pub(crate) fn subdivide(cage: &ControlCageNode) -> ControlCageNode {
     let points = &cage.positions;
     let face_points: Vec<_> = cage
         .faces
@@ -165,6 +165,8 @@ pub(super) fn generate(builder: &mut MeshBuilder, cage: &ControlCageNode) {
     for _ in 0..cage.subdivision.min(2) {
         mesh = subdivide(&mesh);
     }
+    builder.control_faces = Some(mesh.faces.clone());
+    builder.control_pins = mesh.pinned.clone();
     // Area-weighted normals share the same welded indices across skin/eyelids.
     let mut normals = vec![[0.0; 3]; mesh.positions.len()];
     for f in &mesh.faces {
