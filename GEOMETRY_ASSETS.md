@@ -74,8 +74,8 @@ an approved explicit cage is not silently replaced with an approximate profile.
 <MeshAsset id="fruit_wire_model" geometry="fruit_wire" material="gray" />
 ```
 
-This example illustrates the generator; it does not replace the approved S98
-explicit cage. Profile points are `[radius,height]`. Their parameter order fixes
+S98 uses this pipeline for its apple body, wire grid, and breakaway pieces.
+Profile points are `[radius,height]`. Their parameter order fixes
 UV rows, so changing a radius preserves corresponding texels. Revolve duplicates
 the angular UV seam and collapses zero-radius rows to poles. Positive-radius
 endpoints remain open. CatmullRom can overshoot; sampled radii are clamped at zero.
@@ -106,21 +106,18 @@ exclude materials; material assembly and texture loading retain their own keys.
 Specialized `TerrainAsset` and `VegetationAsset` provide their own scene-specific
 systems.
 
-## Verification
+## S98 parametric authoring
 
-- All 48 affected DSL files across 22 showcase directories use the canonical
-  asset structure, including alternate scene files.
-- Parsed all 146 showcase scene and action-library files successfully. Regenerated
-  all 99 main showcase schemas: 98 clean, one existing tessellation review warning,
-  no repair or unrenderable results.
-- Preserved S98's 32 original explicit cages, including vertex positions, UVs,
-  pinned values and face data. Its 38 material bindings now share 30 geometry
-  definitions. The scene remains 1080 by 1920, 20 seconds and 480 frames.
-- Passed 712 Rust tests and four mesh editor tests. Existing gates ignored 16
-  tests; one unrelated HTTP resolver test was excluded because the sandbox
-  cannot bind its local test server.
-- Rebuilt the MotionLoom WASM package and landing site successfully. Rendered
-  and inspected S98 frame zero using the native GPU at 1080 by 1920.
+S98 now fits the approved body with a UV-parameterized profile instead of embedding body vertices and faces. Its fixed-seed displacement and five-lobe radial wave use the existing shared kernels. A single source control surface supplies the subdivided material variants, wire tubes, and UV partitions for the 24 animated shell pieces. The stem remains a small explicit cage, shared by its material variants.
 
-These checks verify the asset structure and S98 geometry preservation. They do
-not constitute a full Weaver video render of every showcase.
+Wireframe validates each tube through the existing sweep kernel; overlap at mesh junctions is intentional. Quantized zero-length seam remnants are omitted. Solid mesh editing keeps its strict topology validation.
+
+## S98 verification
+
+- Native and rebuilt WASM parse all three S98 variants successfully.
+- The main DSL has 1,178 lines; its 102 explicit vertices belong to the stem.
+- All 24 UV partitions cover exactly the body's 6,912 rendering triangles.
+- Scene nodes, material declarations, camera curves, lights, and timeline are unchanged. The fitted parametric surface is an approximation of the approved mesh.
+- Inspected WGPU hero, gray grid, clay, shell release, macro, and loop-return frames. Two Wireframe regression tests pass. The landing page builds with the rebuilt WASM.
+
+This verification does not include a full Weaver movie export.

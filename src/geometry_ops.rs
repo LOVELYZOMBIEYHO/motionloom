@@ -345,6 +345,11 @@ pub(crate) fn wireframe(
             }
             let key = |p: [f32; 3]| p.map(|v| (v as f64 * 1e6).round() as i64);
             let (ka, kb) = (key(a), key(b));
+            // Deformation and seam welding can leave sub-micron edge remnants.
+            // They have no visible extent and cannot form a valid swept tube.
+            if ka == kb {
+                continue;
+            }
             let edge = if ka < kb { (ka, kb) } else { (kb, ka) };
             if edges.insert(edge) {
                 operations.push(GeometryOperation::SweepProfile {
@@ -361,13 +366,34 @@ pub(crate) fn wireframe(
     if vertices > 30_000 || faces > 30_000 {
         return Err(MeshAuthoringError::LimitExceeded { vertices, faces });
     }
-    let recipe = GeometryRecipe {
-        schema_version: MESH_AUTHORING_SCHEMA_VERSION.into(),
-        id: "wireframe".into(),
+    let mut result = ControlCageNode {
+        positions: vec![],
+        uvs: vec![],
+        pinned: vec![],
+        faces: vec![],
         subdivision: 0,
-        operations,
     };
-    Ok(crate::mesh_authoring::execute_geometry_recipe(&recipe)?.cage)
+    // Validate each tube through the shared sweep kernel. Tubes deliberately
+    // overlap at wire junctions, so validating their union as a solid is wrong.
+    for operation in operations {
+        let recipe = GeometryRecipe {
+            schema_version: MESH_AUTHORING_SCHEMA_VERSION.into(),
+            id: "wireframe".into(),
+            subdivision: 0,
+            operations: vec![operation],
+        };
+        let tube = crate::mesh_authoring::execute_geometry_recipe(&recipe)?.cage;
+        let offset = result.positions.len() as u32;
+        result.positions.extend(tube.positions);
+        result.uvs.extend(tube.uvs);
+        result.pinned.extend(tube.pinned);
+        result.faces.extend(
+            tube.faces
+                .into_iter()
+                .map(|face| face.into_iter().map(|index| index + offset).collect()),
+        );
+    }
+    Ok(result)
 }
 
 /// Keep recipe inputs and the canonical DSL on the same modifier contract.
@@ -433,4 +459,62 @@ pub(crate) fn validate_modifier(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curved_wire_junctions_allow_intentional_tube_overlap() {
+        let points = [
+            [0.01, 0.1],
+            [0.7, 0.15],
+            [0.96, 1.0],
+            [0.4, 1.7],
+            [0.01, 1.45],
+        ]
+        .map(|position| SweepProfilePointNode { position });
+        let surface = revolve(
+            PrimitiveAxis::Y,
+            32,
+            28,
+            CurveInterpolation::Linear,
+            &points,
+        )
+        .unwrap();
+        let wire = wireframe(&surface, 0.0011, 3).unwrap();
+        assert!(!wire.faces.is_empty());
+        assert!(wire.positions.len() < 30_000 && wire.faces.len() < 30_000);
+        assert!(wire.positions.iter().flatten().all(|v| v.is_finite()));
+        assert!(
+            wire.faces
+                .iter()
+                .flatten()
+                .all(|&i| (i as usize) < wire.positions.len())
+        );
+        // The ordinary solid validator remains strict for editing proposals.
+        let solid = crate::mesh_reference::validate_mesh_topology(
+            &wire,
+            &crate::mesh_reference::MeshProposalValidationOptions::default(),
+        );
+        assert!(!solid.self_intersections.is_empty());
+    }
+
+    #[test]
+    fn wireframe_ignores_quantized_zero_length_seam_edges() {
+        let cage = ControlCageNode {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1e-8, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            uvs: vec![[0.0; 2]; 4],
+            pinned: vec![false; 4],
+            faces: vec![vec![0, 1, 2, 3]],
+            subdivision: 0,
+        };
+        assert!(!wireframe(&cage, 0.0011, 3).unwrap().faces.is_empty());
+    }
 }
