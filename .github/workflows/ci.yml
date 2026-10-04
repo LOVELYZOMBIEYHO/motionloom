@@ -17,7 +17,9 @@ jobs:
       - name: Check engine, importer and native examples
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Test self-contained engine and importer
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --lib --bins --tests --locked
+      - name: Test library documentation examples
+        run: cargo test --workspace --doc --locked
 
   wasm:
     runs-on: ubuntu-latest

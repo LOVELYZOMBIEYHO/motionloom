@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Resolve legacy `../sample_assets/` references from standalone asset collection
+  roots while preserving host lookup precedence. Verify bundled fixture lookup
+  without relying on sibling editor or example checkouts. Run CI unit/integration
+  tests and doctests separately; all native examples remain in the compile check.
+
 - Extract the engine into a standalone root package and Cargo workspace, with
   `motionloom-action-tool` under `crates/`. Preserve the Rust API and DSL, bundle
   required regression fixtures, and update Anica and browser build paths to the

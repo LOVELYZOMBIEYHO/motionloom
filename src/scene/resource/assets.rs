@@ -484,6 +484,15 @@ pub(crate) fn scene_asset_relative_suffixes(path: &Path) -> Vec<PathBuf> {
             if !suffix.as_os_str().is_empty() {
                 push_unique_path(&mut suffixes, suffix);
             }
+            // Standalone asset roots contain the sample_assets collection,
+            // while legacy host roots may expose its contents directly.
+            // Keep the existing stripped lookup first to preserve precedence.
+            if marker == "sample_assets" {
+                push_unique_path(
+                    &mut suffixes,
+                    pathbuf_from_components(&components[index..]),
+                );
+            }
         }
     }
 
@@ -574,9 +583,30 @@ fn format_ureq_error(err: ureq::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_rgba_image_source, load_svg_source};
+    use super::{load_rgba_image_source, load_svg_source, scene_asset_candidates};
     use crate::asset::MemoryAssetResolver;
     use base64::Engine;
+    use std::path::Path;
+
+    #[test]
+    fn legacy_sample_asset_paths_resolve_from_bundled_collection_root() {
+        // Use only this checkout's fixture root so host installations cannot
+        // hide a missing standalone lookup path.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assets");
+        let expected = root.join("sample_assets/README/readme_showcase1.png");
+        for source in [
+            "../sample_assets/README/readme_showcase1.png",
+            "../../sample_assets/README/readme_showcase1.png",
+            "examples/motionloom/sample_assets/README/readme_showcase1.png",
+        ] {
+            let resolved = scene_asset_candidates(&root, Path::new(source))
+                .into_iter()
+                .find(|candidate| candidate.is_file())
+                .expect("legacy source should resolve from the bundled collection");
+            assert_eq!(resolved, expected, "unexpected fixture for {source}");
+            image::open(&resolved).expect("resolved fixture should decode as an image");
+        }
+    }
 
     #[test]
     fn remote_raster_url_uses_prefetched_resolver_bytes() {
