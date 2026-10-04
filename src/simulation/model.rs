@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/model.rs
+// src/simulation/model.rs
 
 use serde::{Deserialize, Serialize};
 

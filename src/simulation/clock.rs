@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/clock.rs
+// src/simulation/clock.rs
 
 #[derive(Debug, Clone, Copy)]
 pub struct SimulationClock {

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/forces/wind.rs
+// src/simulation/forces/wind.rs
 
 use crate::simulation::model::WindNode;
 

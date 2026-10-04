@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/error.rs
+// src/scene/compositor/error.rs
 
 use thiserror::Error;
 

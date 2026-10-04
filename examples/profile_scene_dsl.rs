@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/profile_scene_dsl.rs
+// examples/profile_scene_dsl.rs
 
 use std::path::PathBuf;
 use std::time::Instant;

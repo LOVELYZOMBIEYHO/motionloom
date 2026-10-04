@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/shading/cel.wgsl
+// src/world/render/shaders/shading/cel.wgsl
 
 fn shade_cel(
     normal: vec3<f32>,

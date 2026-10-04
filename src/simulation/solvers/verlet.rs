@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/solvers/verlet.rs
+// src/simulation/solvers/verlet.rs
 
 use crate::simulation::constraints::distance::solve_distance;
 use crate::simulation::model::ColliderNode;

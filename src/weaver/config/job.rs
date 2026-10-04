@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/config/job.rs
+// src/weaver/config/job.rs
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

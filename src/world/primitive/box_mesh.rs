@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/box_mesh.rs
+// src/world/primitive/box_mesh.rs
 
 use super::MeshBuilder;
 

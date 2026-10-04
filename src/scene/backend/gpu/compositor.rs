@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/backend/gpu/compositor.rs
+// src/scene/backend/gpu/compositor.rs
 
 use std::borrow::Cow;
 use std::collections::HashMap;

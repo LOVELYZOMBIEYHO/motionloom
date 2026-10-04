@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/build_showcase_schemas.rs
+// examples/build_showcase_schemas.rs
 
 use std::{collections::BTreeMap, env, fs, path::PathBuf};
 

@@ -1,13 +1,13 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/tests/s90/mod.rs
+// src/weaver/tests/s90/mod.rs
 
 use crate::weaver::*;
 
 fn job() -> RenderJob {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .nth(3)
+        .nth(1)
         .unwrap();
     let mut job = RenderJob::new(
         workspace.join("motionloom-example/showcase/s-000090/main.motionloom"),

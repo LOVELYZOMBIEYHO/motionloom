@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/domain.rs
+// src/scene/compositor/domain.rs
 
 use serde::{Deserialize, Serialize};
 

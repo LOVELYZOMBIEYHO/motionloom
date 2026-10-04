@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/apply_mesh_proposal.rs
+// examples/apply_mesh_proposal.rs
 
 use motionloom::api::mesh_reference::{MeshAssetProposal, apply_mesh_asset_proposal};
 use std::{env, fs};

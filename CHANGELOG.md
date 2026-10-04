@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Extract the engine into a standalone root package and Cargo workspace, with
+  `motionloom-action-tool` under `crates/`. Preserve the Rust API and DSL, bundle
+  required regression fixtures, and update Anica and browser build paths to the
+  sibling checkout.
+
+- Correct the minimum Rust version to 1.88 for the engine and action tool,
+  matching the let-chain syntax used by both packages.
+
+- Load HeadSwap bodies, heads and head-scene dependencies through asset resolvers
+  on native and WASM hosts. Compose asynchronously into renderer-owned memory,
+  invalidate cached heads when inputs change, and expose resolver-aware Rust
+  export plus `WasmSceneRenderer.export_head_swap_glb`. Browser preloading now
+  follows head-scene URLs and scoped relative assets.
+
 - Add resumable Weaver master-sequence export from compositor-complete RGBA16F
   EXRs. The native pipeline writes a durable sequence manifest, optional 48 kHz
   float audio master, BT.709 ProRes 4444 XQ with alpha/PCM, and an H.264/AAC
@@ -130,7 +144,7 @@
   AO affecting indirect light, and RGBA16Float intermediate rendering through
   transparency and depth of field before the final display curve. Graph output
   size and RGBA8 Scene composition remain unchanged. See
-  [immediate preview notes](IMMEDIATE_PREVIEW.md) for scope and measurements.
+  [immediate preview notes](docs/IMMEDIATE_PREVIEW.md) for scope and measurements.
 
 - Breaking DSL and Rust API change: removed the `RenderQuality` resource,
   `Scene.renderQuality`, and all resolved quality fields. Old DSL and serialized

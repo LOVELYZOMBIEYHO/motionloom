@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/environment.wgsl
+// src/world/render/shaders/environment.wgsl
 
 fn direction_to_environment_uv(direction: vec3<f32>) -> vec2<f32> {
     let rotated_x = direction.x * cos(lighting.environment0.y) - direction.z * sin(lighting.environment0.y);

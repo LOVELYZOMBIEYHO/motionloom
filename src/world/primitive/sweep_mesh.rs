@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/sweep_mesh.rs
+// src/world/primitive/sweep_mesh.rs
 
 use crate::dsl::{CurveAssetNode, CurveInterpolation, CurvePointNode, SweepProfilePointNode};
 

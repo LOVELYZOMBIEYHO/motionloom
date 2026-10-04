@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/tests/params_layout.rs
+// src/world/render/tests/params_layout.rs
 
 //! Locks CPU-packed byte lengths to the corresponding WGSL uniform layouts.
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/constraints/distance.rs
+// src/simulation/constraints/distance.rs
 
 use crate::simulation::state::ParticleState;
 

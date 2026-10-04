@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/preview.rs
+// src/preview.rs
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/validate_geometry_assets.rs
+// examples/validate_geometry_assets.rs
 //! Validate every DSL file beneath the supplied files or directories.
 use std::{
     env, fs,

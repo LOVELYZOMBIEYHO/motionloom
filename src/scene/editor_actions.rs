@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/editor_actions.rs
+// src/scene/editor_actions.rs
 
 use crate::dsl::{ActionBoneNode, ActionNode, GraphScript, parse_graph_script};
 use crate::error::GraphParseError;

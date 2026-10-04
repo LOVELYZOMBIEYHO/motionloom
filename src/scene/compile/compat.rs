@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compile/compat.rs
+// src/scene/compile/compat.rs
 
 use crate::dsl::GraphScript;
 use crate::scene::model::SceneNode;

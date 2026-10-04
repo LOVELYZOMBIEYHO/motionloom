@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/textures.rs
+// src/world/render/textures.rs
 
 //! Convert Scene raster images into the orientation and storage used by world materials.
 

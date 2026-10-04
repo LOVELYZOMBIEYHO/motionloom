@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/tests/s89/compare.rs
+// src/weaver/tests/s89/compare.rs
 
 #[test]
 #[ignore = "explicit comparison of two existing render directories"]

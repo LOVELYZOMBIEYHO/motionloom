@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/environment.rs
+// src/world/render/environment.rs
 
 //! Decode environment images into linear floating-point mip chains.
 

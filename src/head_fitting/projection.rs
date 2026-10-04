@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/head_fitting/projection.rs
+// src/head_fitting/projection.rs
 
 use super::validation::{active, distance, height, normalize};
 use super::*;

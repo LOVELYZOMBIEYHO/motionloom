@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/resources.rs
+// src/world/render/resources.rs
 
 //! GPU allocation sizing and alignment shared by retained render resources.
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/backend/wgpu/shaders/path_trace.wgsl
+// src/weaver/backend/wgpu/shaders/path_trace.wgsl
 
 // Standalone compute integrator: no preview color/depth/shadow maps are inputs.
 struct Params { v: array<vec4<f32>, 26> }

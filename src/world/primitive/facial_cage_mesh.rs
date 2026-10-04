@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/facial_cage_mesh.rs
+// src/world/primitive/facial_cage_mesh.rs
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;

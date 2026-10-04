@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/terrain/mod.rs
+// src/world/terrain/mod.rs
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;

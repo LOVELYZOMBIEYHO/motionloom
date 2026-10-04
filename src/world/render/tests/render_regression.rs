@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/tests/render_regression.rs
+// src/world/render/tests/render_regression.rs
 
 //! Locks authored shading names to the numeric selector consumed by WGSL.
 
@@ -42,6 +42,7 @@ fn every_render_style_keeps_its_shader_selector() {
         let params = super::super::GpuWorldLightingParams::from_world(
             &lighting,
             super::super::PerspectiveCameraView {
+        orthographic: false,
                 eye: [0.0; 3],
                 right: [1.0, 0.0, 0.0],
                 up: [0.0, 1.0, 0.0],

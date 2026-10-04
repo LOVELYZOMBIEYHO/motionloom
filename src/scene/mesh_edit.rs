@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/mesh_edit.rs
+// src/scene/mesh_edit.rs
 
 use super::*;
 use crate::experimental::geometry::GeometryError;
@@ -21,6 +21,8 @@ pub async fn mesh_edit_snapshot(
         .map_err(|e| GeometryError::Evaluation(e.to_string()))?;
     let graph = compiled.as_deref().unwrap_or(graph);
     renderer.prepare_frame_caches(graph);
+    Box::pin(renderer.ensure_head_swap_assets()).await
+        .map_err(|e| GeometryError::Evaluation(e.to_string()))?;
     let sec = frame as f32 / graph.fps;
     for scene in &graph.scenes {
         if let Some(result) = visit(&mut renderer, &scene.children, graph, model, sec)? {

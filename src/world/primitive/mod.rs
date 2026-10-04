@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/mod.rs
+// src/world/primitive/mod.rs
 
 mod box_mesh;
 mod capsule_mesh;

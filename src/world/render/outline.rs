@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/outline.rs
+// src/world/render/outline.rs
 
 //! Geometry-outline pipeline policy shared by every render style.
 

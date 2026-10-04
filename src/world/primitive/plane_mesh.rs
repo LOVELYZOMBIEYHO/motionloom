@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/plane_mesh.rs
+// src/world/primitive/plane_mesh.rs
 
 use super::MeshBuilder;
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/render_style_browser.rs
+// tests/render_style_browser.rs
 
 // A real WebGPU browser must validate the shared style shader and optics pass.
 #![cfg(target_arch = "wasm32")]

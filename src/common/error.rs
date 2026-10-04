@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/error.rs
+// src/error.rs
 
 fn format_graph_parse_error(line: usize, message: &str) -> String {
     if line > 0 {

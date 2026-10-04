@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shadows.rs
+// src/world/render/shadows.rs
 
 //! Fit stable shadow volumes around frame-local actor bounds.
 

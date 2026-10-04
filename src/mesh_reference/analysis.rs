@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_reference/analysis.rs
+// src/mesh_reference/analysis.rs
 
 use super::{
     AnalyzeImageReferenceRequest, ImageReferenceAnalysis, MESH_REFERENCE_SCHEMA_VERSION, MaskData,

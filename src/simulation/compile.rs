@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/compile.rs
+// src/simulation/compile.rs
 
 use crate::scene::model::{SceneNode, SceneRootNode};
 use crate::simulation::error::SimulationError;

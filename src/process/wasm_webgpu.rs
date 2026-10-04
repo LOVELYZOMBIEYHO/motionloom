@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/process/wasm_webgpu.rs
+// src/process/wasm_webgpu.rs
 // =========================================
 
 use std::borrow::Cow;

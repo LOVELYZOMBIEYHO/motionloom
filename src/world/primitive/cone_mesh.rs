@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/cone_mesh.rs
+// src/world/primitive/cone_mesh.rs
 
 use super::MeshBuilder;
 use std::f32::consts::TAU;

@@ -1,5 +1,5 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/collision/mod.rs
+// src/simulation/collision/mod.rs
 
 pub mod shapes;

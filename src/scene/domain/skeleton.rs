@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/domain/skeleton.rs
+// src/scene/domain/skeleton.rs
 
 use std::collections::{HashMap, HashSet};
 

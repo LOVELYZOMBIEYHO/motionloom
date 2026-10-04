@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/bodies/dynamic_curve.rs
+// src/simulation/bodies/dynamic_curve.rs
 
 use crate::simulation::state::{DynamicCurveState, ParticleState};
 

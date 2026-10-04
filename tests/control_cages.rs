@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/control_cages.rs
+// tests/control_cages.rs
 
 use motionloom::{PrimitiveGeometry, parse_graph_script};
 

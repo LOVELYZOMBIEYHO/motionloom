@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_reference/mod.rs
+// src/mesh_reference/mod.rs
 
 //! Filesystem-free image-reference analysis and safe MeshAsset fitting tools.
 

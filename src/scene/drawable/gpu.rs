@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/drawable/gpu.rs
+// src/scene/drawable/gpu.rs
 
 use std::collections::HashMap;
 

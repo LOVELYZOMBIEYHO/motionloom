@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/hair_cards.rs
+// tests/hair_cards.rs
 
 use motionloom::{PrimitiveAssetNode, PrimitiveGeometry, parse_graph_script};
 

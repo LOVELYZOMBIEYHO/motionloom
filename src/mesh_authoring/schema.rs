@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_authoring/schema.rs
+// src/mesh_authoring/schema.rs
 
 use crate::ControlCageNode;
 use crate::mesh_reference::{ImageReferenceAnalysis, MeshReferenceEvaluation, MeshTopologyReport};

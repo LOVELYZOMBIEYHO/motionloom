@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/cli/format.rs
+// src/cli/format.rs
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};

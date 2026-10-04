@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_reference/schema.rs
+// src/mesh_reference/schema.rs
 
 use serde::{Deserialize, Serialize};
 

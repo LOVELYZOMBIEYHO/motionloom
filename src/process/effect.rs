@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/effect.rs
+// src/process/effect.rs
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PerClipColorBlurEffects {

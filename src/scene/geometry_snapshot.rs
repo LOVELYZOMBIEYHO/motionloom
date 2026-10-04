@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/geometry_snapshot.rs
+// src/scene/geometry_snapshot.rs
 
 use super::*;
 use crate::experimental::geometry::*;
@@ -21,6 +21,8 @@ pub(crate) async fn extract_geometry_snapshot(
         .map_err(error)?;
     let graph = compiled.as_deref().unwrap_or(graph);
     renderer.prepare_frame_caches(graph);
+    Box::pin(renderer.ensure_head_swap_assets()).await
+        .map_err(|e| GeometryError::Evaluation(e.to_string()))?;
     let scene = graph
         .scenes
         .iter()

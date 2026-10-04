@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/rig_diagnostics.rs
+// src/rig_diagnostics.rs
 
 //! Stable, read-only humanoid pose diagnostics shared by Rust, CLI, and WASM hosts.
 

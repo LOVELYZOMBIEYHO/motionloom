@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/common/gpu_async/wasm.rs
+// src/common/gpu_async/wasm.rs
 
 use std::future::Future;
 use std::pin::Pin;

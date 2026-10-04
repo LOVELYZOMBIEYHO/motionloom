@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/mod.rs
+// src/world/render/mod.rs
 
 mod environment;
 mod lighting;
@@ -65,7 +65,7 @@ use crate::world::model::{
     WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap, WorldDirectionFrame,
     WorldDirectionalCharacter, WorldGraph, WorldLight, WorldLightKind, WorldLighting,
     WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle, WorldPlay, WorldRetargetMap,
-    WorldSpritePlayback, WorldTime,
+    WorldSpritePlayback, WorldTime, WorldCameraProjection,
 };
 
 /// Keep native profiling instrumentation out of the browser runtime because
@@ -787,8 +787,8 @@ fn diagnose_gpu_shader_projection(
                 ],
             )
             .max(draw.params.camera1[3]);
-            let screen_x = draw.params.canvas[2] + view_x * draw.params.camera0[3] / view_z;
-            let screen_y = draw.params.canvas[3] - view_y * draw.params.camera0[3] / view_z;
+            let screen_x = draw.params.canvas[2] + view_x * draw.params.camera0[3] / if draw.params.camera3[3] > 0.5 { 1.0 } else { view_z };
+            let screen_y = draw.params.canvas[3] - view_y * draw.params.camera0[3] / if draw.params.camera3[3] > 0.5 { 1.0 } else { view_z };
             if !screen_x.is_finite() || !screen_y.is_finite() {
                 nonfinite += 1;
                 continue;
@@ -1325,6 +1325,10 @@ impl WorldFrameRenderer {
             time,
             &mut self.image_cache,
         )?;
+        if world.camera.projection == WorldCameraProjection::Orthographic {
+            self.draw_orthographic_diagnostic(&mut canvas, graph, frame, asset_root)?;
+            return Ok(canvas);
+        }
         draw_actor_debug_projections(
             &mut canvas,
             graph,
@@ -1816,7 +1820,14 @@ impl WorldFrameRenderer {
             budget.screen_space_global_illumination as u8 as f32,
             ssr_steps,
             gi_samples,
-            cfg!(target_arch = "wasm32") as u8 as f32,
+            // Balanced previews use a diagonal emitter pair; higher quality
+            // profiles retain all four authored quadrature samples.
+            match self.immediate_preview_settings.profile {
+                crate::preview::ImmediatePreviewProfile::Portable => 1.0,
+                crate::preview::ImmediatePreviewProfile::Balanced => 2.0,
+                crate::preview::ImmediatePreviewProfile::Cinematic
+                | crate::preview::ImmediatePreviewProfile::Ultra => 4.0,
+            },
         ];
         lighting.frame_index = frame;
         lighting.temporal_jitter = anti_aliasing.jitter_phases > 1;
@@ -2491,6 +2502,7 @@ fn preview_camera_cut(previous: PreviewCameraHistory, current: PreviewCameraHist
     let focal_ratio = current.camera0[3].max(0.001) / previous.camera0[3].max(0.001);
     eye_delta > current.camera2[3].max(1.0) * 0.2
         || forward_dot < 0.65
+        || current.camera3[3].signum() != previous.camera3[3].signum()
         || !(0.5..=2.0).contains(&focal_ratio)
 }
 
@@ -5466,8 +5478,9 @@ fn rigid_draw_visible(bounds: Option<([f32; 3], [f32; 3])>, p: GpuWorldParams) -
         if !x.is_finite() || !y.is_finite() || !z.is_finite() || z <= p.camera1[3] {
             return true;
         }
-        let half_x = z * p.canvas[0] * 0.5 / p.camera0[3];
-        let half_y = z * p.canvas[1] * 0.5 / p.camera0[3];
+        let projection_depth = if p.camera3[3] > 0.5 { 1.0 } else { z };
+        let half_x = projection_depth * p.canvas[0] * 0.5 / p.camera0[3];
+        let half_y = projection_depth * p.canvas[1] * 0.5 / p.camera0[3];
         for (index, test) in [
             x < -half_x - 0.01,
             x > half_x + 0.01,
@@ -6416,7 +6429,15 @@ fn perspective_camera_view(
         ];
         right = rolled_right;
     }
-    let focal_px = (height_f * 0.5) / (fov * 0.5).tan().max(0.001);
+    // Orthographic scale is the full vertical field in world units.
+    let orthographic = world.camera.projection == WorldCameraProjection::Orthographic;
+    let focal_px = if orthographic {
+        let scale = eval_number(world.camera.orthographic_scale.as_deref().unwrap_or("4"), 4.0, time)?;
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(WorldRenderError::Expression { expr: "orthographicScale".into(), message: "Scale must be finite and positive".into() });
+        }
+        height_f / scale
+    } else { (height_f * 0.5) / (fov * 0.5).tan().max(0.001) };
     let far = distance.max(1.0) + width_f.max(height_f) / height_f * 24.0;
     let optics = world
         .camera
@@ -6439,6 +6460,7 @@ fn perspective_camera_view(
         .transpose()?
         .unwrap_or([0.0; 4]);
     Ok(PerspectiveCameraView {
+        orthographic,
         eye,
         right,
         up,
@@ -6947,8 +6969,8 @@ fn project_actor_editor_joints(
             if depth <= camera.near || !depth.is_finite() {
                 continue;
             }
-            let x = width as f32 * 0.5 + dot3(relative, camera.right) * camera.focal_px / depth;
-            let y = height as f32 * 0.5 - dot3(relative, camera.up) * camera.focal_px / depth;
+            let x = width as f32 * 0.5 + dot3(relative, camera.right) * camera.focal_px / camera.projection_divisor(depth);
+            let y = height as f32 * 0.5 - dot3(relative, camera.up) * camera.focal_px / camera.projection_divisor(depth);
             if x.is_finite() && y.is_finite() {
                 joints.push(Scene3DEditorJointProjection {
                     actor: actor.id.clone(),
@@ -7047,8 +7069,8 @@ fn project_actor_editor_joints(
         if depth <= camera.near || !depth.is_finite() {
             continue;
         }
-        let x = width as f32 * 0.5 + dot3(relative, camera.right) * camera.focal_px / depth;
-        let y = height as f32 * 0.5 - dot3(relative, camera.up) * camera.focal_px / depth;
+        let x = width as f32 * 0.5 + dot3(relative, camera.right) * camera.focal_px / camera.projection_divisor(depth);
+        let y = height as f32 * 0.5 - dot3(relative, camera.up) * camera.focal_px / camera.projection_divisor(depth);
         if x.is_finite() && y.is_finite() {
             if let Some(bone_report) = report.as_mut().and_then(|report| {
                 report
@@ -11008,7 +11030,7 @@ fn mat4_mul(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
     out
 }
 
-fn mat4_inverse_affine(matrix: [f32; 16]) -> Option<[f32; 16]> {
+pub(crate) fn mat4_inverse_affine(matrix: [f32; 16]) -> Option<[f32; 16]> {
     let a00 = matrix[0];
     let a01 = matrix[4];
     let a02 = matrix[8];
@@ -11477,7 +11499,7 @@ impl GpuGroundGridParams {
                 camera_view.forward[0],
                 camera_view.forward[1],
                 camera_view.forward[2],
-                0.0,
+                camera_view.orthographic as u8 as f32,
             ],
             // x: opacity, y/z: distance fade start/end, w: base grid size.
             options: [0.95, 30.0, 70.0, 1.0],
@@ -11495,6 +11517,7 @@ impl GpuGroundGridParams {
 
 #[derive(Debug, Clone, Copy)]
 struct PerspectiveCameraView {
+    orthographic: bool,
     eye: [f32; 3],
     right: [f32; 3],
     up: [f32; 3],
@@ -11507,6 +11530,10 @@ struct PerspectiveCameraView {
     optics: [f32; 4],
 }
 
+impl PerspectiveCameraView {
+    fn projection_divisor(self, depth: f32) -> f32 { if self.orthographic { 1.0 } else { depth } }
+}
+
 fn update_gpu_world_draw_camera(draw: &mut GpuWorldDraw, camera: PerspectiveCameraView) {
     draw.params.camera0 = [camera.eye[0], camera.eye[1], camera.eye[2], camera.focal_px];
     draw.params.camera1 = [
@@ -11516,7 +11543,7 @@ fn update_gpu_world_draw_camera(draw: &mut GpuWorldDraw, camera: PerspectiveCame
         camera.near,
     ];
     draw.params.camera2 = [camera.up[0], camera.up[1], camera.up[2], camera.far];
-    draw.params.camera3 = [camera.forward[0], camera.forward[1], camera.forward[2], 0.0];
+    draw.params.camera3 = [camera.forward[0], camera.forward[1], camera.forward[2], camera.orthographic as u8 as f32];
     let actor = [
         draw.params.actor[0],
         draw.params.actor[1],
@@ -11669,7 +11696,7 @@ fn build_actor_mesh_gpu_draws(
             camera_view.forward[0],
             camera_view.forward[1],
             camera_view.forward[2],
-            0.0,
+            camera_view.orthographic as u8 as f32,
         ],
         style: [
             opacity.clamp(0.0, 1.0),
@@ -12338,7 +12365,7 @@ fn terrain_chunk_visible(
     if depth + radius < camera.near || depth - radius > camera.far {
         return false;
     }
-    let visible_depth = depth.max(camera.near);
+    let visible_depth = camera.projection_divisor(depth.max(camera.near));
     let half_width = visible_depth * viewport_width * 0.5 / camera.focal_px.max(1.0);
     let half_height = visible_depth * viewport_height * 0.5 / camera.focal_px.max(1.0);
     dot3(relative, camera.right).abs() <= half_width + radius

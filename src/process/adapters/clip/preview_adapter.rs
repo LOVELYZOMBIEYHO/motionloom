@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/adapters/clip/preview_adapter.rs
+// src/process/adapters/clip/preview_adapter.rs
 
 use crate::common::backend::OutputFormat;
 use crate::process::graph::MotionGraph;

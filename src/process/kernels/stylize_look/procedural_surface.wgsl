@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/kernels/stylize_look/procedural_surface.wgsl
+// src/process/kernels/stylize_look/procedural_surface.wgsl
 
 struct SurfaceParams {
     frame: vec4<f32>,

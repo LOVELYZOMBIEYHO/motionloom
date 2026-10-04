@@ -2,7 +2,7 @@
 
 Weaver is MotionLoom's opt-in native offline path tracer. It lives entirely in
 `src/weaver/`; the crate's `weaver` feature registers its API and the scene bridge.
-The native [MotionLoom CLI](../../CLI.md) exposes this same API through `render`
+The native [MotionLoom CLI](../../docs/CLI.md) exposes this same API through `render`
 and `export`. No additional crate, DSL syntax or browser preview dependency is required.
 
 This is a working initial renderer, **not a claim of production/Cycles parity**.
@@ -310,7 +310,7 @@ Omitting `--frames` exports the complete authored timeline. Use an explicit
 
 ## Tests
 
-From the `anica` directory:
+From the `motionloom` directory:
 
 ```sh
 cargo test -p motionloom --features weaver --lib weaver::tests

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_reference/proposal.rs
+// src/mesh_reference/proposal.rs
 
 use super::{
     ApplyMeshProposalResult, MESH_REFERENCE_SCHEMA_VERSION, MeshAssetProposal, MeshReferenceError,
@@ -464,20 +464,30 @@ fn position_span(raw: &str) -> Option<(usize, usize)> {
 }
 
 fn format_position(value: [f32; 3]) -> String {
+    // Shortest round-trip decimals preserve the validated f32 coordinates exactly.
     let values = value.map(|number| {
-        let mut text = format!("{number:.7}");
-        while text.contains('.') && text.ends_with('0') {
-            text.pop();
+        if number == 0.0 {
+            "0".into()
+        } else {
+            number.to_string()
         }
-        if text.ends_with('.') {
-            text.pop();
-        }
-        if text == "-0" {
-            text = "0".into();
-        }
-        text
     });
     format!("position={{[{}, {}, {}]}}", values[0], values[1], values[2])
+}
+
+#[cfg(test)]
+mod precision_tests {
+    #[test]
+    fn vertex_output_roundtrips_small_and_fractional_coordinates() {
+        let values = [1e-9_f32, -0.010333335, 0.61372757];
+        let text = super::format_position(values);
+        let numbers = text.split('[').nth(1).unwrap().split(']').next().unwrap();
+        let parsed: Vec<f32> = numbers
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
+        assert_eq!(values.as_slice(), parsed.as_slice());
+    }
 }
 
 fn cage_extent(cage: &ControlCageNode) -> f32 {

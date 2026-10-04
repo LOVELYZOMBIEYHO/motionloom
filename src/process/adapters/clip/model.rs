@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/adapters/clip/model.rs
+// src/process/adapters/clip/model.rs
 use super::transitions;
 use crate::common::keyframe::{self, ScalarKeyframe};
 use crate::process::effect::LayerColorBlurEffects;

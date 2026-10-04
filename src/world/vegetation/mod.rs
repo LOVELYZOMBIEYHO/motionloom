@@ -1,7 +1,7 @@
 // =========================================
 // PROCEDURAL VEGETATION V1
 // =========================================
-// crates/motionloom/src/world/vegetation/mod.rs
+// src/world/vegetation/mod.rs
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;

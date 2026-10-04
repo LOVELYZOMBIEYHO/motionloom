@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/pose_diagnostics.rs
+// src/world/render/pose_diagnostics.rs
 
 //! Read-only evaluation of authored Action poses through the renderer's evaluator.
 //! Matrices are column-major, model-global, before actor placement and scene contacts.

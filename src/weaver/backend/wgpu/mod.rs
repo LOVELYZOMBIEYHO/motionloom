@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/backend/wgpu/mod.rs
+// src/weaver/backend/wgpu/mod.rs
 
 use crate::{
     scene::compositor::SceneGpuContext,

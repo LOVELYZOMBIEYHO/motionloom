@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/lighting.rs
+// src/world/render/lighting.rs
 
 //! Resolve authored lights, environment controls, color management and style selectors.
 
@@ -367,7 +367,11 @@ impl GpuWorldLightingParams {
                 camera.forward[0],
                 camera.forward[1],
                 camera.forward[2],
-                camera.aspect,
+                if camera.orthographic {
+                    -camera.aspect
+                } else {
+                    camera.aspect
+                },
             ],
             previous_camera0: [camera.eye[0], camera.eye[1], camera.eye[2], camera.focal_px],
             previous_camera1: [
@@ -381,7 +385,11 @@ impl GpuWorldLightingParams {
                 camera.forward[0],
                 camera.forward[1],
                 camera.forward[2],
-                camera.aspect,
+                if camera.orthographic {
+                    -camera.aspect
+                } else {
+                    camera.aspect
+                },
             ],
             preview0: [0.0; 4],
             preview1: [0.0; 4],

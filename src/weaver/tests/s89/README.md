@@ -4,7 +4,7 @@ Assets remain at `motionloom-example/showcase/s-000089`; tests resolve the works
 from `CARGO_MANIFEST_DIR`, independently of the working directory. They are not
 portable asset fixtures for an installed crates.io package.
 
-From `anica`, run a bounded smoke render:
+From `motionloom`, run a bounded smoke render:
 
 ```sh
 cargo test -p motionloom --features weaver --lib weaver::tests::s89::s89_gpu_baseline -- --ignored --nocapture

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/shadows.wgsl
+// src/world/render/shaders/shadows.wgsl
 
 fn world_to_shadow(world: vec3<f32>) -> vec3<f32> {
     let relative = world - lighting.shadow3.xyz;

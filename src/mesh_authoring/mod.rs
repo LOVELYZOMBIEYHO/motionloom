@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_authoring/mod.rs
+// src/mesh_authoring/mod.rs
 
 //! Deterministic, filesystem-free MeshAsset construction and fitting sessions.
 

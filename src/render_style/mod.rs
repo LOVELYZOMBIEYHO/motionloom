@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/render_style/mod.rs
+// src/render_style/mod.rs
 
 //! Scene-owned visual styles. Authored values stay separate from resolved GPU
 //! defaults; no style is an exact opt-out, including for legacy SVG scenes.

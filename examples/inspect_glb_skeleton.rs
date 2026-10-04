@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/inspect_glb_skeleton.rs
+// examples/inspect_glb_skeleton.rs
 
 use std::path::PathBuf;
 

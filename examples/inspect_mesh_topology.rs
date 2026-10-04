@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/inspect_mesh_topology.rs
+// examples/inspect_mesh_topology.rs
 
 use motionloom::api::mesh_reference::{MeshProposalValidationOptions, validate_mesh_topology};
 use motionloom::{PrimitiveGeometry, parse_graph_script};

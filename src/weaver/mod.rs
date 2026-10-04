@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/mod.rs
+// src/weaver/mod.rs
 
 //! Opt-in native offline rendering, independent of immediate preview.
 pub mod api;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/formatter.rs
+// src/formatter.rs
 
 //! Deterministic formatting that retains the original DSL values and content.
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/frustum_mesh.rs
+// src/world/primitive/frustum_mesh.rs
 
 use super::MeshBuilder;
 

@@ -10,6 +10,7 @@ pub mod dsl;
 pub mod editor_actions;
 pub mod editor_keyframes;
 pub mod error;
+pub(crate) mod head_swap;
 pub mod model;
 pub mod preview_surface;
 pub mod render;

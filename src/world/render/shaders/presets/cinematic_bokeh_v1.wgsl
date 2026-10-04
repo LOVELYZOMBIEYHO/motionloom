@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/presets/cinematic_bokeh_v1.wgsl
+// src/world/render/shaders/presets/cinematic_bokeh_v1.wgsl
 
 // Deterministic disk integration in linear HDR. Separate near coverage allows
 // defocused foreground to spread over sharp pixels without blurring the subject.

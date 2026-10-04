@@ -1,11 +1,14 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/lib.rs
+// src/lib.rs
 
 //! MotionLoom is a Rust parser and renderer for MotionLoom graph DSL.
 //!
 //! It supports scene graphs, process/effect graphs, live preview surfaces, PNG
 //! sequence export, and video export through a caller-provided FFmpeg binary.
+//!
+//! [`api::character_authoring`] provides headless character construction, mesh
+//! edits, attachments, review and mesh-only humanoid binding.
 //!
 //! Most integrations should import from [`api`] or [`prelude`] instead of
 //! depending on MotionLoom's internal AST layout. The crate root keeps broader
@@ -109,6 +112,7 @@ mod error;
 mod export;
 mod formatter;
 mod geometry_ops;
+pub mod character_authoring;
 pub mod mesh_authoring;
 pub mod mesh_reference;
 pub mod preview;
@@ -181,7 +185,7 @@ pub use dsl::{
     EarNode, EyeNode, EyebrowNode, EyelinerNode, FaceLayoutNode, FaceTextureNode, FacialCageNode,
     GeometryAssetNode, GeometryUvNode, GraphAssetKind, GraphAssetNode, GraphAssetSource,
     GraphScript, HairGuideNode, HairPointNode, HeadDomeNode, HeadFeatureNode, HeadMorphNode,
-    HeadSectionNode, HeadShapeNode, ImageNode, IrisNode, MaterialAssetNode, MaterialTextureChannel,
+    HeadSectionNode, HeadShapeNode, HeadSwapAssetNode, ImageNode, IrisNode, MaterialAssetNode, MaterialTextureChannel,
     ModelProfileBoneAxisMapNode, ModelProfileBoneAxisNode, ModelProfileNode,
     ModelProfileRetargetMapNode, ModelProfileRetargetNode, MouthNode, NativeSkinBindingNode,
     NativeSkinMode, NativeWeightRegionNode, NoseNode, PrimitiveAssetNode, PrimitiveAxis,
@@ -287,7 +291,7 @@ pub use scene::render::{
     GpuFrameTexture, MotionLoomSceneRenderError, SceneGpuTexture, ScenePlatformPreviewSurface,
     ScenePreviewBackend, ScenePreviewPixelFormat, ScenePreviewSurface, ScenePreviewSurfaceOptions,
     SceneRenderError, SceneRenderProfile, SceneRenderProgress, SceneRenderer,
-    clear_scene_asset_roots, next_scene_output_path, next_scene_output_path_for_profile,
+    clear_scene_asset_roots, export_scene_head_swap_glb, export_scene_head_swap_glb_with_resolver, next_scene_output_path, next_scene_output_path_for_profile,
     render_scene_graph_frame, render_scene_graph_frame_with_cpu_inputs,
     render_scene_graph_frame_with_resolver, render_scene_graph_to_png_sequence_with_progress,
     render_scene_graph_to_png_sequence_with_progress_and_cancel, render_scene_graph_to_video,

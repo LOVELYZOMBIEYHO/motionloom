@@ -1,0 +1,11 @@
+/target/
+/pkg/
+/.render-output/
+.DS_Store
+**/.DS_Store
+.env
+.env.*
+*.tmp
+*.bak
+**/.codex/
+**/.claude/

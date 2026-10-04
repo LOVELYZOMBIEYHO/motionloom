@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/tests/shader_validation.rs
+// src/world/render/tests/shader_validation.rs
 
 //! Validates the assembled shader and the presence of each shading module.
 

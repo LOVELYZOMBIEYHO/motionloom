@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/authoring.rs
+// src/authoring.rs
 
 //! Machine-readable authoring analysis for LLM repair loops and showcase learning.
 
@@ -2351,6 +2351,24 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
         "VideoAsset" | "ImageAsset" | "ModelAsset" | "AudioAsset" => {
             strict(&["id", "src", "decoder", "colorSpace", "color_space"])
         }
+        "HeadSwapAsset" => strict(&[
+            "id",
+            "src",
+            "body",
+            "head",
+            "headScene",
+            "headObject",
+            "headFrame",
+            "output",
+            "scale",
+            "centerY",
+            "headOffsetY",
+            "centerZ",
+            "cutY",
+            "weightedCutY",
+            "palette",
+            "neckPart",
+        ]),
         "AnimationAsset" => strict(&["id", "src"]),
         "MaterialAsset" => strict(&[
             "id",
@@ -3872,6 +3890,7 @@ const KNOWN_TAGS: &[&str] = &[
     "VideoAsset",
     "ImageAsset",
     "ModelAsset",
+    "HeadSwapAsset",
     "MaterialAsset",
     "GeometryAsset",
     "Mesh",

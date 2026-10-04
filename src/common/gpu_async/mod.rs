@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/common/gpu_async/mod.rs
+// src/common/gpu_async/mod.rs
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

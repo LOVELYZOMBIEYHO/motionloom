@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/check_scene_uvs.rs
+// examples/check_scene_uvs.rs
 
 use motionloom::experimental::*;
 

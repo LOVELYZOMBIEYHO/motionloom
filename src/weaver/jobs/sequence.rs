@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/jobs/sequence.rs
+// src/weaver/jobs/sequence.rs
 
 use crate::{
     audio::{compile_audio_plan, prepare_audio},

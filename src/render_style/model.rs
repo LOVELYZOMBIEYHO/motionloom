@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/render_style/model.rs
+// src/render_style/model.rs
 
 //! Authored render-style nodes and their resolved runtime representation.
 

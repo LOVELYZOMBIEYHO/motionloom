@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/authoring_report.rs
+// examples/authoring_report.rs
 
 use std::{env, fs};
 

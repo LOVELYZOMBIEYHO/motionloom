@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/dsl.rs
+// src/simulation/dsl.rs
 
 use crate::dsl::{attr_value, required_attr_value, strip_wrappers};
 use crate::error::GraphParseError;

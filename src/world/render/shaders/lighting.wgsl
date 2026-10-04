@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/lighting.wgsl
+// src/world/render/shaders/lighting.wgsl
 
 fn distribution_ggx(normal: vec3<f32>, halfway: vec3<f32>, roughness: f32) -> f32 {
     let alpha = roughness * roughness;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/constraints/pin.rs
+// src/simulation/constraints/pin.rs
 
 use crate::simulation::state::ParticleState;
 

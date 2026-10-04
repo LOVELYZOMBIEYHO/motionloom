@@ -1,12 +1,13 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/tests/mod.rs
+// src/world/render/tests/mod.rs
 
 //! Native renderer regression tests grouped outside the production module.
 
 mod params_layout;
 mod render_regression;
 mod shader_validation;
+mod orthographic;
 fn test_gpu_vertex(x: f32) -> super::GpuWorldVertex {
     super::GpuWorldVertex {
         outline_normal: [0.0, 0.0, 1.0],
@@ -154,6 +155,7 @@ fn fog_and_optics_pack_into_distinct_gpu_uniform_slots() {
         ..Default::default()
     };
     let camera = super::PerspectiveCameraView {
+        orthographic: false,
         eye: [0.0, 1.0, 5.0],
         right: [1.0, 0.0, 0.0],
         up: [0.0, 1.0, 0.0],
@@ -273,6 +275,7 @@ fn environment_source_cache_is_checked_before_resolving_bytes() {
         ..Default::default()
     };
     let camera = super::PerspectiveCameraView {
+        orthographic: false,
         eye: [0.0, 1.0, 3.0],
         right: [1.0, 0.0, 0.0],
         up: [0.0, 1.0, 0.0],
@@ -482,6 +485,7 @@ fn temporal_jitter_is_bounded_and_camera_cuts_reset_history() {
 #[test]
 fn temporal_signature_changes_with_render_style_controls() {
     let camera = super::PerspectiveCameraView {
+        orthographic: false,
         eye: [0.0, 1.0, -4.0],
         right: [1.0, 0.0, 0.0],
         up: [0.0, 1.0, 0.0],
@@ -641,10 +645,33 @@ fn world_pbr_shadow_sampling_uses_explicit_level_for_webgpu() {
 
 #[test]
 fn world_pbr_shader_preserves_clip_w_for_perspective_correct_uvs() {
+    // Perspective varyings must retain camera depth through homogeneous projection.
     assert!(
-        super::WGPU_WORLD_SHADER.contains("out.pos = vec4<f32>(clip_x, clip_y, clip_z, view_z);")
+        super::WGPU_WORLD_SHADER
+            .contains("let clip_w = select(view_z, 1.0, params.camera3.w > 0.5);")
     );
+    assert!(super::WGPU_WORLD_SHADER.contains("out.pos = vec4<f32>(clip_x, clip_y, clip_z, clip_w);"));
     assert!(!super::WGPU_WORLD_SHADER.contains("out.pos = vec4<f32>(ndc_x, ndc_y, ndc_z, 1.0);"));
+}
+
+#[test]
+fn world_pbr_shader_uses_unit_clip_w_and_linear_depth_for_orthographic_projection() {
+    // Orthographic frames and their TAA history must use the same projection mode.
+    let shader = &super::WGPU_WORLD_SHADER;
+    assert!(shader.contains("let clip_w = select(view_z, 1.0, params.camera3.w > 0.5);"));
+    assert!(shader.contains(
+        "let clip_z = select(near * (far - view_z), far - view_z, params.camera3.w > 0.5) / (far - near);"
+    ));
+    assert!(shader.contains(
+        "let previous_clip_w = select(previous_view_z, 1.0, lighting.previous_camera3.w < 0.0);"
+    ));
+    assert!(shader.contains(
+        "select(previous_near * (previous_far - previous_view_z), previous_far - previous_view_z, lighting.previous_camera3.w < 0.0)"
+    ));
+    assert!(shader.contains("out.current_clip = out.pos;"));
+    assert!(shader.contains(
+        "out.previous_clip = vec4<f32>(\n        previous_clip_x,\n        previous_clip_y,\n        previous_clip_z,\n        previous_clip_w,\n    );"
+    ));
 }
 
 #[test]
@@ -1620,7 +1647,7 @@ fn renders_world_placeholder_frame() {
   <Present from="stage" />
 </Graph>"##;
     let graph = parse_world_graph_script(script).expect("world graph");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/motionloom/world");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../anica/examples/motionloom/world");
     let model = root.join("../sample_assets/glb/mammuthus_primigenius_blumbach.glb");
     if !model.exists() {
         return;

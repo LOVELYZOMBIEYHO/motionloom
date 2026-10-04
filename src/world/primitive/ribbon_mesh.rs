@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/world/primitive/ribbon_mesh.rs
+// src/world/primitive/ribbon_mesh.rs
 // =========================================
 
 use crate::dsl::PrimitiveRibbonPointNode;

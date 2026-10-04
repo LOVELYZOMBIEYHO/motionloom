@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_reference/evaluation.rs
+// src/mesh_reference/evaluation.rs
 
 use super::{
     FeatureBinding, FeatureResidual, LandmarkBinding, LandmarkResidual, MESH_REFERENCE_MEASUREMENT,
@@ -27,6 +27,8 @@ struct Snapshot {
     size: [u32; 2],
     center: [f32; 2],
     focal: f32,
+    #[serde(default)]
+    orthographic: bool,
     near: f32,
 }
 
@@ -65,6 +67,9 @@ pub async fn evaluate_mesh_asset_reference(
             "focal": snapshot.focal,
             "near": snapshot.near,
         }))?);
+        if snapshot.orthographic {
+            camera_hash.update(b"orthographic-v1");
+        }
         views.push(evaluate_view(reference, &snapshot, &request.options)?);
     }
     let objective = if views.is_empty() {
@@ -572,8 +577,10 @@ fn project(snapshot: &Snapshot, position: [f32; 3], target_size: [u32; 2]) -> Op
     if view[2] <= snapshot.near {
         return None;
     }
-    let x = snapshot.center[0] + view[0] * snapshot.focal / view[2];
-    let y = snapshot.center[1] - view[1] * snapshot.focal / view[2];
+    let x = snapshot.center[0]
+        + view[0] * snapshot.focal / if snapshot.orthographic { 1.0 } else { view[2] };
+    let y = snapshot.center[1]
+        - view[1] * snapshot.focal / if snapshot.orthographic { 1.0 } else { view[2] };
     Some([
         x * target_size[0] as f32 / snapshot.size[0].max(1) as f32,
         y * target_size[1] as f32 / snapshot.size[1].max(1) as f32,

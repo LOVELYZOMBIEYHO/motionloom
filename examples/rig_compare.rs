@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/rig_compare.rs
+// examples/rig_compare.rs
 
 use motionloom::api::{
     RigComparisonOptions, RigEvaluationReport, compare_humanoid_poses, rig_comparison_report_json,

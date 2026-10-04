@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/cylinder_mesh.rs
+// src/world/primitive/cylinder_mesh.rs
 
 use super::MeshBuilder;
 use std::f32::consts::TAU;

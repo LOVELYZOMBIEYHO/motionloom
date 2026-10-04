@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/preview_surface.rs
+// src/scene/preview_surface.rs
 
 use std::sync::Arc;
 

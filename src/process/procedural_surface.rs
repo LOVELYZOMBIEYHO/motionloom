@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/procedural_surface.rs
+// src/process/procedural_surface.rs
 
 use crate::{dsl::PassNode, process::runtime::eval_time_expr, scene::drawable::parse_color};
 

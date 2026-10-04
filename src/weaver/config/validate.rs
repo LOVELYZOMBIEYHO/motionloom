@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/config/validate.rs
+// src/weaver/config/validate.rs
 
 use super::*;
 use crate::weaver::WeaverError;

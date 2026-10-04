@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/articulate_mesh_region.rs
+// examples/articulate_mesh_region.rs
 
 // Separate an existing face region into a rigid articulation, preserving UVs.
 use motionloom::api::mesh_authoring::mesh_asset_element;

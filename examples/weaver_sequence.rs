@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/weaver_sequence.rs
+// examples/weaver_sequence.rs
 
 // Delegate argument handling, jobs and progress to the same native CLI.
 #[cfg(not(target_arch = "wasm32"))]

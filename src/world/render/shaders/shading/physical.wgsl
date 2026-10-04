@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/shading/physical.wgsl
+// src/world/render/shaders/shading/physical.wgsl
 
 fn shade_physical(
     diffuse: vec3<f32>,

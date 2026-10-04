@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/gltf_loader.rs
+// src/world/gltf_loader.rs
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2075,7 +2075,7 @@ mod tests {
     #[test]
     fn loads_example_glb_metadata_when_present() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb");
+            .join("../anica/examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb");
         if !path.exists() {
             return;
         }
@@ -2088,7 +2088,7 @@ mod tests {
     #[test]
     fn loads_example_glb_mesh_data_when_present() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb");
+            .join("../anica/examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb");
         if !path.exists() {
             return;
         }
@@ -2106,7 +2106,7 @@ mod tests {
     #[test]
     fn loads_draco_iphone_glb_mesh_data_when_present() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../motionloom-example/assets/sample_assets/glb/iphone.glb");
+            .join("../motionloom-example/assets/sample_assets/glb/iphone.glb");
         if !path.exists() {
             return;
         }

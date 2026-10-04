@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/capsule_mesh.rs
+// src/world/primitive/capsule_mesh.rs
 
 use super::MeshBuilder;
 use std::f32::consts::{FRAC_PI_2, TAU};

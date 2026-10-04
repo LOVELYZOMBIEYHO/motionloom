@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/geometry_export.rs
+// tests/geometry_export.rs
 
 #![cfg(not(target_arch = "wasm32"))]
 use motionloom::{experimental::*, parse_graph_script};
@@ -255,7 +255,7 @@ fn explicit_atlas_domain_detects_cross_mesh_overlap() {
 #[ignore = "requires sibling S86 showcase"]
 fn s86_geometry_baseline_and_static_glb_roundtrip() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../motionloom-example/showcase/s-000086/main.motionloom");
+        .join("../motionloom-example/showcase/s-000086/main.motionloom");
     let script = std::fs::read_to_string(&path).unwrap();
     let graph = parse_graph_script(&script).unwrap();
     let get = |frame| {

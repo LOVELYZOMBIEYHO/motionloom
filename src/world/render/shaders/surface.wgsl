@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/surface.wgsl
+// src/world/render/shaders/surface.wgsl
 
 fn authored_light_radiance(light: Light, world_position: vec3<f32>) -> vec4<f32> {
     let kind = light.position_kind.w;
@@ -21,15 +21,16 @@ fn authored_light_radiance(light: Light, world_position: vec3<f32>) -> vec4<f32>
     return vec4<f32>(direction, attenuation);
 }
 
-// Four deterministic emitter samples give Immediate Preview a stable,
-// physically-scaled rectangular source without temporal noise.
+// A regular four-point emitter is retained as the reference; distant pixels
+// use its centre and nearby pixels use a diagonal pair to limit BRDF work.
 fn authored_area_light_radiance(light: Light, world_position: vec3<f32>, sample_index: u32) -> vec4<f32> {
     let emitter_normal = normalize(light.direction_range.xyz);
     let reference = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(emitter_normal.y) > 0.95);
     let right = normalize(cross(reference, emitter_normal));
     let up = normalize(cross(emitter_normal, right));
-    let x = select(-0.288675, 0.288675, (sample_index & 1u) != 0u);
-    let y = select(-0.288675, 0.288675, (sample_index & 2u) != 0u);
+    let center = sample_index == 4u;
+    let x = select(select(-0.288675, 0.288675, (sample_index & 1u) != 0u), 0.0, center);
+    let y = select(select(-0.288675, 0.288675, (sample_index & 2u) != 0u), 0.0, center);
     let width = max(light.spot_area.z, 0.001);
     let height = max(light.spot_area.w, 0.001);
     let sample_position = light.position_kind.xyz + right * x * width + up * y * height;
@@ -118,7 +119,7 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
     // glTF double-sided materials must light backfaces with the front side's
     // normal; orient the geometric normal toward the viewer before the tangent
     // frame so the normal map and direct lighting agree.
-    let view = normalize(params.camera0.xyz - input.world_position);
+    let view = select(normalize(params.camera0.xyz - input.world_position), -params.camera3.xyz, params.camera3.w > 0.5);
     var geometric_normal = normalize(input.normal);
     if (params.material8.y > 0.5 && dot(geometric_normal, view) < 0.0) {
         geometric_normal = -geometric_normal;
@@ -162,36 +163,61 @@ fn shade_surface(input: VertexOut) -> vec4<f32> {
         face_band = smoothstep(threshold - lighting.cel0.y, threshold + lighting.cel0.y, sdf);
         if (frontal <= 0.0) { face_band = 0.0; }
     }
-    for (var light_index = 0u; light_index < 8u; light_index = light_index + 1u) {
-        if (light_index < light_count) {
-            let authored = lighting.lights[light_index];
-            let direction_attenuation = authored_light_radiance(authored, input.world_position);
-            var radiance = authored.color_intensity.rgb * authored.color_intensity.w * direction_attenuation.w;
-            if (lighting.surface0.x < -0.5) {
-                // The selected shadow owner's index is packed independently of kind.
-                if (f32(light_index) == lighting.render_compat.x) { radiance *= sample_shadow(input.world_position, normal); }
+    for (var light_index = 0u; light_index < light_count; light_index = light_index + 1u) {
+        let authored = lighting.lights[light_index];
+        // Local attenuation is exactly zero beyond the light range. For
+        // area lights, include the farthest emitter sample in the bound.
+        if (authored.position_kind.w > 0.5 && authored.direction_range.w > 0.001) {
+            let emitter_radius = select(
+                0.0,
+                0.288675 * length(authored.spot_area.zw),
+                authored.position_kind.w > 2.5,
+            );
+            let cutoff = authored.direction_range.w + emitter_radius;
+            let delta = authored.position_kind.xyz - input.world_position;
+            if (dot(delta, delta) >= cutoff * cutoff) {
+                continue;
             }
-            if (authored.position_kind.w > 2.5) {
-                for (var area_sample = 0u; area_sample < 4u; area_sample = area_sample + 1u) {
-                    let area_direction_attenuation = authored_area_light_radiance(authored, input.world_position, area_sample);
-                    var area_radiance = authored.color_intensity.rgb * authored.color_intensity.w * area_direction_attenuation.w;
-                    if (lighting.surface0.x < -0.5 && f32(light_index) == lighting.render_compat.x) {
-                        area_radiance *= sample_shadow(input.world_position, normal);
-                    }
-                    lit += direct_pbr(
-                        normal, view, area_direction_attenuation.xyz, area_radiance,
-                        diffuse_color, metallic, roughness, f0, face_band
-                    );
+        }
+        let direction_attenuation = authored_light_radiance(authored, input.world_position);
+        var radiance = authored.color_intensity.rgb * authored.color_intensity.w * direction_attenuation.w;
+        if (lighting.surface0.x < -0.5) {
+            // The selected shadow owner's index is packed independently of kind.
+            if (f32(light_index) == lighting.render_compat.x) { radiance *= sample_shadow(input.world_position, normal); }
+        }
+        if (authored.position_kind.w > 2.5) {
+            // A direct World render leaves this slot zero and keeps the
+            // original four-sample result; Scene preview sets its budget.
+            let requested_count = u32(select(4.0, lighting.preview2.w, lighting.preview2.w >= 0.5));
+            // At distances larger than the emitter's width/height, its
+            // quadrature directions converge; balanced previews use the centre.
+            let area_distance = length(authored.position_kind.xyz - input.world_position);
+            let far_area = requested_count < 4u &&
+                area_distance > max(authored.spot_area.z, authored.spot_area.w);
+            let area_count = select(requested_count, 1u, far_area);
+            for (var area_sample = 0u; area_sample < area_count; area_sample = area_sample + 1u) {
+                var sample_index = area_sample;
+                if (area_count == 1u) { sample_index = 4u; }
+                if (area_count == 2u) { sample_index = area_sample * 3u; }
+                let area_direction_attenuation = authored_area_light_radiance(authored, input.world_position, sample_index);
+                let sample_weight = 4.0 / f32(area_count);
+                var area_radiance = authored.color_intensity.rgb * authored.color_intensity.w * area_direction_attenuation.w * sample_weight;
+                if (lighting.surface0.x < -0.5 && f32(light_index) == lighting.render_compat.x) {
+                    area_radiance *= sample_shadow(input.world_position, normal);
                 }
-            } else if (lighting.surface0.x > 3.5 && light_index > 0u) {
-                // Only the first authored light shapes cel bands; others provide soft fill.
-                lit += diffuse_color * radiance * max(dot(normal, direction_attenuation.xyz), 0.0) * 0.15 / 3.14159265;
-            } else {
                 lit += direct_pbr(
-                    normal, view, direction_attenuation.xyz, radiance,
+                    normal, view, area_direction_attenuation.xyz, area_radiance,
                     diffuse_color, metallic, roughness, f0, face_band
                 );
             }
+        } else if (lighting.surface0.x > 3.5 && light_index > 0u) {
+            // Only the first authored light shapes cel bands; others provide soft fill.
+            lit += diffuse_color * radiance * max(dot(normal, direction_attenuation.xyz), 0.0) * 0.15 / 3.14159265;
+        } else {
+            lit += direct_pbr(
+                normal, view, direction_attenuation.xyz, radiance,
+                diffuse_color, metallic, roughness, f0, face_band
+            );
         }
     }
     // Scenes without authored lighting retain the earlier studio setup.
@@ -301,7 +327,7 @@ fn fs_main_gbuffer(input: VertexOut) -> SurfaceGbufferOutput {
     params = instance_params[input.instance_id];
     let color = shade_surface(input);
     // Match shade_surface so the reflection normal uses the same two-sided side.
-    let gbuffer_view = normalize(params.camera0.xyz - input.world_position);
+    let gbuffer_view = select(normalize(params.camera0.xyz - input.world_position), -params.camera3.xyz, params.camera3.w > 0.5);
     var geometric_normal = normalize(input.normal);
     if (params.material8.y > 0.5 && dot(geometric_normal, gbuffer_view) < 0.0) {
         geometric_normal = -geometric_normal;
@@ -373,7 +399,7 @@ fn fs_transmissive(input: VertexOut) -> @location(0) vec4<f32> {
     let screen_uv = input.pos.xy / params.canvas.xy;
     var view_normal = normalize(input.normal);
     if (params.material8.y > 0.5
-        && dot(view_normal, normalize(params.camera0.xyz - input.world_position)) < 0.0) {
+        && dot(view_normal, select(normalize(params.camera0.xyz - input.world_position), -params.camera3.xyz, params.camera3.w > 0.5)) < 0.0) {
         view_normal = -view_normal;
     }
     let refractive_scale = (1.0 - 1.0 / ior) *
@@ -403,7 +429,7 @@ fn fs_transmissive(input: VertexOut) -> @location(0) vec4<f32> {
         clamp(params.material7.rgb, vec3<f32>(0.0001), vec3<f32>(1.0)),
         vec3<f32>(optical_distance)
     );
-    let view = normalize(params.camera0.xyz - input.world_position);
+    let view = select(normalize(params.camera0.xyz - input.world_position), -params.camera3.xyz, params.camera3.w > 0.5);
     let ior_ratio = (ior - 1.0) / (ior + 1.0);
     let f0 = ior_ratio * ior_ratio;
     let fresnel = f0 + (1.0 - f0) * pow(1.0 - abs(dot(view_normal, view)), 5.0);
@@ -439,7 +465,7 @@ fn fs_background(input: BackgroundVertexOut) -> @location(0) vec4<f32> {
         discard;
     }
     let ndc = input.uv * 2.0 - vec2<f32>(1.0);
-    let aspect = max(lighting.camera3.w, 0.001);
+    let aspect = max(abs(lighting.camera3.w), 0.001);
     let direction = normalize(
         lighting.camera3.xyz +
         lighting.camera1.xyz * ndc.x * aspect +

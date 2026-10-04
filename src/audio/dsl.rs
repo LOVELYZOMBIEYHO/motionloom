@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/audio/dsl.rs
+// src/audio/dsl.rs
 
 // Audio has independent sample-accurate timing while retaining the existing Key attributes.
 use super::*;

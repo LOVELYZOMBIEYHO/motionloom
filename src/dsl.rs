@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/dsl.rs
+// src/dsl.rs
 
 use crate::dsl_syntax::{
     closing_tag_name, find_tag_end_byte, is_raw_self_closing_tag, opening_tag_name,
@@ -177,6 +177,9 @@ pub struct GraphAssetNode {
     pub id: String,
     pub kind: GraphAssetKind,
     pub source: GraphAssetSource,
+    /// Native composition recipe for a mannequin body and a replacement head.
+    #[serde(default)]
+    pub head_swap: Option<HeadSwapAssetNode>,
     #[serde(default)]
     pub decoder: Option<String>,
     #[serde(default)]
@@ -187,6 +190,24 @@ pub struct GraphAssetNode {
     /// Optional named clip selected from a multi-animation GLB.
     #[serde(default)]
     pub clip: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadSwapAssetNode {
+    pub body: String,
+    pub head: Option<String>,
+    pub head_scene: Option<String>,
+    pub head_object: Option<String>,
+    pub head_frame: u32,
+    pub scale: f32,
+    pub center_y: Option<f32>,
+    pub head_offset_y: f32,
+    pub center_z: f32,
+    pub cut_y: f32,
+    pub weighted_cut_y: f32,
+    pub palette: String,
+    pub neck_part: usize,
 }
 
 /// A Graph asset is either externally resolved data or typed engine geometry.
@@ -4056,7 +4077,7 @@ fn parse_assets_block(
             .any(|name| starts_open_tag(line, name))
         {
             return Err(GraphParseError { line: i + 1,
-                message: "Removed geometry asset syntax. Use GeometryAsset with Primitive/Sweep and a material-bound MeshAsset reference. See GEOMETRY_ASSETS.md.".into() });
+                message: "Removed geometry asset syntax. Use GeometryAsset with Primitive/Sweep and a material-bound MeshAsset reference. See docs/GEOMETRY_ASSETS.md.".into() });
         }
         let (kind, tag_name) = if starts_open_tag(line, "VideoAsset") {
             (GraphAssetKind::Video, "VideoAsset")
@@ -4064,6 +4085,8 @@ fn parse_assets_block(
             (GraphAssetKind::Image, "ImageAsset")
         } else if starts_open_tag(line, "ModelAsset") {
             (GraphAssetKind::Model, "ModelAsset")
+        } else if starts_open_tag(line, "HeadSwapAsset") {
+            (GraphAssetKind::Model, "HeadSwapAsset")
         } else if starts_open_tag(line, "AudioAsset") {
             (GraphAssetKind::Audio, "AudioAsset")
         } else if starts_open_tag(line, "AnimationAsset") {
@@ -4088,6 +4111,7 @@ fn parse_assets_block(
                 id: compound.id.clone(),
                 kind,
                 source: GraphAssetSource::Compound(compound),
+                head_swap: None,
                 decoder: None,
                 color_space: None,
                 profile: None,
@@ -4114,12 +4138,95 @@ fn parse_assets_block(
             });
         }
         let id = strip_wrappers(&required_attr_value(&tag, "id", i + 1)?).to_string();
+        let head_swap = if tag_name == "HeadSwapAsset" {
+            // Keep the complete recipe so rendering can compose from source assets.
+            let body = strip_wrappers(&required_attr_value(&tag, "body", i + 1)?).to_string();
+            let number = |name: &str, default: f32| -> Result<f32, GraphParseError> {
+                let Some(raw) = attr_value(&tag, name) else {
+                    return Ok(default);
+                };
+                let value = strip_wrappers(&raw)
+                    .parse::<f32>()
+                    .map_err(|_| GraphParseError {
+                        line: i + 1,
+                        message: format!("HeadSwapAsset.{name} must be numeric."),
+                    })?;
+                if !value.is_finite() {
+                    return Err(GraphParseError {
+                        line: i + 1,
+                        message: format!("HeadSwapAsset.{name} must be finite."),
+                    });
+                }
+                Ok(value)
+            };
+            let has_scene = attr_value(&tag, "headScene").is_some();
+            let has_asset = attr_value(&tag, "head").is_some();
+            if has_scene == has_asset {
+                return Err(GraphParseError {
+                    line: i + 1,
+                    message: "HeadSwapAsset requires exactly one of headScene or head.".to_string(),
+                });
+            }
+            let integer = |name: &str, default: usize| -> Result<usize, GraphParseError> {
+                attr_value(&tag, name).map_or(Ok(default), |raw| {
+                    strip_wrappers(&raw)
+                        .parse::<usize>()
+                        .map_err(|_| GraphParseError {
+                            line: i + 1,
+                            message: format!("HeadSwapAsset.{name} must be a nonnegative integer."),
+                        })
+                })
+            };
+            required_attr_value(&tag, "scale", i + 1)?;
+            let frame = u32::try_from(integer("headFrame", 0)?).map_err(|_| GraphParseError {
+                line: i + 1,
+                message: "HeadSwapAsset.headFrame is too large.".to_string(),
+            })?;
+            let spec = HeadSwapAssetNode {
+                body,
+                head: attr_value(&tag, "head").map(|v| strip_wrappers(&v).to_string()),
+                head_scene: attr_value(&tag, "headScene").map(|v| strip_wrappers(&v).to_string()),
+                head_object: attr_value(&tag, "headObject").map(|v| strip_wrappers(&v).to_string()),
+                head_frame: frame,
+                scale: number("scale", 1.0)?,
+                center_y: attr_value(&tag, "centerY")
+                    .map(|_| number("centerY", 0.0))
+                    .transpose()?,
+                head_offset_y: number("headOffsetY", 0.0813)?,
+                center_z: number("centerZ", 0.0)?,
+                cut_y: number("cutY", 1.56)?,
+                weighted_cut_y: number("weightedCutY", 1.49)?,
+                palette: attr_value(&tag, "palette").map_or_else(
+                    || "original".to_string(),
+                    |v| strip_wrappers(&v).to_string(),
+                ),
+                neck_part: integer("neckPart", 0)?,
+            };
+            if spec.body.trim().is_empty()
+                || spec.scale <= 0.0
+                || spec.cut_y < spec.weighted_cut_y
+                || !matches!(spec.palette.as_str(), "original" | "cohesive")
+            {
+                return Err(GraphParseError { line: i + 1,
+                    message: "HeadSwapAsset needs a body, scale > 0, cutY >= weightedCutY, and palette=original|cohesive.".to_string() });
+            }
+            Some(spec)
+        } else {
+            None
+        };
         let source = if tag_name == "TerrainAsset" {
             GraphAssetSource::Terrain(parse_terrain_asset(&tag, &id, i + 1)?)
         } else if tag_name == "VegetationAsset" {
             GraphAssetSource::Vegetation(parse_vegetation_asset(&tag, &id, i + 1)?)
         } else {
-            let src = strip_wrappers(&required_attr_value(&tag, "src", i + 1)?).to_string();
+            let src = if tag_name == "HeadSwapAsset" {
+                attr_value(&tag, "src").map_or_else(
+                    || format!("motionloom:headswap:{id}"),
+                    |v| strip_wrappers(&v).to_string(),
+                )
+            } else {
+                strip_wrappers(&required_attr_value(&tag, "src", i + 1)?).to_string()
+            };
             if src.starts_with("motionloom:box:") {
                 return Err(GraphParseError {
                     line: i + 1,
@@ -4132,6 +4239,7 @@ fn parse_assets_block(
             id,
             kind,
             source,
+            head_swap,
             decoder: attr_value(&tag, "decoder").map(|v| strip_wrappers(&v).to_string()),
             color_space: attr_value(&tag, "colorSpace")
                 .or_else(|| attr_value(&tag, "color_space"))
@@ -14364,5 +14472,58 @@ Font note: this is not a structured XML comment.
         )
         .expect_err("zero-length curve segments must fail");
         assert!(degenerate.message.contains("zero-length segment"));
+    }
+
+    #[test]
+    fn head_swap_asset_keeps_model_asset_compatibility() {
+        let script = r##"<Graph fps={24} duration="1s" size={[64,64]}>
+  <Assets>
+    <ModelAsset id="original" src="character2.glb" />
+    <HeadSwapAsset id="swapped" body="character2" head="head.glb"
+      src="character2-s86-head.glb" scale="0.148" centerY="1.65" />
+  </Assets>
+  <Scene id="main">
+    <Timeline>
+      <Track>
+        <Sequence duration="1s">
+          <Layer><Rect x="0" y="0" width="64" height="64" color="#000000" /></Layer>
+        </Sequence>
+      </Track>
+    </Timeline>
+  </Scene>
+  <Present from="main" />
+</Graph>"##;
+        let graph = parse_graph_script(script).expect("both asset forms should parse");
+        assert_eq!(graph.assets.len(), 2);
+        assert_eq!(graph.assets[0].external_src(), Some("character2.glb"));
+        assert_eq!(
+            graph.assets[1].external_src(),
+            Some("character2-s86-head.glb")
+        );
+        assert_eq!(
+            graph.assets[1].head_swap.as_ref().unwrap().body,
+            "character2"
+        );
+
+        let native = script
+            .replace("src=\"character2-s86-head.glb\"", "")
+            .replace("centerY=\"1.65\"", "headOffsetY=\"0.0813\"");
+        let native_graph = parse_graph_script(&native).expect("native recipe needs no src");
+        assert!(native_graph.assets[1].head_swap.is_some());
+        assert_eq!(
+            native_graph.assets[1].head_swap.as_ref().unwrap().center_y,
+            None
+        );
+        assert_eq!(
+            native_graph.assets[1].external_src(),
+            Some("motionloom:headswap:swapped")
+        );
+
+        let invalid = script.replace("head=\"head.glb\"", "");
+        let error = parse_graph_script(&invalid).expect_err("head source is required");
+        assert!(error.message.contains("exactly one of headScene or head"));
+        let negative = script.replace("scale=\"0.148\"", "scale=\"-1\"");
+        let error = parse_graph_script(&negative).expect_err("negative scale must fail");
+        assert!(error.message.contains("scale > 0"));
     }
 }

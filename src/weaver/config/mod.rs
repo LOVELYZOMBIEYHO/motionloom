@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/config/mod.rs
+// src/weaver/config/mod.rs
 
 mod job;
 mod presets;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/mod.rs
+// src/world/mod.rs
 
 pub mod dsl;
 pub mod error;

@@ -1,6 +1,6 @@
 # =========================================
 # =========================================
-# crates/motionloom/tools/migrate_geometry_assets.py
+# tools/migrate_geometry_assets.py
 """One-shot offline migration. The runtime never loads the removed DSL forms."""
 from pathlib import Path
 import re, json, argparse, hashlib

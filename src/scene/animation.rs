@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/animation.rs
+// src/scene/animation.rs
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

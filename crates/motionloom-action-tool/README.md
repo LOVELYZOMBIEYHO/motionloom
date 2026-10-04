@@ -22,7 +22,7 @@ The existing DSL version and tags are unchanged.
 
 ## Inspect
 
-Run from the `anica` repository root:
+Run from the `motionloom` repository root:
 
 ```sh
 cargo run -p motionloom-action-tool -- inspect \
@@ -73,7 +73,7 @@ intent, or reliable locks from every acrobatic clip.
 
 ## Convert for Character1 (experimental candidate)
 
-Run from `anica`. Keep this output separate from the old Action and the published
+Run from `motionloom`. Keep this output separate from the old Action and the published
 library until the acceptance checks in [TARGET_FIDELITY.md](TARGET_FIDELITY.md) pass.
 
 ```sh
@@ -122,7 +122,7 @@ run `scripts/verify-wasm.cjs`, then combine the matching reports without replaci
 either input:
 
 ```sh
-wasm-pack build crates/motionloom --dev --target nodejs \
+wasm-pack build . --dev --target nodejs \
   --out-dir /tmp/motionloom-pose-diagnostics-wasm -- --offline
 node crates/motionloom-action-tool/scripts/verify-wasm.cjs \
   /tmp/motionloom-pose-diagnostics-wasm/motionloom.js \

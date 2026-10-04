@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/lighting/mod.rs
+// src/weaver/lighting/mod.rs
 
 use crate::weaver::WeaverError;
 use std::path::Path;

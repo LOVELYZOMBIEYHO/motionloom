@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/scene/mod.rs
+// src/weaver/scene/mod.rs
 
 use crate::experimental::geometry::ResolvedMesh;
 use crate::scene::compositor::{ResolvedCompositionLayer, SceneCompositionPlan};

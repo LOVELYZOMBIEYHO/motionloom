@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/rigid.rs
+// src/simulation/rigid.rs
 
 use std::collections::BTreeMap;
 

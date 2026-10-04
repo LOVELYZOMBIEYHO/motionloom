@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/pipeline.rs
+// src/world/render/pipeline.rs
 
 //! Shared surface-pipeline construction for every runtime shading mode.
 

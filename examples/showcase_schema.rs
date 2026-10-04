@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/showcase_schema.rs
+// examples/showcase_schema.rs
 
 use std::{env, fs};
 

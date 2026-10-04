@@ -2,12 +2,14 @@
 name = "motionloom-action-tool"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Offline FBX and glTF to canonical MotionLoom Action authoring tool."
+repository = "https://github.com/LOVELYZOMBIEYHO/motionloom"
+readme = "README.md"
 
 [dependencies]
-motionloom = { path = "../motionloom" }
+motionloom = { version = "0.1.0", path = "../.." }
 draco-io = { version = "0.3.0", default-features = false, features = ["fbx-reader", "compression"] }
 tempfile = "3.24.0"
 thiserror = "2.0.17"

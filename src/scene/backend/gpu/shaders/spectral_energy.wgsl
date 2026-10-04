@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/backend/gpu/shaders/spectral_energy.wgsl
+// src/scene/backend/gpu/shaders/spectral_energy.wgsl
 
 struct SpectralEnergyParams {
     canvas: vec4<f32>,

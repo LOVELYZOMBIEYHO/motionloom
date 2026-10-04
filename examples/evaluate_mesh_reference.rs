@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/evaluate_mesh_reference.rs
+// examples/evaluate_mesh_reference.rs
 
 use motionloom::api::mesh_reference::{
     ImageReferenceAnalysis, MESH_REFERENCE_SCHEMA_VERSION, MeshReferenceOptions, MeshReferenceSet,

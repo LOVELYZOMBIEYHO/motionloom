@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/denoise/mod.rs
+// src/weaver/denoise/mod.rs
 
 //! Optional OIDN C API adapter. No dependency on another application's renderer.
 use crate::weaver::WeaverError;

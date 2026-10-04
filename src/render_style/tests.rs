@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/render_style/tests.rs
+// src/render_style/tests.rs
 
 //! Module-boundary regression tests for render-style parsing and resolution.
 

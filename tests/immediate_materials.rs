@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/immediate_materials.rs
+// tests/immediate_materials.rs
 
 #![cfg(not(target_arch = "wasm32"))]
 

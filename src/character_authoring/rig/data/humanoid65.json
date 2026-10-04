@@ -1,0 +1,2241 @@
+{
+  "schemaVersion": 1,
+  "standardId": "humanoid65_v1",
+  "license": "CC0-1.0",
+  "source": "Quaternius Universal Animation Library / Universal Animation Library 2",
+  "sourceUrl": "https://quaternius.com/packs/universalanimationlibrary.html",
+  "coordinateSystem": "rightHandedYUp",
+  "positionUnits": "fractionOfMeshHeight",
+  "references": [
+    {
+      "id": "character1",
+      "sha256": "69591853d817488edaa8fd9bf8fc1d821eaeaf789f8627b3cd23b41c4ed67997",
+      "sourceHeight": 1.8287165346555412,
+      "joints": [
+        {
+          "id": "root",
+          "referenceName": "root",
+          "parent": null,
+          "endpoint": false,
+          "position": [
+            0.0,
+            -0.000252331,
+            -0.011289416
+          ],
+          "rotation": [
+            -0.707106781,
+            0.0,
+            0.0,
+            0.707106781
+          ]
+        },
+        {
+          "id": "hips",
+          "referenceName": "pelvis",
+          "parent": "root",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.50102819,
+            -0.038685677
+          ],
+          "rotation": [
+            0.12584079,
+            0.0,
+            0.0,
+            0.99205045
+          ]
+        },
+        {
+          "id": "spine",
+          "referenceName": "spine_01",
+          "parent": "hips",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.574194283,
+            -0.019819993
+          ],
+          "rotation": [
+            0.061388837,
+            0.0,
+            0.0,
+            0.998113927
+          ]
+        },
+        {
+          "id": "chest",
+          "referenceName": "spine_02",
+          "parent": "spine",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.641509239,
+            -0.011508151
+          ],
+          "rotation": [
+            -0.015928837,
+            0.0,
+            0.0,
+            0.999873128
+          ]
+        },
+        {
+          "id": "upper_chest",
+          "referenceName": "spine_03",
+          "parent": "chest",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.718721956,
+            -0.013968894
+          ],
+          "rotation": [
+            -0.016197394,
+            0.0,
+            0.0,
+            0.999868814
+          ]
+        },
+        {
+          "id": "neck",
+          "referenceName": "neck_01",
+          "parent": "upper_chest",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.813214479,
+            -0.017031155
+          ],
+          "rotation": [
+            0.094874026,
+            0.0,
+            0.0,
+            0.995489286
+          ]
+        },
+        {
+          "id": "head",
+          "referenceName": "Head",
+          "parent": "neck",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.857562533,
+            -0.008500581
+          ],
+          "rotation": [
+            0.016260603,
+            0.0,
+            0.0,
+            0.999867788
+          ]
+        },
+        {
+          "id": "shoulder_l",
+          "referenceName": "clavicle_l",
+          "parent": "upper_chest",
+          "endpoint": false,
+          "position": [
+            0.010280434,
+            0.796973576,
+            0.027754359
+          ],
+          "rotation": [
+            -0.61404124,
+            -0.350835642,
+            -0.351081102,
+            0.613685398
+          ]
+        },
+        {
+          "id": "upper_arm_l",
+          "referenceName": "upperarm_l",
+          "parent": "shoulder_l",
+          "endpoint": false,
+          "position": [
+            0.104936973,
+            0.787622731,
+            -0.04705222
+          ],
+          "rotation": [
+            -0.006040629,
+            0.006069509,
+            -0.707080987,
+            0.707080724
+          ]
+        },
+        {
+          "id": "forearm_l",
+          "referenceName": "lowerarm_l",
+          "parent": "upper_arm_l",
+          "endpoint": false,
+          "position": [
+            0.254987576,
+            0.78762271,
+            -0.049622313
+          ],
+          "rotation": [
+            0.00609514,
+            -0.006095046,
+            -0.707080508,
+            0.707080515
+          ]
+        },
+        {
+          "id": "hand_l",
+          "referenceName": "hand_l",
+          "parent": "forearm_l",
+          "endpoint": false,
+          "position": [
+            0.4040539,
+            0.787622698,
+            -0.047052188
+          ],
+          "rotation": [
+            -1.92e-07,
+            -3.05e-07,
+            -0.707106779,
+            0.707106784
+          ]
+        },
+        {
+          "id": "index_1_l",
+          "referenceName": "index_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.469618965,
+            0.786529134,
+            -0.030155076
+          ],
+          "rotation": [
+            0.500001809,
+            0.500001801,
+            -0.499998187,
+            0.499998203
+          ]
+        },
+        {
+          "id": "index_2_l",
+          "referenceName": "index_02_l",
+          "parent": "index_1_l",
+          "endpoint": false,
+          "position": [
+            0.491875017,
+            0.786529127,
+            -0.030155074
+          ],
+          "rotation": [
+            0.500001804,
+            0.500001796,
+            -0.499998192,
+            0.499998207
+          ]
+        },
+        {
+          "id": "index_3_l",
+          "referenceName": "index_03_l",
+          "parent": "index_2_l",
+          "endpoint": false,
+          "position": [
+            0.510904781,
+            0.78652912,
+            -0.030155073
+          ],
+          "rotation": [
+            0.500001804,
+            0.500001796,
+            -0.499998192,
+            0.499998207
+          ]
+        },
+        {
+          "id": "index_end_l",
+          "referenceName": "index_04_leaf_l",
+          "parent": "index_3_l",
+          "endpoint": true,
+          "position": [
+            0.527364466,
+            0.786529114,
+            -0.030155075
+          ],
+          "rotation": [
+            0.500000018,
+            0.500000033,
+            0.499999978,
+            -0.49999997
+          ]
+        },
+        {
+          "id": "middle_1_l",
+          "referenceName": "middle_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.470548573,
+            0.787841554,
+            -0.044208649
+          ],
+          "rotation": [
+            0.488051899,
+            0.511672659,
+            -0.511669173,
+            0.488048248
+          ]
+        },
+        {
+          "id": "middle_2_l",
+          "referenceName": "middle_02_l",
+          "parent": "middle_1_l",
+          "endpoint": false,
+          "position": [
+            0.493679544,
+            0.787841542,
+            -0.04530231
+          ],
+          "rotation": [
+            0.488825776,
+            0.510933378,
+            -0.510929895,
+            0.488822142
+          ]
+        },
+        {
+          "id": "middle_3_l",
+          "referenceName": "middle_03_l",
+          "parent": "middle_2_l",
+          "endpoint": false,
+          "position": [
+            0.512217122,
+            0.787841454,
+            -0.046122556
+          ],
+          "rotation": [
+            0.488248287,
+            0.511485254,
+            -0.511481776,
+            0.488244649
+          ]
+        },
+        {
+          "id": "middle_end_l",
+          "referenceName": "middle_04_leaf_l",
+          "parent": "middle_3_l",
+          "endpoint": true,
+          "position": [
+            0.531028125,
+            0.787841439,
+            -0.046997486
+          ],
+          "rotation": [
+            0.511483563,
+            0.488246512,
+            0.488246415,
+            -0.511483476
+          ]
+        },
+        {
+          "id": "pinky_1_l",
+          "referenceName": "pinky_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.462947624,
+            0.786747908,
+            -0.069362909
+          ],
+          "rotation": [
+            0.48295806,
+            0.516483373,
+            -0.516479926,
+            0.48295437
+          ]
+        },
+        {
+          "id": "pinky_2_l",
+          "referenceName": "pinky_02_l",
+          "parent": "pinky_1_l",
+          "endpoint": false,
+          "position": [
+            0.484930256,
+            0.786747909,
+            -0.070839355
+          ],
+          "rotation": [
+            0.482527002,
+            0.516886104,
+            -0.51688267,
+            0.48252332
+          ]
+        },
+        {
+          "id": "pinky_3_l",
+          "referenceName": "pinky_03_l",
+          "parent": "pinky_2_l",
+          "endpoint": false,
+          "position": [
+            0.500022816,
+            0.786747785,
+            -0.07187833
+          ],
+          "rotation": [
+            0.482841964,
+            0.516591899,
+            -0.516588462,
+            0.482838284
+          ]
+        },
+        {
+          "id": "pinky_end_l",
+          "referenceName": "pinky_04_leaf_l",
+          "parent": "pinky_3_l",
+          "endpoint": true,
+          "position": [
+            0.515388805,
+            0.786747722,
+            -0.07291731
+          ],
+          "rotation": [
+            0.516590237,
+            0.482840158,
+            0.482840065,
+            -0.516590147
+          ]
+        },
+        {
+          "id": "ring_1_l",
+          "referenceName": "ring_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.469181493,
+            0.787677479,
+            -0.056402999
+          ],
+          "rotation": [
+            0.491021001,
+            0.508824078,
+            -0.508820573,
+            0.491017371
+          ]
+        },
+        {
+          "id": "ring_2_l",
+          "referenceName": "ring_02_l",
+          "parent": "ring_1_l",
+          "endpoint": false,
+          "position": [
+            0.490672001,
+            0.787677534,
+            -0.057168559
+          ],
+          "rotation": [
+            0.491027199,
+            0.508818088,
+            -0.508814591,
+            0.491023579
+          ]
+        },
+        {
+          "id": "ring_3_l",
+          "referenceName": "ring_03_l",
+          "parent": "ring_2_l",
+          "endpoint": false,
+          "position": [
+            0.507569084,
+            0.787677589,
+            -0.057770071
+          ],
+          "rotation": [
+            0.490483982,
+            0.509341752,
+            -0.509338259,
+            0.490480358
+          ]
+        },
+        {
+          "id": "ring_end_l",
+          "referenceName": "ring_04_leaf_l",
+          "parent": "ring_3_l",
+          "endpoint": true,
+          "position": [
+            0.524958304,
+            0.787677652,
+            -0.058426267
+          ],
+          "rotation": [
+            0.509340051,
+            0.490482217,
+            0.490482121,
+            -0.509339962
+          ]
+        },
+        {
+          "id": "thumb_1_l",
+          "referenceName": "thumb_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.418982363,
+            0.775155041,
+            -0.028678636
+          ],
+          "rotation": [
+            0.843725057,
+            0.493830309,
+            0.105964867,
+            0.181744603
+          ]
+        },
+        {
+          "id": "thumb_2_l",
+          "referenceName": "thumb_02_l",
+          "parent": "thumb_1_l",
+          "endpoint": false,
+          "position": [
+            0.437683987,
+            0.764655902,
+            -0.01899975
+          ],
+          "rotation": [
+            0.843731905,
+            0.49376201,
+            0.105978071,
+            0.181890623
+          ]
+        },
+        {
+          "id": "thumb_3_l",
+          "referenceName": "thumb_03_l",
+          "parent": "thumb_2_l",
+          "endpoint": false,
+          "position": [
+            0.459010339,
+            0.752680209,
+            -0.007953749
+          ],
+          "rotation": [
+            0.843503939,
+            0.49425459,
+            0.105826558,
+            0.181698221
+          ]
+        },
+        {
+          "id": "thumb_end_l",
+          "referenceName": "thumb_04_leaf_l",
+          "parent": "thumb_3_l",
+          "endpoint": true,
+          "position": [
+            0.476782314,
+            0.742727817,
+            0.001233032
+          ],
+          "rotation": [
+            0.673895405,
+            0.518230933,
+            0.518230996,
+            -0.093478971
+          ]
+        },
+        {
+          "id": "shoulder_r",
+          "referenceName": "clavicle_r",
+          "parent": "upper_chest",
+          "endpoint": false,
+          "position": [
+            -0.010280434,
+            0.796973576,
+            0.027754359
+          ],
+          "rotation": [
+            -0.61404124,
+            0.350835642,
+            0.351081102,
+            0.613685398
+          ]
+        },
+        {
+          "id": "upper_arm_r",
+          "referenceName": "upperarm_r",
+          "parent": "shoulder_r",
+          "endpoint": false,
+          "position": [
+            -0.104936973,
+            0.787622731,
+            -0.04705222
+          ],
+          "rotation": [
+            -0.006040629,
+            -0.006069509,
+            0.707080987,
+            0.707080724
+          ]
+        },
+        {
+          "id": "forearm_r",
+          "referenceName": "lowerarm_r",
+          "parent": "upper_arm_r",
+          "endpoint": false,
+          "position": [
+            -0.25498756,
+            0.787622641,
+            -0.049622316
+          ],
+          "rotation": [
+            0.00609515,
+            0.006095057,
+            0.707080507,
+            0.707080516
+          ]
+        },
+        {
+          "id": "hand_r",
+          "referenceName": "hand_r",
+          "parent": "forearm_r",
+          "endpoint": false,
+          "position": [
+            -0.404053834,
+            0.787622624,
+            -0.047052185
+          ],
+          "rotation": [
+            -2.65e-07,
+            4e-07,
+            0.707106778,
+            0.707106785
+          ]
+        },
+        {
+          "id": "index_1_r",
+          "referenceName": "index_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.469618915,
+            0.786529066,
+            -0.030155071
+          ],
+          "rotation": [
+            0.500001799,
+            -0.500001777,
+            0.499998196,
+            0.499998228
+          ]
+        },
+        {
+          "id": "index_2_r",
+          "referenceName": "index_02_r",
+          "parent": "index_1_r",
+          "endpoint": false,
+          "position": [
+            -0.491875019,
+            0.786529125,
+            -0.030155072
+          ],
+          "rotation": [
+            0.500001801,
+            -0.500001779,
+            0.499998195,
+            0.499998226
+          ]
+        },
+        {
+          "id": "index_3_r",
+          "referenceName": "index_03_r",
+          "parent": "index_2_r",
+          "endpoint": false,
+          "position": [
+            -0.510904769,
+            0.786529183,
+            -0.030155073
+          ],
+          "rotation": [
+            0.500001801,
+            -0.500001779,
+            0.499998195,
+            0.499998226
+          ]
+        },
+        {
+          "id": "index_end_r",
+          "referenceName": "index_04_leaf_r",
+          "parent": "index_3_r",
+          "endpoint": true,
+          "position": [
+            -0.527364378,
+            0.786529176,
+            -0.030155072
+          ],
+          "rotation": [
+            0.500000021,
+            -0.500000052,
+            -0.499999975,
+            -0.499999953
+          ]
+        },
+        {
+          "id": "middle_1_r",
+          "referenceName": "middle_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.47054852,
+            0.787841485,
+            -0.044208644
+          ],
+          "rotation": [
+            0.48805189,
+            -0.511672633,
+            0.511669181,
+            0.488048275
+          ]
+        },
+        {
+          "id": "middle_2_r",
+          "referenceName": "middle_02_r",
+          "parent": "middle_1_r",
+          "endpoint": false,
+          "position": [
+            -0.493679508,
+            0.787841537,
+            -0.045302305
+          ],
+          "rotation": [
+            0.488825775,
+            -0.510933358,
+            0.510929897,
+            0.488822162
+          ]
+        },
+        {
+          "id": "middle_3_r",
+          "referenceName": "middle_03_r",
+          "parent": "middle_2_r",
+          "endpoint": false,
+          "position": [
+            -0.512217103,
+            0.787841514,
+            -0.04612255
+          ],
+          "rotation": [
+            0.488248287,
+            -0.511485234,
+            0.511481777,
+            0.48824467
+          ]
+        },
+        {
+          "id": "middle_end_r",
+          "referenceName": "middle_04_leaf_r",
+          "parent": "middle_3_r",
+          "endpoint": true,
+          "position": [
+            -0.531028122,
+            0.787841499,
+            -0.04699748
+          ],
+          "rotation": [
+            0.511483565,
+            -0.488246533,
+            -0.488246414,
+            -0.511483456
+          ]
+        },
+        {
+          "id": "pinky_1_r",
+          "referenceName": "pinky_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.462947572,
+            0.786747836,
+            -0.069362903
+          ],
+          "rotation": [
+            0.482958051,
+            -0.516483347,
+            0.516479937,
+            0.482954395
+          ]
+        },
+        {
+          "id": "pinky_2_r",
+          "referenceName": "pinky_02_r",
+          "parent": "pinky_1_r",
+          "endpoint": false,
+          "position": [
+            -0.484930185,
+            0.786747837,
+            -0.070839345
+          ],
+          "rotation": [
+            0.482527004,
+            -0.516886081,
+            0.51688267,
+            0.482523342
+          ]
+        },
+        {
+          "id": "pinky_3_r",
+          "referenceName": "pinky_03_r",
+          "parent": "pinky_2_r",
+          "endpoint": false,
+          "position": [
+            -0.500022758,
+            0.786747843,
+            -0.071878321
+          ],
+          "rotation": [
+            0.482841965,
+            -0.516591877,
+            0.516588464,
+            0.482838305
+          ]
+        },
+        {
+          "id": "pinky_end_r",
+          "referenceName": "pinky_04_leaf_r",
+          "parent": "pinky_3_r",
+          "endpoint": true,
+          "position": [
+            -0.515388728,
+            0.786747909,
+            -0.072917298
+          ],
+          "rotation": [
+            0.51659024,
+            -0.482840178,
+            -0.482840065,
+            -0.516590126
+          ]
+        },
+        {
+          "id": "ring_1_r",
+          "referenceName": "ring_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.469181445,
+            0.787677408,
+            -0.056402993
+          ],
+          "rotation": [
+            0.491020948,
+            -0.508824013,
+            0.508820623,
+            0.491017439
+          ]
+        },
+        {
+          "id": "ring_2_r",
+          "referenceName": "ring_02_r",
+          "parent": "ring_1_r",
+          "endpoint": false,
+          "position": [
+            -0.49067197,
+            0.787677527,
+            -0.057168555
+          ],
+          "rotation": [
+            0.491027153,
+            -0.508818028,
+            0.508814636,
+            0.49102364
+          ]
+        },
+        {
+          "id": "ring_3_r",
+          "referenceName": "ring_03_r",
+          "parent": "ring_2_r",
+          "endpoint": false,
+          "position": [
+            -0.507569069,
+            0.787677582,
+            -0.057770069
+          ],
+          "rotation": [
+            0.490483936,
+            -0.509341692,
+            0.509338304,
+            0.490480419
+          ]
+        },
+        {
+          "id": "ring_end_r",
+          "referenceName": "ring_04_leaf_r",
+          "parent": "ring_3_r",
+          "endpoint": true,
+          "position": [
+            -0.524958306,
+            0.787677579,
+            -0.058426265
+          ],
+          "rotation": [
+            0.509340097,
+            -0.490482277,
+            -0.490482074,
+            -0.509339902
+          ]
+        },
+        {
+          "id": "thumb_1_r",
+          "referenceName": "thumb_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.418982315,
+            0.775154974,
+            -0.028678631
+          ],
+          "rotation": [
+            0.843725064,
+            -0.493830287,
+            -0.105964783,
+            0.181744682
+          ]
+        },
+        {
+          "id": "thumb_2_r",
+          "referenceName": "thumb_02_r",
+          "parent": "thumb_1_r",
+          "endpoint": false,
+          "position": [
+            -0.437683955,
+            0.764655828,
+            -0.018999701
+          ],
+          "rotation": [
+            0.843731875,
+            -0.493762068,
+            -0.105978029,
+            0.181890627
+          ]
+        },
+        {
+          "id": "thumb_3_r",
+          "referenceName": "thumb_03_r",
+          "parent": "thumb_2_r",
+          "endpoint": false,
+          "position": [
+            -0.459010337,
+            0.752680236,
+            -0.007953733
+          ],
+          "rotation": [
+            0.843503904,
+            -0.494254644,
+            -0.105826604,
+            0.181698212
+          ]
+        },
+        {
+          "id": "thumb_end_r",
+          "referenceName": "thumb_04_leaf_r",
+          "parent": "thumb_3_r",
+          "endpoint": true,
+          "position": [
+            -0.476782389,
+            0.742727976,
+            0.00123303
+          ],
+          "rotation": [
+            0.673895421,
+            -0.518230985,
+            -0.51823093,
+            -0.093478934
+          ]
+        },
+        {
+          "id": "upper_leg_l",
+          "referenceName": "thigh_l",
+          "parent": "hips",
+          "endpoint": false,
+          "position": [
+            0.048668014,
+            0.509449409,
+            -0.010523855
+          ],
+          "rotation": [
+            0.999993885,
+            0.0,
+            0.0,
+            -0.003497196
+          ]
+        },
+        {
+          "id": "lower_leg_l",
+          "referenceName": "calf_l",
+          "parent": "upper_leg_l",
+          "endpoint": false,
+          "position": [
+            0.048668018,
+            0.290552743,
+            -0.012054957
+          ],
+          "rotation": [
+            0.999196444,
+            5.261e-06,
+            -0.000131156,
+            -0.040080538
+          ]
+        },
+        {
+          "id": "foot_l",
+          "referenceName": "foot_l",
+          "parent": "lower_leg_l",
+          "endpoint": false,
+          "position": [
+            0.048668014,
+            0.056454167,
+            -0.030865935
+          ],
+          "rotation": [
+            0.869100537,
+            -0.000256172,
+            -0.000450107,
+            0.494635207
+          ]
+        },
+        {
+          "id": "toe_l",
+          "referenceName": "ball_l",
+          "parent": "foot_l",
+          "endpoint": false,
+          "position": [
+            0.048668016,
+            0.008059581,
+            0.050611982
+          ],
+          "rotation": [
+            1.4e-08,
+            -0.707106876,
+            -0.707106687,
+            1.4e-08
+          ]
+        },
+        {
+          "id": "toe_end_l",
+          "referenceName": "ball_leaf_l",
+          "parent": "toe_l",
+          "endpoint": true,
+          "position": [
+            0.048668012,
+            0.008059591,
+            0.093757015
+          ],
+          "rotation": [
+            -0.0,
+            -0.707106865,
+            -0.707106697,
+            0.0
+          ]
+        },
+        {
+          "id": "upper_leg_r",
+          "referenceName": "thigh_r",
+          "parent": "hips",
+          "endpoint": false,
+          "position": [
+            -0.048668014,
+            0.509449409,
+            -0.010523855
+          ],
+          "rotation": [
+            0.999993885,
+            0.0,
+            0.0,
+            -0.003497196
+          ]
+        },
+        {
+          "id": "lower_leg_r",
+          "referenceName": "calf_r",
+          "parent": "upper_leg_r",
+          "endpoint": false,
+          "position": [
+            -0.048668018,
+            0.290552743,
+            -0.012054957
+          ],
+          "rotation": [
+            0.999196444,
+            5.261e-06,
+            -0.000131156,
+            -0.040080538
+          ]
+        },
+        {
+          "id": "foot_r",
+          "referenceName": "foot_r",
+          "parent": "lower_leg_r",
+          "endpoint": false,
+          "position": [
+            -0.048668014,
+            0.056454199,
+            -0.030865932
+          ],
+          "rotation": [
+            0.869100537,
+            -0.000256172,
+            -0.000450107,
+            0.494635207
+          ]
+        },
+        {
+          "id": "toe_r",
+          "referenceName": "ball_r",
+          "parent": "foot_r",
+          "endpoint": false,
+          "position": [
+            -0.048668016,
+            0.008059613,
+            0.050611985
+          ],
+          "rotation": [
+            1.4e-08,
+            -0.707106876,
+            -0.707106687,
+            1.4e-08
+          ]
+        },
+        {
+          "id": "toe_end_r",
+          "referenceName": "ball_leaf_r",
+          "parent": "toe_r",
+          "endpoint": true,
+          "position": [
+            -0.048668011,
+            0.008059623,
+            0.093757018
+          ],
+          "rotation": [
+            -0.0,
+            -0.707106865,
+            -0.707106697,
+            0.0
+          ]
+        }
+      ],
+      "source": "Quaternius Universal Animation Library 1 Mannequin",
+      "sourceUrl": "https://quaternius.com/packs/universalanimationlibrary.html",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "character2",
+      "sha256": "2ee6cc3fe888d9b144afa8cc4b2ab7bfc5d13a0d5b7548df777f61f64ad65fa6",
+      "sourceHeight": 1.8061811290681362,
+      "joints": [
+        {
+          "id": "root",
+          "referenceName": "root",
+          "parent": null,
+          "endpoint": false,
+          "position": [
+            0.0,
+            -0.001123368,
+            -0.014814134
+          ],
+          "rotation": [
+            -0.707106781,
+            0.0,
+            0.0,
+            0.707106781
+          ]
+        },
+        {
+          "id": "hips",
+          "referenceName": "pelvis",
+          "parent": "root",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.506411542,
+            -0.042552213
+          ],
+          "rotation": [
+            0.12584079,
+            0.0,
+            0.0,
+            0.99205045
+          ]
+        },
+        {
+          "id": "spine",
+          "referenceName": "spine_01",
+          "parent": "hips",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.580490516,
+            -0.023451146
+          ],
+          "rotation": [
+            0.061388837,
+            0.0,
+            0.0,
+            0.998113927
+          ]
+        },
+        {
+          "id": "chest",
+          "referenceName": "spine_02",
+          "parent": "spine",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.648645348,
+            -0.015035598
+          ],
+          "rotation": [
+            -0.015928837,
+            0.0,
+            0.0,
+            0.999873128
+          ]
+        },
+        {
+          "id": "upper_chest",
+          "referenceName": "spine_03",
+          "parent": "chest",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.726821435,
+            -0.017527043
+          ],
+          "rotation": [
+            -0.016197394,
+            0.0,
+            0.0,
+            0.999868814
+          ]
+        },
+        {
+          "id": "neck",
+          "referenceName": "neck_01",
+          "parent": "upper_chest",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.822492925,
+            -0.020627512
+          ],
+          "rotation": [
+            0.094874026,
+            0.0,
+            0.0,
+            0.995489286
+          ]
+        },
+        {
+          "id": "head",
+          "referenceName": "Head",
+          "parent": "neck",
+          "endpoint": false,
+          "position": [
+            0.0,
+            0.867394302,
+            -0.011990503
+          ],
+          "rotation": [
+            0.016260603,
+            0.0,
+            0.0,
+            0.999867788
+          ]
+        },
+        {
+          "id": "shoulder_l",
+          "referenceName": "clavicle_l",
+          "parent": "upper_chest",
+          "endpoint": false,
+          "position": [
+            0.010408701,
+            0.806049387,
+            0.024716783
+          ],
+          "rotation": [
+            -0.639726584,
+            -0.301547716,
+            -0.301880155,
+            0.639286512
+          ]
+        },
+        {
+          "id": "upper_arm_l",
+          "referenceName": "upperarm_l",
+          "parent": "shoulder_l",
+          "endpoint": false,
+          "position": [
+            0.083881546,
+            0.796581846,
+            -0.051023145
+          ],
+          "rotation": [
+            -0.007503737,
+            0.007507403,
+            -0.707066909,
+            0.707066983
+          ]
+        },
+        {
+          "id": "forearm_l",
+          "referenceName": "lowerarm_l",
+          "parent": "upper_arm_l",
+          "endpoint": false,
+          "position": [
+            0.206437025,
+            0.796581877,
+            -0.0536253
+          ],
+          "rotation": [
+            0.00609583,
+            -0.006094349,
+            -0.707080449,
+            0.707080574
+          ]
+        },
+        {
+          "id": "hand_l",
+          "referenceName": "hand_l",
+          "parent": "forearm_l",
+          "endpoint": false,
+          "position": [
+            0.357363171,
+            0.796581869,
+            -0.051023105
+          ],
+          "rotation": [
+            -4.01e-07,
+            -3.1e-07,
+            -0.707106725,
+            0.707106837
+          ]
+        },
+        {
+          "id": "index_1_l",
+          "referenceName": "index_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.423746357,
+            0.795474679,
+            -0.033915184
+          ],
+          "rotation": [
+            0.500001734,
+            0.500001809,
+            -0.499998187,
+            0.49999827
+          ]
+        },
+        {
+          "id": "index_2_l",
+          "referenceName": "index_02_l",
+          "parent": "index_1_l",
+          "endpoint": false,
+          "position": [
+            0.446280143,
+            0.79547461,
+            -0.033915181
+          ],
+          "rotation": [
+            0.500001684,
+            0.500001759,
+            -0.499998237,
+            0.49999832
+          ]
+        },
+        {
+          "id": "index_3_l",
+          "referenceName": "index_03_l",
+          "parent": "index_2_l",
+          "endpoint": false,
+          "position": [
+            0.46554729,
+            0.795474544,
+            -0.03391518
+          ],
+          "rotation": [
+            0.500001684,
+            0.500001759,
+            -0.499998237,
+            0.49999832
+          ]
+        },
+        {
+          "id": "index_end_l",
+          "referenceName": "index_04_leaf_l",
+          "parent": "index_3_l",
+          "endpoint": true,
+          "position": [
+            0.482212293,
+            0.795474477,
+            -0.033915179
+          ],
+          "rotation": [
+            0.500000063,
+            0.500000146,
+            0.499999858,
+            -0.499999933
+          ]
+        },
+        {
+          "id": "middle_1_l",
+          "referenceName": "middle_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.424687563,
+            0.796803474,
+            -0.048144109
+          ],
+          "rotation": [
+            0.488051864,
+            0.511672708,
+            -0.511669132,
+            0.488048274
+          ]
+        },
+        {
+          "id": "middle_2_l",
+          "referenceName": "middle_02_l",
+          "parent": "middle_1_l",
+          "endpoint": false,
+          "position": [
+            0.448107167,
+            0.796803512,
+            -0.049251415
+          ],
+          "rotation": [
+            0.488825701,
+            0.510933381,
+            -0.510929894,
+            0.488822215
+          ]
+        },
+        {
+          "id": "middle_3_l",
+          "referenceName": "middle_03_l",
+          "parent": "middle_2_l",
+          "endpoint": false,
+          "position": [
+            0.466876064,
+            0.796803544,
+            -0.050081894
+          ],
+          "rotation": [
+            0.488248211,
+            0.511485259,
+            -0.511481776,
+            0.488244721
+          ]
+        },
+        {
+          "id": "middle_end_l",
+          "referenceName": "middle_04_leaf_l",
+          "parent": "middle_3_l",
+          "endpoint": true,
+          "position": [
+            0.485921729,
+            0.796803517,
+            -0.050967741
+          ],
+          "rotation": [
+            0.511483549,
+            0.488246599,
+            0.488246354,
+            -0.511483466
+          ]
+        },
+        {
+          "id": "pinky_1_l",
+          "referenceName": "pinky_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.416991782,
+            0.795696182,
+            -0.073612219
+          ],
+          "rotation": [
+            0.482957971,
+            0.516483391,
+            -0.516479939,
+            0.482954426
+          ]
+        },
+        {
+          "id": "pinky_2_l",
+          "referenceName": "pinky_02_l",
+          "parent": "pinky_1_l",
+          "endpoint": false,
+          "position": [
+            0.439248687,
+            0.795696227,
+            -0.075107084
+          ],
+          "rotation": [
+            0.482526884,
+            0.516886065,
+            -0.516882708,
+            0.482523437
+          ]
+        },
+        {
+          "id": "pinky_3_l",
+          "referenceName": "pinky_03_l",
+          "parent": "pinky_2_l",
+          "endpoint": false,
+          "position": [
+            0.454529552,
+            0.795696215,
+            -0.076159026
+          ],
+          "rotation": [
+            0.482841846,
+            0.516591861,
+            -0.516588502,
+            0.4828384
+          ]
+        },
+        {
+          "id": "pinky_end_l",
+          "referenceName": "pinky_04_leaf_l",
+          "parent": "pinky_3_l",
+          "endpoint": true,
+          "position": [
+            0.470087226,
+            0.7956962,
+            -0.077210973
+          ],
+          "rotation": [
+            0.516590277,
+            0.482840274,
+            0.482839947,
+            -0.51659011
+          ]
+        },
+        {
+          "id": "ring_1_l",
+          "referenceName": "ring_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.423303427,
+            0.796637351,
+            -0.060490607
+          ],
+          "rotation": [
+            0.491020941,
+            0.508824112,
+            -0.508820556,
+            0.491017413
+          ]
+        },
+        {
+          "id": "ring_2_l",
+          "referenceName": "ring_02_l",
+          "parent": "ring_1_l",
+          "endpoint": false,
+          "position": [
+            0.445062096,
+            0.79663733,
+            -0.061265717
+          ],
+          "rotation": [
+            0.4910271,
+            0.508818073,
+            -0.508814613,
+            0.491023671
+          ]
+        },
+        {
+          "id": "ring_3_l",
+          "referenceName": "ring_03_l",
+          "parent": "ring_2_l",
+          "endpoint": false,
+          "position": [
+            0.462169993,
+            0.796637381,
+            -0.061874738
+          ],
+          "rotation": [
+            0.490483883,
+            0.509341736,
+            -0.509338281,
+            0.49048045
+          ]
+        },
+        {
+          "id": "ring_end_l",
+          "referenceName": "ring_04_leaf_l",
+          "parent": "ring_3_l",
+          "endpoint": true,
+          "position": [
+            0.479776168,
+            0.796637439,
+            -0.062539123
+          ],
+          "rotation": [
+            0.509340086,
+            0.490482295,
+            0.490482008,
+            -0.509339959
+          ]
+        },
+        {
+          "id": "thumb_1_l",
+          "referenceName": "thumb_01_l",
+          "parent": "hand_l",
+          "endpoint": false,
+          "position": [
+            0.372477956,
+            0.783958667,
+            -0.032420325
+          ],
+          "rotation": [
+            0.843724995,
+            0.493830408,
+            0.105964838,
+            0.181744641
+          ]
+        },
+        {
+          "id": "thumb_2_l",
+          "referenceName": "thumb_02_l",
+          "parent": "thumb_1_l",
+          "endpoint": false,
+          "position": [
+            0.391412956,
+            0.773328513,
+            -0.022620626
+          ],
+          "rotation": [
+            0.843731816,
+            0.493762148,
+            0.105978098,
+            0.181890645
+          ]
+        },
+        {
+          "id": "thumb_3_l",
+          "referenceName": "thumb_03_l",
+          "parent": "thumb_2_l",
+          "endpoint": false,
+          "position": [
+            0.413005483,
+            0.76120345,
+            -0.011436762
+          ],
+          "rotation": [
+            0.843503857,
+            0.494254726,
+            0.105826589,
+            0.181698218
+          ]
+        },
+        {
+          "id": "thumb_end_l",
+          "referenceName": "thumb_04_leaf_l",
+          "parent": "thumb_3_l",
+          "endpoint": true,
+          "position": [
+            0.430999274,
+            0.751126921,
+            -0.002135352
+          ],
+          "rotation": [
+            0.673895341,
+            0.518231051,
+            0.518230956,
+            -0.093478997
+          ]
+        },
+        {
+          "id": "shoulder_r",
+          "referenceName": "clavicle_r",
+          "parent": "upper_chest",
+          "endpoint": false,
+          "position": [
+            -0.010408701,
+            0.806049387,
+            0.024716783
+          ],
+          "rotation": [
+            -0.639726584,
+            0.301547716,
+            0.301880155,
+            0.639286512
+          ]
+        },
+        {
+          "id": "upper_arm_r",
+          "referenceName": "upperarm_r",
+          "parent": "shoulder_r",
+          "endpoint": false,
+          "position": [
+            -0.083881546,
+            0.796581846,
+            -0.051023145
+          ],
+          "rotation": [
+            -0.007503765,
+            -0.007507416,
+            0.70706693,
+            0.707066962
+          ]
+        },
+        {
+          "id": "forearm_r",
+          "referenceName": "lowerarm_r",
+          "parent": "upper_arm_r",
+          "endpoint": false,
+          "position": [
+            -0.206437016,
+            0.796581874,
+            -0.053625307
+          ],
+          "rotation": [
+            0.006095843,
+            0.006094294,
+            0.707080471,
+            0.707080552
+          ]
+        },
+        {
+          "id": "hand_r",
+          "referenceName": "hand_r",
+          "parent": "forearm_r",
+          "endpoint": false,
+          "position": [
+            -0.357363161,
+            0.796581856,
+            -0.051023121
+          ],
+          "rotation": [
+            -3.88e-07,
+            2.55e-07,
+            0.707106747,
+            0.707106815
+          ]
+        },
+        {
+          "id": "index_1_r",
+          "referenceName": "index_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.423746369,
+            0.795474661,
+            -0.033915209
+          ],
+          "rotation": [
+            0.500001759,
+            -0.500001833,
+            0.499998193,
+            0.499998215
+          ]
+        },
+        {
+          "id": "index_2_r",
+          "referenceName": "index_02_r",
+          "parent": "index_1_r",
+          "endpoint": false,
+          "position": [
+            -0.446280173,
+            0.79547459,
+            -0.033915208
+          ],
+          "rotation": [
+            0.500001721,
+            -0.500001795,
+            0.499998231,
+            0.499998253
+          ]
+        },
+        {
+          "id": "index_3_r",
+          "referenceName": "index_03_r",
+          "parent": "index_2_r",
+          "endpoint": false,
+          "position": [
+            -0.465547338,
+            0.795474522,
+            -0.033915208
+          ],
+          "rotation": [
+            0.500001721,
+            -0.500001795,
+            0.499998231,
+            0.499998253
+          ]
+        },
+        {
+          "id": "index_end_r",
+          "referenceName": "index_04_leaf_r",
+          "parent": "index_3_r",
+          "endpoint": true,
+          "position": [
+            -0.48221236,
+            0.795474454,
+            -0.033915209
+          ],
+          "rotation": [
+            0.500000057,
+            -0.500000079,
+            -0.499999895,
+            -0.499999969
+          ]
+        },
+        {
+          "id": "middle_1_r",
+          "referenceName": "middle_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.424687569,
+            0.796803457,
+            -0.048144132
+          ],
+          "rotation": [
+            0.488051888,
+            -0.511672733,
+            0.511669137,
+            0.488048219
+          ]
+        },
+        {
+          "id": "middle_2_r",
+          "referenceName": "middle_02_r",
+          "parent": "middle_1_r",
+          "endpoint": false,
+          "position": [
+            -0.448107155,
+            0.796803494,
+            -0.04925144
+          ],
+          "rotation": [
+            0.488825737,
+            -0.510933417,
+            0.510929888,
+            0.488822148
+          ]
+        },
+        {
+          "id": "middle_3_r",
+          "referenceName": "middle_03_r",
+          "parent": "middle_2_r",
+          "endpoint": false,
+          "position": [
+            -0.466876035,
+            0.796803524,
+            -0.050081919
+          ],
+          "rotation": [
+            0.488248248,
+            -0.511485295,
+            0.511481769,
+            0.488244654
+          ]
+        },
+        {
+          "id": "middle_end_r",
+          "referenceName": "middle_04_leaf_r",
+          "parent": "middle_3_r",
+          "endpoint": true,
+          "position": [
+            -0.485921717,
+            0.796803495,
+            -0.050967768
+          ],
+          "rotation": [
+            0.511483542,
+            -0.488246532,
+            -0.48824639,
+            -0.511483502
+          ]
+        },
+        {
+          "id": "pinky_1_r",
+          "referenceName": "pinky_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.416991787,
+            0.795696167,
+            -0.073612241
+          ],
+          "rotation": [
+            0.482957995,
+            -0.516483416,
+            0.516479943,
+            0.482954371
+          ]
+        },
+        {
+          "id": "pinky_2_r",
+          "referenceName": "pinky_02_r",
+          "parent": "pinky_1_r",
+          "endpoint": false,
+          "position": [
+            -0.439248708,
+            0.795696211,
+            -0.075107109
+          ],
+          "rotation": [
+            0.482526921,
+            -0.516886101,
+            0.516882701,
+            0.48252337
+          ]
+        },
+        {
+          "id": "pinky_3_r",
+          "referenceName": "pinky_03_r",
+          "parent": "pinky_2_r",
+          "endpoint": false,
+          "position": [
+            -0.454529588,
+            0.795696197,
+            -0.076159053
+          ],
+          "rotation": [
+            0.482841882,
+            -0.516591897,
+            0.516588495,
+            0.482838333
+          ]
+        },
+        {
+          "id": "pinky_end_r",
+          "referenceName": "pinky_04_leaf_r",
+          "parent": "pinky_3_r",
+          "endpoint": true,
+          "position": [
+            -0.470087245,
+            0.795696179,
+            -0.077210999
+          ],
+          "rotation": [
+            0.51659027,
+            -0.482840207,
+            -0.482839983,
+            -0.516590146
+          ]
+        },
+        {
+          "id": "ring_1_r",
+          "referenceName": "ring_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.423303438,
+            0.796637335,
+            -0.060490631
+          ],
+          "rotation": [
+            0.491020965,
+            -0.508824136,
+            0.508820561,
+            0.491017358
+          ]
+        },
+        {
+          "id": "ring_2_r",
+          "referenceName": "ring_02_r",
+          "parent": "ring_1_r",
+          "endpoint": false,
+          "position": [
+            -0.445062089,
+            0.796637313,
+            -0.061265743
+          ],
+          "rotation": [
+            0.491027136,
+            -0.508818109,
+            0.508814607,
+            0.491023604
+          ]
+        },
+        {
+          "id": "ring_3_r",
+          "referenceName": "ring_03_r",
+          "parent": "ring_2_r",
+          "endpoint": false,
+          "position": [
+            -0.462170003,
+            0.796637361,
+            -0.061874766
+          ],
+          "rotation": [
+            0.490483919,
+            -0.509341772,
+            0.509338274,
+            0.490480383
+          ]
+        },
+        {
+          "id": "ring_end_r",
+          "referenceName": "ring_04_leaf_r",
+          "parent": "ring_3_r",
+          "endpoint": true,
+          "position": [
+            -0.479776161,
+            0.796637416,
+            -0.062539151
+          ],
+          "rotation": [
+            0.50934008,
+            -0.490482228,
+            -0.490482045,
+            -0.509339995
+          ]
+        },
+        {
+          "id": "thumb_1_r",
+          "referenceName": "thumb_01_r",
+          "parent": "hand_r",
+          "endpoint": false,
+          "position": [
+            -0.372477965,
+            0.783958652,
+            -0.032420345
+          ],
+          "rotation": [
+            0.843725022,
+            -0.493830382,
+            -0.105964831,
+            0.181744588
+          ]
+        },
+        {
+          "id": "thumb_2_r",
+          "referenceName": "thumb_02_r",
+          "parent": "thumb_1_r",
+          "endpoint": false,
+          "position": [
+            -0.391412961,
+            0.773328499,
+            -0.02262065
+          ],
+          "rotation": [
+            0.843731839,
+            -0.493762125,
+            -0.105978091,
+            0.181890605
+          ]
+        },
+        {
+          "id": "thumb_3_r",
+          "referenceName": "thumb_03_r",
+          "parent": "thumb_2_r",
+          "endpoint": false,
+          "position": [
+            -0.413005474,
+            0.761203443,
+            -0.01143683
+          ],
+          "rotation": [
+            0.843503871,
+            -0.49425472,
+            -0.105826647,
+            0.181698136
+          ]
+        },
+        {
+          "id": "thumb_end_r",
+          "referenceName": "thumb_04_leaf_r",
+          "parent": "thumb_3_r",
+          "endpoint": true,
+          "position": [
+            -0.430999244,
+            0.75112702,
+            -0.002135436
+          ],
+          "rotation": [
+            0.673895369,
+            -0.51823101,
+            -0.518230955,
+            -0.09347903
+          ]
+        },
+        {
+          "id": "upper_leg_l",
+          "referenceName": "thigh_l",
+          "parent": "hips",
+          "endpoint": false,
+          "position": [
+            0.049275236,
+            0.514937831,
+            -0.014039021
+          ],
+          "rotation": [
+            0.999993885,
+            0.0,
+            0.0,
+            -0.003497196
+          ]
+        },
+        {
+          "id": "lower_leg_l",
+          "referenceName": "calf_l",
+          "parent": "upper_leg_l",
+          "endpoint": false,
+          "position": [
+            0.04927524,
+            0.29331003,
+            -0.015589226
+          ],
+          "rotation": [
+            0.999196444,
+            5.261e-06,
+            -0.000131156,
+            -0.040080538
+          ]
+        },
+        {
+          "id": "foot_l",
+          "referenceName": "foot_l",
+          "parent": "lower_leg_l",
+          "endpoint": false,
+          "position": [
+            0.049275236,
+            0.056290646,
+            -0.034634906
+          ],
+          "rotation": [
+            0.869100537,
+            -0.000256172,
+            -0.000450107,
+            0.494635207
+          ]
+        },
+        {
+          "id": "toe_l",
+          "referenceName": "ball_l",
+          "parent": "foot_l",
+          "endpoint": false,
+          "position": [
+            0.049275238,
+            0.00729225,
+            0.047859597
+          ],
+          "rotation": [
+            1.4e-08,
+            -0.707106876,
+            -0.707106687,
+            1.4e-08
+          ]
+        },
+        {
+          "id": "toe_end_l",
+          "referenceName": "ball_leaf_l",
+          "parent": "toe_l",
+          "endpoint": true,
+          "position": [
+            0.049275235,
+            0.007292261,
+            0.091542943
+          ],
+          "rotation": [
+            -0.0,
+            -0.707106865,
+            -0.707106697,
+            0.0
+          ]
+        },
+        {
+          "id": "upper_leg_r",
+          "referenceName": "thigh_r",
+          "parent": "hips",
+          "endpoint": false,
+          "position": [
+            -0.049275236,
+            0.514937831,
+            -0.014039021
+          ],
+          "rotation": [
+            0.999993885,
+            0.0,
+            0.0,
+            -0.003497196
+          ]
+        },
+        {
+          "id": "lower_leg_r",
+          "referenceName": "calf_r",
+          "parent": "upper_leg_r",
+          "endpoint": false,
+          "position": [
+            -0.04927524,
+            0.29331003,
+            -0.015589226
+          ],
+          "rotation": [
+            0.999196444,
+            5.261e-06,
+            -0.000131156,
+            -0.040080538
+          ]
+        },
+        {
+          "id": "foot_r",
+          "referenceName": "foot_r",
+          "parent": "lower_leg_r",
+          "endpoint": false,
+          "position": [
+            -0.049275236,
+            0.056290679,
+            -0.034634903
+          ],
+          "rotation": [
+            0.869100537,
+            -0.000256172,
+            -0.000450107,
+            0.494635207
+          ]
+        },
+        {
+          "id": "toe_r",
+          "referenceName": "ball_r",
+          "parent": "foot_r",
+          "endpoint": false,
+          "position": [
+            -0.049275238,
+            0.007292283,
+            0.0478596
+          ],
+          "rotation": [
+            1.4e-08,
+            -0.707106876,
+            -0.707106687,
+            1.4e-08
+          ]
+        },
+        {
+          "id": "toe_end_r",
+          "referenceName": "ball_leaf_r",
+          "parent": "toe_r",
+          "endpoint": true,
+          "position": [
+            -0.049275233,
+            0.007292293,
+            0.091542946
+          ],
+          "rotation": [
+            -0.0,
+            -0.707106865,
+            -0.707106697,
+            0.0
+          ]
+        }
+      ],
+      "source": "Quaternius Universal Animation Library 2 Female Mannequin",
+      "sourceUrl": "https://quaternius.com/packs/universalanimationlibrary2.html",
+      "license": "CC0-1.0"
+    }
+  ]
+}

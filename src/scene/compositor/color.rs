@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/color.rs
+// src/scene/compositor/color.rs
 
 use serde::{Deserialize, Serialize};
 

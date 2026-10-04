@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/resource/assets.rs
+// src/scene/resource/assets.rs
 
 use std::{
     fs,
@@ -94,54 +94,56 @@ pub(crate) fn load_rgba_image_source(
     }
 }
 
+/// Read preloaded bytes first; only native hosts fetch URLs or access files.
+pub(crate) fn load_binary_asset_source(
+    src: &str,
+    resolver: &dyn AssetResolver,
+) -> Result<Vec<u8>, MotionLoomSceneRenderError> {
+    use crate::asset::AssetSource;
+    let failure = |message| MotionLoomSceneRenderError::FetchAsset {
+        url: src.to_string(),
+        message,
+    };
+    let resolved = match resolver.resolve(src) {
+        Ok(AssetSource::Bytes(bytes)) => return Ok(bytes),
+        other => other,
+    };
+    let remote = match &resolved {
+        Ok(AssetSource::Url(url)) => Some(url.as_str()),
+        _ if is_remote_image_source(src) => Some(src),
+        _ => None,
+    };
+    if let Some(url) = remote {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return fetch_remote_asset_bytes(url);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            return Err(failure(format!(
+                "browser hosts must preload {url} with add_asset"
+            )));
+        }
+    }
+    match resolved {
+        Ok(AssetSource::Path(path)) => {
+            let path = if path.is_file() {
+                path
+            } else {
+                resolve_local_scene_asset_path(src)
+            };
+            fs::read(&path).map_err(|error| failure(format!("{}: {error}", path.display())))
+        }
+        Err(message) => Err(failure(message)),
+        _ => Err(failure("asset was not preloaded".into())),
+    }
+}
+
 pub(crate) fn load_utf8_text_source(
     src: &str,
     resolver: &dyn AssetResolver,
 ) -> Result<String, MotionLoomSceneRenderError> {
-    let bytes = if is_remote_image_source(src) {
-        if let Ok(crate::asset::AssetSource::Bytes(bytes)) = resolver.resolve(src) {
-            bytes
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                fetch_remote_asset_bytes(src)?
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                return Err(MotionLoomSceneRenderError::LoadActionLibrary {
-                    source_ref: src.to_string(),
-                    message: "browser hosts must preload the library with add_asset".to_string(),
-                });
-            }
-        }
-    } else {
-        match resolver.resolve(src) {
-            Ok(crate::asset::AssetSource::Bytes(bytes)) => bytes,
-            Ok(crate::asset::AssetSource::Path(path)) => {
-                let path = if path.exists() {
-                    path
-                } else {
-                    resolve_local_scene_asset_path(src)
-                };
-                fs::read(&path).map_err(|error| MotionLoomSceneRenderError::LoadActionLibrary {
-                    source_ref: src.to_string(),
-                    message: format!("{}: {error}", path.display()),
-                })?
-            }
-            Ok(crate::asset::AssetSource::Url(url)) => {
-                return Err(MotionLoomSceneRenderError::LoadActionLibrary {
-                    source_ref: src.to_string(),
-                    message: format!("URL source requires preloading: {url}"),
-                });
-            }
-            Err(message) => {
-                return Err(MotionLoomSceneRenderError::LoadActionLibrary {
-                    source_ref: src.to_string(),
-                    message,
-                });
-            }
-        }
-    };
+    let bytes = load_binary_asset_source(src, resolver)?;
     String::from_utf8(bytes).map_err(|error| MotionLoomSceneRenderError::LoadActionLibrary {
         source_ref: src.to_string(),
         message: format!("library is not UTF-8: {error}"),
@@ -380,7 +382,12 @@ fn rgba_image_from_pixmap(
 }
 
 pub(crate) fn default_world_asset_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/motionloom/world")
+    // Prefer available host roots while keeping the standalone checkout usable.
+    local_scene_asset_roots()
+        .into_iter()
+        .map(|root| root.join("world"))
+        .find(|root| root.is_dir())
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/world"))
 }
 
 pub(crate) fn resolve_local_scene_asset_path(src: &str) -> PathBuf {
@@ -430,23 +437,19 @@ fn local_scene_asset_roots() -> Vec<PathBuf> {
     }
 
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    push_unique_path(&mut roots, crate_root.join("../../examples/motionloom"));
+    push_unique_path(&mut roots, crate_root.join("examples"));
+    push_unique_path(&mut roots, crate_root.join("assets"));
+    push_unique_path(&mut roots, crate_root.join("../motionloom-example"));
+    push_unique_path(&mut roots, crate_root.join("../motionloom-example/assets"));
+    // Legacy editor source paths remain optional compatibility search locations.
+    push_unique_path(&mut roots, crate_root.join("../anica/examples/motionloom"));
     push_unique_path(
         &mut roots,
-        crate_root
-            .join("../../..")
-            .join("anica/examples/motionloom"),
+        crate_root.join("../anica/examples/motionloom/sample_assets"),
     );
-    push_unique_path(
-        &mut roots,
-        crate_root.join("../../examples/motionloom/sample_assets"),
-    );
-    push_unique_path(
-        &mut roots,
-        crate_root
-            .join("../../..")
-            .join("anica/examples/motionloom/sample_assets"),
-    );
+    // Resolver regression inputs travel with the engine rather than the editor.
+    #[cfg(test)]
+    push_unique_path(&mut roots, crate_root.join("tests/fixtures/assets"));
 
     roots
 }

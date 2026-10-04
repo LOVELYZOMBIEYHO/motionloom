@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/compat.rs
+// src/compat.rs
 // =========================================
 
 use crate::dsl::{GraphScript, parse_graph_script};

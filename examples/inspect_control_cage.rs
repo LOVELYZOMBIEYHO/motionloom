@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/inspect_control_cage.rs
+// examples/inspect_control_cage.rs
 
 use motionloom::parse_graph_script;
 use std::{

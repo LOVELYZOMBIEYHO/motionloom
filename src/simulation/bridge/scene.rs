@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/bridge/scene.rs
+// src/simulation/bridge/scene.rs
 
 use crate::dsl::GraphScript;
 use crate::scene::model::{CircleNode, DefsNode, GroupNode, PuppetNode, SceneNode};

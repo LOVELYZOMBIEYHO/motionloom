@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/dsl.rs
+// src/scene/dsl.rs
 
 use crate::dsl::{
     attr_value, collect_self_closing_block, collect_tag_block, find_matching_close_tag,
@@ -3179,6 +3179,8 @@ fn parse_composite_group_block(
                     max_blur: scene_attr_or_default(&tag, &["maxBlur", "max_blur"], "10"),
                 });
             nodes_3d.push(Scene3DNode::Camera(SceneCamera3DNode {
+                projection: crate::WorldCameraProjection::Perspective,
+                orthographic_scale: None,
                 id: attr_value(&tag, "id").map(|v| strip_wrappers(&v).to_string()),
                 position: scene_attr_or_default(&tag, &["position"], "[0,0,6]"),
                 target: scene_attr_or_default(&tag, &["target"], "[0,0,0]"),

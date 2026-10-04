@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/geometry.wgsl
+// src/world/render/shaders/geometry.wgsl
 
 fn bone_transform(joint: f32, position: vec3<f32>) -> vec3<f32> {
     let joint_index = u32(max(joint + 0.5, 0.0));
@@ -132,37 +132,40 @@ fn cel_shared_vertex(input: VertexIn, instance_id: u32) -> VertexOut {
     let view_z = dot(rel, forward);
     let near = params.camera1.w;
     let far = max(params.camera2.w, params.camera1.w + 0.001);
-    var clip_x = (2.0 * params.canvas.z / params.canvas.x - 1.0) * view_z + 2.0 * view_x * params.camera0.w / params.canvas.x;
-    var clip_y = (1.0 - 2.0 * params.canvas.w / params.canvas.y) * view_z + 2.0 * view_y * params.camera0.w / params.canvas.y;
+    // The camera marker selects linear orthographic depth with homogeneous w=1.
+    let clip_w = select(view_z, 1.0, params.camera3.w > 0.5);
+    var clip_x = (2.0 * params.canvas.z / params.canvas.x - 1.0) * clip_w + 2.0 * view_x * params.camera0.w / params.canvas.x;
+    var clip_y = (1.0 - 2.0 * params.canvas.w / params.canvas.y) * clip_w + 2.0 * view_y * params.camera0.w / params.canvas.y;
     // TAA jitters projection by a sub-pixel Halton sequence. The unjittered
     // camera is retained in the lighting block for history reprojection.
-    clip_x += 2.0 * lighting.preview1.x * view_z / params.canvas.x;
-    clip_y -= 2.0 * lighting.preview1.y * view_z / params.canvas.y;
-    let clip_z = near * (far - view_z) / (far - near);
+    clip_x += 2.0 * lighting.preview1.x * clip_w / params.canvas.x;
+    clip_y -= 2.0 * lighting.preview1.y * clip_w / params.canvas.y;
+    let clip_z = select(near * (far - view_z), far - view_z, params.camera3.w > 0.5) / (far - near);
 
     var out: VertexOut;
     out.instance_id = instance_id;
     // Signed camera depth allows homogeneous near-plane clipping, including
     // triangles crossing behind the camera, and perspective-correct varyings.
-    out.pos = vec4<f32>(clip_x, clip_y, clip_z, view_z);
+    out.pos = vec4<f32>(clip_x, clip_y, clip_z, clip_w);
     out.current_clip = out.pos;
     let previous_relative = previous_world - lighting.previous_camera0.xyz;
     let previous_view_x = dot(previous_relative, lighting.previous_camera1.xyz);
     let previous_view_y = dot(previous_relative, lighting.previous_camera2.xyz);
     let previous_view_z = dot(previous_relative, lighting.previous_camera3.xyz);
+    let previous_clip_w = select(previous_view_z, 1.0, lighting.previous_camera3.w < 0.0);
     var previous_clip_x = 2.0 * previous_view_x * lighting.previous_camera0.w / params.canvas.x;
     var previous_clip_y = 2.0 * previous_view_y * lighting.previous_camera0.w / params.canvas.y;
-    previous_clip_x += 2.0 * lighting.preview1.z * previous_view_z / params.canvas.x;
-    previous_clip_y -= 2.0 * lighting.preview1.w * previous_view_z / params.canvas.y;
+    previous_clip_x += 2.0 * lighting.preview1.z * previous_clip_w / params.canvas.x;
+    previous_clip_y -= 2.0 * lighting.preview1.w * previous_clip_w / params.canvas.y;
     let previous_near = lighting.previous_camera1.w;
     let previous_far = max(lighting.previous_camera2.w, previous_near + 0.001);
-    let previous_clip_z = previous_near * (previous_far - previous_view_z)
+    let previous_clip_z = select(previous_near * (previous_far - previous_view_z), previous_far - previous_view_z, lighting.previous_camera3.w < 0.0)
         / (previous_far - previous_near);
     out.previous_clip = vec4<f32>(
         previous_clip_x,
         previous_clip_y,
         previous_clip_z,
-        previous_view_z,
+        previous_clip_w,
     );
     out.color = input.color;
     // Seeded variation is per instance. Keeping it out of authored vertices

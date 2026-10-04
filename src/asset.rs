@@ -1,10 +1,11 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/asset.rs
+// src/asset.rs
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Platform-neutral source for a media or model asset.
 ///
@@ -66,6 +67,16 @@ pub trait AssetResolver: Send + Sync {
     /// Resolve `src` to an asset source. The returned source may still need
     /// network or filesystem access to obtain bytes.
     fn resolve(&self, src: &str) -> Result<AssetSource, String>;
+
+    /// Optional change counter lets derived assets avoid rebaking unchanged memory inputs.
+    fn revision(&self) -> Option<u64> {
+        None
+    }
+
+    /// Scope depth bounds recursive document-derived asset composition.
+    fn nesting_depth(&self) -> usize {
+        0
+    }
 }
 
 /// Native filesystem resolver. Searches configured scene asset roots and
@@ -82,24 +93,40 @@ impl AssetResolver for PathAssetResolver {
 /// script. Useful for WASM hosts that preload assets.
 pub struct MemoryAssetResolver {
     assets: Mutex<HashMap<String, Vec<u8>>>,
+    revision: AtomicU64,
 }
 
 impl MemoryAssetResolver {
     pub fn new() -> Self {
         Self {
             assets: Mutex::new(HashMap::new()),
+            revision: AtomicU64::new(0),
         }
     }
 
     pub fn insert(&self, src: String, bytes: Vec<u8>) {
-        self.assets
-            .lock()
-            .expect("memory asset lock")
-            .insert(src, bytes);
+        let mut assets = self.assets.lock().expect("memory asset lock");
+        if assets.get(&src) != Some(&bytes) {
+            assets.insert(src, bytes);
+            self.revision.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn clear(&self) {
         self.assets.lock().expect("memory asset lock").clear();
+        self.revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn remove(&self, src: &str) {
+        if self
+            .assets
+            .lock()
+            .expect("memory asset lock")
+            .remove(src)
+            .is_some()
+        {
+            self.revision.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn with_asset(self, src: String, bytes: Vec<u8>) -> Self {
@@ -115,6 +142,9 @@ impl Default for MemoryAssetResolver {
 }
 
 impl AssetResolver for MemoryAssetResolver {
+    fn revision(&self) -> Option<u64> {
+        Some(self.revision.load(Ordering::Relaxed))
+    }
     fn resolve(&self, src: &str) -> Result<AssetSource, String> {
         self.assets
             .lock()

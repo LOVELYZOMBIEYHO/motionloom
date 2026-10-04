@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/error.rs
+// src/scene/error.rs
 
 use std::path::PathBuf;
 
@@ -8,6 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MotionLoomSceneRenderError {
+    #[error("failed to compose HeadSwapAsset '{asset}': {message}")]
+    HeadSwap { asset: String, message: String },
     #[error(
         "MotionLoom scene graph requires at least one node such as <Background>, <Scene>, <Text>, <Image>, <Svg>, <Rect>, <Circle>, <Line>, <Polyline>, <Path>, <FaceJaw>, <Group>, <Mask>, or <Character>."
     )]

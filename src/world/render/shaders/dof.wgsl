@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/dof.wgsl
+// src/world/render/shaders/dof.wgsl
 
 struct Light {
     position_kind: vec4<f32>,
@@ -106,6 +106,7 @@ fn resolve_display(color: vec4<f32>) -> vec4<f32> {
 fn view_distance(depth: f32) -> f32 {
     let near = lighting.camera1.w;
     let far = max(lighting.camera2.w, near + 0.001);
+    if (lighting.camera3.w < 0.0) { return far - depth * (far - near); }
     return near * far / max(near + depth * (far - near), 0.000001);
 }
 

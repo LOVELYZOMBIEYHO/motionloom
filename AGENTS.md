@@ -7,7 +7,12 @@ coding agents.
 ## Documentation Source of Truth
 
 - `README.md` is the user-facing overview for humans and LLMs.
-- `PUBLIC_API.md` defines the intended public API layers and stability policy.
+- `docs/README.md` is the documentation index with task-based reading paths.
+- `docs/PUBLIC_API.md` defines the intended public API layers and stability policy.
+- Feature guides, task workflows and API contracts live in `docs/`.
+  `skills/motionloom/SKILL.md` is the sole universal AI entry point and routes
+  tasks to those documents. Keep request schemas and API examples in feature
+  guides rather than copying them into the skill.
 - `src/lib.rs` and `src/api.rs` provide the docs.rs/rustdoc entry points.
 - This `AGENTS.md` is only for coding-agent workflow rules. Do not duplicate
   full user documentation here; link or update the source documents above.
@@ -19,29 +24,26 @@ coding agents.
 
 ## Skill Routing
 
-- Reusable task workflows live under `skills/<skill-name>/SKILL.md`.
-- Before taking task actions in this crate, inspect the available skill names
-  and frontmatter descriptions under `skills/*/SKILL.md`.
-- If the user names a skill, or the request clearly matches a skill's
-  description, read that `SKILL.md` completely before acting and follow it for
-  the current task.
-- When a selected skill links supporting files such as `references/`, read only
-  the files required for the current workflow, but read each selected file
-  completely.
-- Select the smallest set of skills that covers the request. Do not load every
-  skill or combine unrelated workflows by default.
-- Skills supplement this `AGENTS.md` and the parent repository instructions;
+- Read `skills/motionloom/SKILL.md` completely before taking MotionLoom task
+  actions, then choose the relevant workflow and API documents from its table.
+- Read each selected workflow document completely. Load linked API contracts
+  as needed; do not load all feature guides or combine unrelated workflows.
+- The entry skill and workflows supplement this file and parent instructions;
   they do not override mandatory repository rules. Explicit user instructions
   take precedence over optional skill guidance.
-- When adding, renaming, or removing a skill, update the registry below in the
-  same change.
+- Maintain one universal entry skill. Add specialized workflows to `docs/`
+  and update the entry table and documentation index in the same change.
 
 ### Skill Registry
 
-- `motionloom-image-to-meshasset`: build and iteratively fit a universal
-  `MeshAsset` from one or more image references with the image-analysis,
-  mesh-evaluation, and fingerprint-safe proposal APIs. Read
-  `skills/motionloom-image-to-meshasset/SKILL.md`.
+- `motionloom`: universal entry point for MotionLoom DSL and headless API tasks.
+  Read [skills/motionloom/SKILL.md](skills/motionloom/SKILL.md); it routes image
+  fitting to [docs/IMAGE_TO_MESHASSET.md](docs/IMAGE_TO_MESHASSET.md) and other
+  tasks to their own workflow/API guides.
+
+The entry point selects a workflow; it does not require running every workflow.
+Choose image-to-MeshAsset fitting only for measured explicit-cage fitting,
+not merely because a task includes an image.
 
 ## DSL Authoring Rules
 
@@ -75,3 +77,18 @@ coding agents.
   - at least one before/after example.
 - Any approved DSL change must update parser tests, renderer behavior, README,
   and examples together.
+
+## Repository and Build Rules
+
+- The repository root is the `motionloom` package and Cargo workspace.
+- `crates/motionloom-action-tool` is a separate native authoring tool that
+  depends on the engine. Keep FBX and subprocess dependencies in that crate.
+- Source comments and documentation must be English. Explain the purpose of
+  nontrivial additions with concise comments.
+- Source file header paths are relative to this repository, for example
+  `src/api.rs` and `crates/motionloom-action-tool/src/lib.rs`.
+- Use typed errors in reusable Rust APIs; do not introduce `Result<T, String>`.
+- Run native checks from this repository, not from the Anica workspace.
+- Keep required test fixtures inside this repository. Sibling showcase tests
+  must be explicitly optional or ignored and document the required checkout.
+- The engine must build without Anica, GPUI, or the landing page.

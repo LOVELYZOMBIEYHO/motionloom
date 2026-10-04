@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/fit_head_references.rs
+// examples/fit_head_references.rs
 
 use motionloom::api::head_fitting::*;
 use std::{fs, path::PathBuf};

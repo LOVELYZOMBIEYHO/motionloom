@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/volumetric_integrate.wgsl
+// src/world/render/shaders/volumetric_integrate.wgsl
 
 struct FroxelParams {
     grid: vec4<f32>, camera0: vec4<f32>, camera1: vec4<f32>, camera2: vec4<f32>, camera3: vec4<f32>,

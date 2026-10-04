@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/mod.rs
+// src/world/render/shaders/mod.rs
 
 //! Embedded WGSL sources used to build the shared world-render pipelines.
 

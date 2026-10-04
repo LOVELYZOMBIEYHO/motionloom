@@ -2,11 +2,11 @@
 name = "motionloom"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "MotionLoom DSL parser and renderer for video effects, unified scene graphs, motion graphics, and Scene-based 3D."
-repository = "https://github.com/LOVELYZOMBIEYHO/anica"
-homepage = "https://github.com/LOVELYZOMBIEYHO/anica"
+repository = "https://github.com/LOVELYZOMBIEYHO/motionloom"
+homepage = "https://github.com/LOVELYZOMBIEYHO/motionloom"
 documentation = "https://docs.rs/motionloom"
 readme = "README.md"
 keywords = ["video", "vfx", "webgpu", "motion-graphics", "dsl"]
@@ -73,3 +73,13 @@ objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSView",
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = "0.13"
+
+# The engine is the root package; offline import tools share its workspace.
+[workspace]
+resolver = "3"
+members = [".", "crates/motionloom-action-tool"]
+default-members = ["."]
+
+# Keep native authoring previews responsive without optimizing every dependency.
+[profile.dev.package.motionloom]
+opt-level = 3

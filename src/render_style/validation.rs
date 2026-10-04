@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/render_style/validation.rs
+// src/render_style/validation.rs
 
 //! Render-style value validation shared by parsing and graph lowering.
 

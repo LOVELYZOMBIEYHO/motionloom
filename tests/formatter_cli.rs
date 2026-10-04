@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/formatter_cli.rs
+// tests/formatter_cli.rs
 
 use std::fs;
 use std::path::PathBuf;

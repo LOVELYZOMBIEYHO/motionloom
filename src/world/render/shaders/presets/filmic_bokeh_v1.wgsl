@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/presets/filmic_bokeh_v1.wgsl
+// src/world/render/shaders/presets/filmic_bokeh_v1.wgsl
 
 // A stable spiral disk produces smooth lens blur without directional banding.
 // Signed circle-of-confusion keeps near and far defocus visually symmetric.

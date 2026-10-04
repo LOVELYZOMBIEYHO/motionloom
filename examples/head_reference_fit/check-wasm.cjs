@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/head_reference_fit/check-wasm.cjs
+// examples/head_reference_fit/check-wasm.cjs
 
 // Compare actual WASM execution with the independently generated native CLI report.
 const fs = require('node:fs');

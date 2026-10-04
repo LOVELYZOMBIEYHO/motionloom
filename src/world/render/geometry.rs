@@ -1,11 +1,145 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/geometry.rs
+// src/world/render/geometry.rs
 
 use super::*;
 use crate::experimental::geometry::{GeometryError, ResolvedMesh};
 
 impl WorldFrameRenderer {
+    /// CPU review uses the same resolved draw geometry and projection as the GPU path.
+    pub(crate) fn draw_orthographic_diagnostic(
+        &mut self,
+        canvas: &mut RgbaImage,
+        graph: &WorldGraph,
+        frame: u32,
+        root: &Path,
+    ) -> Result<(), WorldRenderError> {
+        let world = graph
+            .presented_world()
+            .ok_or_else(|| WorldRenderError::MissingWorld(graph.present.from.clone()))?;
+        let (width, height) = canvas.dimensions();
+        let (draws, _, _, _) = build_actor_gpu_draws(
+            None,
+            width,
+            height,
+            false,
+            false,
+            graph,
+            world,
+            root,
+            self.asset_resolver.as_ref(),
+            WorldTime {
+                frame,
+                fps: graph.fps,
+                duration_ms: graph.duration_ms,
+            },
+            &mut self.mesh_cache,
+            &mut self.primitive_texture_cache,
+            &mut self.effective_bounds_cache,
+            &mut self.gpu_static_draw_cache,
+            &mut self.skinning_strategy_cache,
+            &[],
+        )?;
+        let mut depth = vec![f32::INFINITY; (width * height) as usize];
+        for draw in &draws {
+            let p = draw.params;
+            let mut ignored = 0;
+            let projected: Vec<[f32; 3]> = draw
+                .vertices
+                .iter()
+                .map(|v| {
+                    let local = simulate_gpu_vertex_skinning(v, &draw.bone_matrices, &mut ignored);
+                    let local = std::array::from_fn(|i| (local[i] - p.model[i]) * p.model[3]);
+                    let world = quat_rotate_vec3(quat_normalize_xyzw(p.actor_rotation), local);
+                    let rel =
+                        std::array::from_fn::<_, 3, _>(|i| world[i] + p.actor[i] - p.camera0[i]);
+                    let view = [p.camera1, p.camera2, p.camera3]
+                        .map(|basis| (0..3).map(|i| rel[i] * basis[i]).sum::<f32>());
+                    [
+                        width as f32 * 0.5 + view[0] * p.camera0[3],
+                        height as f32 * 0.5 - view[1] * p.camera0[3],
+                        view[2],
+                    ]
+                })
+                .collect();
+            for ids in draw.indices.chunks_exact(3) {
+                let points = [ids[0], ids[1], ids[2]].map(|i| projected[i as usize]);
+                if points
+                    .iter()
+                    .any(|p| p[2] <= draw.params.camera1[3] || p[2] >= draw.params.camera2[3])
+                {
+                    continue;
+                }
+                let edge = |a: [f32; 3], b: [f32; 3], x: f32, y: f32| {
+                    (x - a[0]) * (b[1] - a[1]) - (y - a[1]) * (b[0] - a[0])
+                };
+                let area = edge(points[0], points[1], points[2][0], points[2][1]);
+                if area.abs() < 1e-8 {
+                    continue;
+                }
+                let min_x = points
+                    .iter()
+                    .map(|p| p[0])
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.) as u32;
+                let max_x = points
+                    .iter()
+                    .map(|p| p[0])
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .min(width as f32 - 1.) as u32;
+                let min_y = points
+                    .iter()
+                    .map(|p| p[1])
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.) as u32;
+                let max_y = points
+                    .iter()
+                    .map(|p| p[1])
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .min(height as f32 - 1.) as u32;
+                for y in min_y..=max_y {
+                    for x in min_x..=max_x {
+                        let a = edge(points[1], points[2], x as f32 + 0.5, y as f32 + 0.5) / area;
+                        let b = edge(points[2], points[0], x as f32 + 0.5, y as f32 + 0.5) / area;
+                        let c = 1. - a - b;
+                        if a < 0. || b < 0. || c < 0. {
+                            continue;
+                        }
+                        let z = a * points[0][2] + b * points[1][2] + c * points[2][2];
+                        let index = (y * width + x) as usize;
+                        if z < depth[index] {
+                            depth[index] = z;
+                            let weights = [a, b, c];
+                            let color = std::array::from_fn::<_, 4, _>(|channel| {
+                                (0..3)
+                                    .map(|i| {
+                                        draw.vertices[ids[i] as usize].color[channel] * weights[i]
+                                    })
+                                    .sum::<f32>()
+                            });
+                            // This diagnostic path intentionally omits the GPU cel/texture shader.
+                            canvas.put_pixel(
+                                x,
+                                y,
+                                Rgba([
+                                    (color[0].clamp(0., 1.).powf(1. / 2.2) * 255.) as u8,
+                                    (color[1].clamp(0., 1.).powf(1. / 2.2) * 255.) as u8,
+                                    (color[2].clamp(0., 1.).powf(1. / 2.2) * 255.) as u8,
+                                    (color[3].clamp(0., 1.) * 255.) as u8,
+                                ]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn extract_asset_meshes(
         &mut self,
         graph: &WorldGraph,
@@ -299,7 +433,7 @@ impl WorldFrameRenderer {
         Ok(
             serde_json::json!({"modelId":model_id,"assetId":asset.id,"positions":cage.positions,
             "faces":cage.faces,"origin":origin,"basis":basis,"size":size,
-            "center":[p.canvas[2],p.canvas[3]],"focal":p.camera0[3],"near":p.camera1[3]}),
+            "center":[p.canvas[2],p.canvas[3]],"focal":p.camera0[3],"near":p.camera1[3],"orthographic":p.camera3[3]>0.5}),
         )
     }
 }

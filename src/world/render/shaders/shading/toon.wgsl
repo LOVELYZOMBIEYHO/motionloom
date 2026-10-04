@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/shading/toon.wgsl
+// src/world/render/shaders/shading/toon.wgsl
 
 fn toon_intensity(intensity: f32) -> f32 {
     let steps = max(lighting.surface0.y, 2.0);

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/root.rs
+// src/root.rs
 
 use std::path::Path;
 use std::sync::{Arc, atomic::AtomicBool};

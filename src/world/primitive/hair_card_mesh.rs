@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/hair_card_mesh.rs
+// src/world/primitive/hair_card_mesh.rs
 
 use crate::dsl::{HairGuideNode, HairPointNode};
 

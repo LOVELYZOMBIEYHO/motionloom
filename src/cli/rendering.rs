@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/cli/rendering.rs
+// src/cli/rendering.rs
 
 use super::{
     CliError,

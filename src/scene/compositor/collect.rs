@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/collect.rs
+// src/scene/compositor/collect.rs
 
 use crate::{
     dsl::GraphScript,

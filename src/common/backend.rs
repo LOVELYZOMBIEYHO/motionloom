@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/backend.rs
+// src/backend.rs
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OutputFormat {

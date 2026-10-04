@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/audio.rs
+// tests/audio.rs
 
 use motionloom::api::{AudioMixer, compile_audio_plan, parse_graph_script};
 fn script(audio: &str) -> String {
@@ -219,7 +219,7 @@ fn ffmpeg_export_contains_the_mixed_audio_track() {
 // The checked-in authoring example must parse without any editor normalization.
 #[test]
 fn audio_example_is_valid() {
-    let script = include_str!("../../../examples/motionloom/scene/audio/audio_edit.motionloom");
+    let script = include_str!("fixtures/scene/audio/audio_edit.motionloom");
     let graph = parse_graph_script(script).unwrap();
     assert_eq!(compile_audio_plan(&graph).unwrap().clips.len(), 2);
 }

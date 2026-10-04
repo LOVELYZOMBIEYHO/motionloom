@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/audio/mod.rs
+// src/audio/mod.rs
 
 //! Platform-independent, random-access audio editing. Hosts supply decoded PCM.
 use crate::dsl::{GraphAssetKind, GraphParseError, GraphScript};

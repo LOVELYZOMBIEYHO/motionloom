@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/world/primitive/loft_mesh.rs
+// src/world/primitive/loft_mesh.rs
 // =========================================
 
 use std::f32::consts::TAU;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/weaver_preview.rs
+// examples/weaver_preview.rs
 
 //! Progressive Weaver preview host.
 //!

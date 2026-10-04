@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/collision/shapes.rs
+// src/simulation/collision/shapes.rs
 
 use crate::simulation::model::{ColliderNode, ColliderShape};
 

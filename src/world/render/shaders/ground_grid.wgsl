@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/ground_grid.wgsl
+// src/world/render/shaders/ground_grid.wgsl
 
 struct GridParams {
     canvas: vec4<f32>,
@@ -40,10 +40,12 @@ fn vs_main(input: VertexIn) -> VertexOut {
 
     var out: VertexOut;
     out.world_pos = world;
-    let clip_x = (2.0 * params.canvas.z / params.canvas.x - 1.0) * view_z + 2.0 * view_x * params.camera0.w / params.canvas.x;
-    let clip_y = (1.0 - 2.0 * params.canvas.w / params.canvas.y) * view_z + 2.0 * view_y * params.camera0.w / params.canvas.y;
-    let clip_z = near * (far - view_z) / (far - near);
-    out.pos = vec4<f32>(clip_x, clip_y, clip_z, view_z);
+    // Orthographic review shares the mesh projection convention.
+    let clip_w = select(view_z, 1.0, params.camera3.w > 0.5);
+    let clip_x = (2.0 * params.canvas.z / params.canvas.x - 1.0) * clip_w + 2.0 * view_x * params.camera0.w / params.canvas.x;
+    let clip_y = (1.0 - 2.0 * params.canvas.w / params.canvas.y) * clip_w + 2.0 * view_y * params.camera0.w / params.canvas.y;
+    let clip_z = select(near * (far - view_z), far - view_z, params.camera3.w > 0.5) / (far - near);
+    out.pos = vec4<f32>(clip_x, clip_y, clip_z, clip_w);
     return out;
 }
 

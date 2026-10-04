@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/dsl_geometry_assets.rs
+// src/dsl_geometry_assets.rs
 
 use super::*;
 
@@ -555,6 +555,7 @@ pub(super) fn resolve_assets(
                 id: mesh.id,
                 kind: GraphAssetKind::Model,
                 source: GraphAssetSource::Primitive(primitive),
+                head_swap: None,
                 decoder: None,
                 color_space: None,
                 profile: None,

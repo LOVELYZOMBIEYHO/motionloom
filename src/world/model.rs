@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/model.rs
+// src/world/model.rs
 
 use std::sync::Arc;
 
@@ -229,6 +229,19 @@ pub struct WorldNode {
 }
 
 impl WorldNode {
+    /// Create a world without renderer-owned retained actor state.
+    pub fn new(id: impl Into<String>, camera: WorldCamera, actors: Vec<WorldActor>) -> Self {
+        Self {
+            id: id.into(),
+            background: None,
+            camera,
+            actors,
+            retained_actors: None,
+            retained_actor_revision: None,
+            directional_characters: Vec::new(),
+        }
+    }
+
     pub(crate) fn actor_slice(&self) -> &[WorldActor] {
         self.retained_actors
             .as_deref()

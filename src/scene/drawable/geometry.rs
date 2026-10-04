@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/drawable/geometry.rs
+// src/scene/drawable/geometry.rs
 
 use crate::scene::render::MotionLoomSceneRenderError;
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/cli/options.rs
+// src/cli/options.rs
 
 use super::CliError;
 #[cfg(feature = "weaver")]

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/error.rs
+// src/simulation/error.rs
 
 use thiserror::Error;
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/spatial/deform.rs
+// src/scene/spatial/deform.rs
 
 use crate::scene::drawable::Point2;
 use crate::scene::drawable::parse_path_subpaths;

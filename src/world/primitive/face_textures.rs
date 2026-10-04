@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/face_textures.rs
+// src/world/primitive/face_textures.rs
 
 use std::sync::Arc;
 

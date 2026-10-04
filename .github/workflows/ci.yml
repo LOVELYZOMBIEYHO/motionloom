@@ -1,0 +1,29 @@
+name: MotionLoom CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install standalone toolchain
+        run: rustup show
+      - name: Check engine, importer and native examples
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Test self-contained engine and importer
+        run: cargo test --workspace --locked
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install standalone toolchain
+        run: rustup show
+      - name: Check browser engine without native FBX tooling
+        run: cargo check -p motionloom --target wasm32-unknown-unknown --locked

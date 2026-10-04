@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/render_style_report.rs
+// examples/render_style_report.rs
 
 // Read-only CLI inspection uses the same resolver as WASM and Rust hosts.
 fn main() -> Result<(), Box<dyn std::error::Error>> {

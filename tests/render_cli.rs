@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/render_cli.rs
+// tests/render_cli.rs
 
 use std::process::Command;
 

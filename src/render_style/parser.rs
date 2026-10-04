@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/render_style/parser.rs
+// src/render_style/parser.rs
 
 //! Strict parsing for render-style resources and material-level cel controls.
 

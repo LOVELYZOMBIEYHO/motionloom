@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/params.rs
+// src/world/render/params.rs
 
 //! Byte-exact packing for Rust parameters mirrored by WGSL uniform layouts.
 

@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/process/adapters/clip/curve.rs
+// src/process/adapters/clip/curve.rs
 // =========================================
 
 use super::model::AnimF32;

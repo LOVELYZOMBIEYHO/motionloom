@@ -1,5 +1,5 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/solvers/mod.rs
+// src/simulation/solvers/mod.rs
 
 pub mod verlet;

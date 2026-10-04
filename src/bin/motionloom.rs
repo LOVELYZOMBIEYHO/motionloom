@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/bin/motionloom.rs
+// src/bin/motionloom.rs
 
 // Keep command behavior shared with the native example entry points.
 #[cfg(not(target_arch = "wasm32"))]

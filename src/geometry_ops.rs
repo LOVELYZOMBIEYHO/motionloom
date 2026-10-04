@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/geometry_ops.rs
+// src/geometry_ops.rs
 
 //! Shared geometry kernels for DSL compilation and GeometryRecipe authoring.
 use crate::mesh_authoring::{Axis, MeshAuthoringError, UvProjection};

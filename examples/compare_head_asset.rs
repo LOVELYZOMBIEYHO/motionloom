@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/compare_head_asset.rs
+// examples/compare_head_asset.rs
 
 use std::path::PathBuf;
 

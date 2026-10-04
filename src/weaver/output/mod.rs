@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/output/mod.rs
+// src/weaver/output/mod.rs
 
 use crate::scene::compositor::{CompositedFrame, LinearPremultipliedImage};
 use crate::weaver::WeaverError;

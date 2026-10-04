@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/outline.wgsl
+// src/world/render/shaders/outline.wgsl
 
 @vertex
 fn vs_main(input: VertexIn, @builtin(instance_index) instance_id: u32) -> VertexOut {

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/wgpu_live_preview.rs
+// examples/wgpu_live_preview.rs
 
 use std::collections::HashMap;
 use std::fs::File;

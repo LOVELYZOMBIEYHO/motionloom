@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/render.rs
+// src/scene/render.rs
 
 use lyon_tessellation::{
     BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers, math::point,
@@ -20,7 +20,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::dsl::{
-    GraphAssetKind, GraphAssetSource, GraphScript, NativeSkinMode, PrimitiveAssetNode,
+    GraphAssetKind, GraphAssetSource, GraphScript, HeadSwapAssetNode, NativeSkinMode, PrimitiveAssetNode,
     PrimitiveColliderShape, PrimitiveCollisionMode, PrimitiveGeometry, ProcessDefinitionNode,
 };
 use crate::process::model::{PassNode, PassParam};
@@ -102,7 +102,7 @@ use crate::scene::resource::{
     collect_graph_gradient_defs, collect_graph_mask_defs, collect_graph_material_defs,
     collect_graph_noise_defs, collect_graph_palette_defs, collect_graph_precompose_defs,
     collect_graph_texture_defs, default_world_asset_root, load_extra_fonts, load_rgba_image_source,
-    load_svg_source, load_utf8_text_source, resolve_local_scene_asset_path,
+    load_binary_asset_source, load_svg_source, load_utf8_text_source, resolve_local_scene_asset_path,
 };
 
 fn scene_track_composite_order(track: &SceneTrackNode) -> i32 {
@@ -1549,7 +1549,7 @@ use crate::world::{
     AtmosphereMediumPlan, VolumetricQuality, VolumetricScatteringPlan, WaterCausticsPlan,
     WorldAction, WorldActionBone, WorldActionIk, WorldActionPose, WorldActor, WorldAnimationAsset,
     WorldApplyAction, WorldBackground, WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap,
-    WorldCamera, WorldCameraControl, WorldCameraProjection, WorldColorManagement, WorldConstraint,
+    WorldCamera, WorldCameraControl, WorldColorManagement, WorldConstraint,
     WorldDepthOfField, WorldEnvironmentLighting, WorldGraph, WorldLight, WorldLightKind,
     WorldLighting, WorldMaterial, WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle,
     WorldPlay, WorldPresent, WorldProfileRetarget, WorldRetargetMap, parse_world_graph_script,
@@ -2376,6 +2376,44 @@ where
     }
 
     Ok(())
+}
+
+/// Export the same HeadSwapAsset geometry used by scene rendering.
+pub async fn export_scene_head_swap_glb(
+    graph: &GraphScript,
+    asset_id: &str,
+) -> Result<Vec<u8>, MotionLoomSceneRenderError> {
+    export_scene_head_swap_glb_with_resolver(graph, asset_id, Arc::new(PathAssetResolver)).await
+}
+
+/// Browser and headless hosts may preload all recipe inputs in memory.
+pub async fn export_scene_head_swap_glb_with_resolver(
+    graph: &GraphScript,
+    asset_id: &str,
+    resolver: Arc<dyn AssetResolver>,
+) -> Result<Vec<u8>, MotionLoomSceneRenderError> {
+    let mut renderer =
+        SceneFrameRenderer::new_for_profile_with_resolver(SceneRenderProfile::Cpu, resolver).await;
+    renderer.prepare_frame_caches(graph);
+    if !renderer.prepared_head_swap_assets.contains_key(asset_id) {
+        return Err(MotionLoomSceneRenderError::HeadSwap {
+            asset: asset_id.into(),
+            message: "HeadSwapAsset not found".into(),
+        });
+    }
+    renderer.ensure_head_swap_assets().await?;
+    let source = renderer
+        .model_asset_sources
+        .get(asset_id)
+        .and_then(|source| match source {
+            GraphAssetSource::External { src } => Some(src.as_str()),
+            _ => None,
+        })
+        .ok_or_else(|| MotionLoomSceneRenderError::HeadSwap {
+            asset: asset_id.into(),
+            message: "missing composed source".into(),
+        })?;
+    load_binary_asset_source(source, renderer.asset_resolver.as_ref())
 }
 
 pub async fn render_scene_graph_frame(
@@ -3324,6 +3362,7 @@ struct SceneFrameRenderer {
     profile: SceneRenderProfile,
     immediate_preview_settings: crate::preview::ImmediatePreviewSettings,
     asset_resolver: Arc<dyn AssetResolver>,
+    generated_assets: Arc<crate::asset::MemoryAssetResolver>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     image_cache: HashMap<String, RgbaImage>,
@@ -3382,6 +3421,9 @@ struct SceneFrameRenderer {
     scene_masks: HashMap<String, MaskNode>,
     scene_material_sources: HashMap<String, SceneRootNode>,
     model_asset_sources: HashMap<String, GraphAssetSource>,
+    prepared_head_swap_assets: HashMap<String, HeadSwapAssetNode>,
+    head_swap_cache: HashMap<String, (u64, String, Vec<String>)>,
+    head_swap_memory_revisions: HashMap<String, (u64, u64)>,
     image_asset_sources: HashMap<String, String>,
     /// Named local-space GLB node positions used by Environment anchors and
     /// surfaces. One inspection per asset is retained across preview frames.
@@ -3418,6 +3460,15 @@ const RETAINED_GPU_TRANSFORM_SCENE_CACHE_LIMIT: usize = 64;
 const GPU_TEXT_RASTER_CACHE_LIMIT: usize = 256;
 const RIGID_BODY_TIMELINE_CACHE_LIMIT: usize = 8;
 const EXPANDED_SCENE_SCATTER_CACHE_LIMIT: usize = 16;
+
+fn scene_3d_island_target_size(logical: (u32, u32), output: (u32, u32)) -> (u32, u32) {
+    let scale = (output.0.max(1) as f32 / logical.0.max(1) as f32)
+        .min(output.1.max(1) as f32 / logical.1.max(1) as f32);
+    (
+        (logical.0.max(1) as f32 * scale).round().max(1.0) as u32,
+        (logical.1.max(1) as f32 * scale).round().max(1.0) as u32,
+    )
+}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct RetainedGpuShapeSceneKey {
@@ -7011,7 +7062,7 @@ fn scene_camera_to_world_camera(
     Ok(WorldCamera {
         id: node.id.clone(),
         control: WorldCameraControl::Orbit,
-        projection: WorldCameraProjection::Perspective,
+        projection: node.projection.clone(),
         target: None,
         x: "0".to_string(),
         y: "0".to_string(),
@@ -7031,7 +7082,7 @@ fn scene_camera_to_world_camera(
         distance: distance.to_string(),
         zoom: "1".to_string(),
         fov: eval_scene_number(&node.fov, time_norm, time_sec)?.to_string(),
-        orthographic_scale: None,
+        orthographic_scale: node.orthographic_scale.clone(),
         depth_of_field,
     })
 }
@@ -7043,6 +7094,13 @@ fn scene_static_scatter_world_key(
     has_no_actor_runtime_dependencies: bool,
 ) -> Option<u64> {
     if !has_no_actor_runtime_dependencies {
+        return None;
+    }
+    if !composite
+        .nodes_3d
+        .iter()
+        .any(|node| matches!(node, Scene3DNode::Scatter(scatter) if scatter.count >= 256))
+    {
         return None;
     }
     let mut has_large_scatter = false;
@@ -7293,11 +7351,16 @@ impl SceneFrameRenderer {
     ) -> Self {
         let mut font_system = FontSystem::new();
         load_extra_fonts(&mut font_system);
+        let generated_assets = Arc::new(crate::asset::MemoryAssetResolver::new());
+        let asset_resolver: Arc<dyn AssetResolver> = Arc::new(crate::scene::head_swap::GeneratedAssetResolver {
+            generated: Arc::clone(&generated_assets), parent: asset_resolver,
+        });
         let world_asset_resolver = asset_resolver.clone();
         Self {
             profile,
             immediate_preview_settings: crate::preview::ImmediatePreviewSettings::default(),
             asset_resolver,
+            generated_assets,
             font_system,
             swash_cache: SwashCache::new(),
             image_cache: HashMap::new(),
@@ -7349,6 +7412,9 @@ impl SceneFrameRenderer {
             scene_masks: HashMap::new(),
             scene_material_sources: HashMap::new(),
             model_asset_sources: HashMap::new(),
+            prepared_head_swap_assets: HashMap::new(),
+            head_swap_cache: HashMap::new(),
+            head_swap_memory_revisions: HashMap::new(),
             image_asset_sources: HashMap::new(),
             environment_node_cache: HashMap::new(),
             environment_bounds_cache: HashMap::new(),
@@ -7483,11 +7549,16 @@ impl SceneFrameRenderer {
     ) -> Self {
         let mut font_system = FontSystem::new();
         load_extra_fonts(&mut font_system);
+        let generated_assets = Arc::new(crate::asset::MemoryAssetResolver::new());
+        let asset_resolver: Arc<dyn AssetResolver> = Arc::new(crate::scene::head_swap::GeneratedAssetResolver {
+            generated: Arc::clone(&generated_assets), parent: asset_resolver,
+        });
         let world_asset_resolver = asset_resolver.clone();
         Self {
             profile,
             immediate_preview_settings: crate::preview::ImmediatePreviewSettings::default(),
             asset_resolver,
+            generated_assets,
             font_system,
             swash_cache: SwashCache::new(),
             image_cache: HashMap::new(),
@@ -7539,6 +7610,9 @@ impl SceneFrameRenderer {
             scene_masks: HashMap::new(),
             scene_material_sources: HashMap::new(),
             model_asset_sources: HashMap::new(),
+            prepared_head_swap_assets: HashMap::new(),
+            head_swap_cache: HashMap::new(),
+            head_swap_memory_revisions: HashMap::new(),
             image_asset_sources: HashMap::new(),
             environment_node_cache: HashMap::new(),
             environment_bounds_cache: HashMap::new(),
@@ -7595,25 +7669,27 @@ impl SceneFrameRenderer {
             self.compiled_animation_graph = Some(Arc::new(compiled));
         }
 
-        let cached = Arc::clone(
-            self.compiled_animation_graph
-                .as_ref()
-                .expect("compiled animation graph is cached"),
-        );
-        if !self.compiled_animation_has_dynamic_channels || frame == 0 {
-            return Ok(Some(cached));
+        if !self.compiled_animation_has_dynamic_channels {
+            return Ok(self.compiled_animation_graph.as_ref().map(Arc::clone));
         }
 
-        let mut resolved = (*cached).clone();
+        // This graph is owned by the renderer between frames. Mutating its
+        // sampled channels in place avoids deep-cloning large static assets
+        // (for example, MeshAsset vertex arrays) on every camera keyframe.
+        let resolved = Arc::make_mut(
+            self.compiled_animation_graph
+                .as_mut()
+                .expect("compiled animation graph is cached"),
+        );
         let time_sec = frame as f32 / graph.fps.max(1.0);
         for target in &graph.animation_targets {
             if !animation_target_requires_frame_sampling(graph, target) {
                 continue;
             }
             let value = sample_dynamic_animation_value(target, time_sec)?;
-            apply_sampled_animation_value(&mut resolved, &target.node, &target.property, value)?;
+            apply_sampled_animation_value(resolved, &target.node, &target.property, value)?;
         }
-        Ok(Some(Arc::new(resolved)))
+        Ok(self.compiled_animation_graph.as_ref().map(Arc::clone))
     }
 
     fn compiled_action_library_graph(
@@ -8265,6 +8341,31 @@ impl SceneFrameRenderer {
             self.expanded_scene_scatter_cache.clear();
             self.retained_scene_3d_world_cache.clear();
             self.rigid_body_timeline_cache.clear();
+            // Asset declarations are static across animation frames. Keep the
+            // lowered MeshAsset/CompoundAsset sources instead of deep-cloning
+            // their geometry into lookup maps on every frame.
+            self.model_asset_sources.clear();
+            self.prepared_head_swap_assets.clear();
+            self.image_asset_sources.clear();
+            for asset in &graph.assets {
+                if let Some(spec) = &asset.head_swap {
+                    self.prepared_head_swap_assets
+                        .insert(asset.id.clone(), spec.clone());
+                }
+                match asset.kind {
+                    GraphAssetKind::Model => {
+                        self.model_asset_sources
+                            .insert(asset.id.clone(), asset.source.clone());
+                    }
+                    GraphAssetKind::Image => {
+                        if let Some(src) = asset.external_src() {
+                            self.image_asset_sources
+                                .insert(asset.id.clone(), src.to_string());
+                        }
+                    }
+                    GraphAssetKind::Video | GraphAssetKind::Audio | GraphAssetKind::Animation => {}
+                }
+            }
             self.prepared_graph_signature = graph_signature;
         }
         self.gradient_defs.clear();
@@ -8282,23 +8383,6 @@ impl SceneFrameRenderer {
         self.scene_precomposes.clear();
         self.scene_masks.clear();
         self.scene_material_sources.clear();
-        self.model_asset_sources.clear();
-        self.image_asset_sources.clear();
-        for asset in &graph.assets {
-            match asset.kind {
-                GraphAssetKind::Model => {
-                    self.model_asset_sources
-                        .insert(asset.id.clone(), asset.source.clone());
-                }
-                GraphAssetKind::Image => {
-                    if let Some(src) = asset.external_src() {
-                        self.image_asset_sources
-                            .insert(asset.id.clone(), src.to_string());
-                    }
-                }
-                GraphAssetKind::Video | GraphAssetKind::Audio | GraphAssetKind::Animation => {}
-            }
-        }
         for scene in &graph.scenes {
             self.scene_material_sources
                 .insert(scene.id.clone(), scene.clone());
@@ -11304,6 +11388,184 @@ impl SceneFrameRenderer {
         Ok(expanded)
     }
 
+    async fn ensure_head_swap_assets(&mut self) -> Result<(), MotionLoomSceneRenderError> {
+        for (id, spec) in self.prepared_head_swap_assets.clone() {
+            let fail = |message: String| MotionLoomSceneRenderError::HeadSwap {
+                asset: id.clone(),
+                message,
+            };
+            let source_ref = |reference: &str| {
+                self.model_asset_sources
+                    .get(reference)
+                    .and_then(|source| match source {
+                        GraphAssetSource::External { src } => Some(src.as_str()),
+                        _ => None,
+                    })
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        if reference == "character1" || reference == "character2" {
+                            format!(
+                                "../../assets/sample_assets/characters/{reference}/{reference}.glb"
+                            )
+                        } else {
+                            reference.to_string()
+                        }
+                    })
+            };
+            let body = source_ref(&spec.body);
+            let head = spec.head.as_deref().map(source_ref);
+            let mut recipe_hasher = DefaultHasher::new();
+            format!("{spec:?}").hash(&mut recipe_hasher);
+            body.hash(&mut recipe_hasher);
+            head.hash(&mut recipe_hasher);
+            let recipe_signature = recipe_hasher.finish();
+            let revision = self.asset_resolver.revision();
+            if let Some(revision) = revision
+                && self.head_swap_memory_revisions.get(&id) == Some(&(revision, recipe_signature))
+                && let Some((_, source, _)) = self.head_swap_cache.get(&id)
+            {
+                self.model_asset_sources.insert(
+                    id,
+                    GraphAssetSource::External {
+                        src: source.clone(),
+                    },
+                );
+                continue;
+            }
+
+            let read =
+                |source: &str| load_binary_asset_source(source, self.asset_resolver.as_ref());
+            let inputs = read(&body).and_then(|body_bytes| {
+                let head_bytes =
+                    read(head.as_deref().or(spec.head_scene.as_deref()).unwrap_or(""))?;
+                Ok((body_bytes, head_bytes))
+            });
+            let (body_bytes, source_bytes) = match inputs {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    // Prebuilt legacy GLBs work with the same URL/memory resolver.
+                    if let Some(GraphAssetSource::External { src }) =
+                        self.model_asset_sources.get(&id)
+                        && !src.starts_with("motionloom:headswap:")
+                        && read(src).is_ok()
+                    {
+                        continue;
+                    }
+                    return Err(fail(error.to_string()));
+                }
+            };
+            let mut hasher = DefaultHasher::new();
+            format!("{spec:?}").hash(&mut hasher);
+            body_bytes.hash(&mut hasher);
+            source_bytes.hash(&mut hasher);
+            // Include child textures and models so edits cannot reuse a stale bake.
+            let dependencies = self
+                .head_swap_cache
+                .get(&id)
+                .map(|v| v.2.clone())
+                .unwrap_or_default();
+            for dependency in &dependencies {
+                dependency.hash(&mut hasher);
+                read(dependency)
+                    .map_err(|e| fail(e.to_string()))?
+                    .hash(&mut hasher);
+            }
+            let signature = hasher.finish();
+            if let Some((old, source, _)) = self.head_swap_cache.get(&id)
+                && *old == signature
+            {
+                if let Some(revision) = revision {
+                    self.head_swap_memory_revisions
+                        .insert(id.clone(), (revision, recipe_signature));
+                }
+                self.model_asset_sources.insert(
+                    id,
+                    GraphAssetSource::External {
+                        src: source.clone(),
+                    },
+                );
+                continue;
+            }
+            let (head_bytes, dependencies) = if head.is_some() {
+                (source_bytes, Vec::new())
+            } else {
+                let source = std::str::from_utf8(&source_bytes).map_err(|e| fail(e.to_string()))?;
+                let graph = crate::parse_graph_script(source).map_err(|e| fail(e.to_string()))?;
+                if self.asset_resolver.nesting_depth() >= 16 {
+                    return Err(fail("headScene nesting exceeded 16 documents".into()));
+                }
+                let scene_id = spec
+                    .head_object
+                    .clone()
+                    .or_else(|| graph.scenes.first().map(|s| s.id.clone()))
+                    .ok_or_else(|| fail("head scene has no Scene".into()))?;
+                let scoped = Arc::new(crate::scene::head_swap::ScopedAssetResolver {
+                    base: spec.head_scene.clone().unwrap_or_default(),
+                    parent: Arc::clone(&self.asset_resolver),
+                    dependencies: std::sync::Mutex::new(Default::default()),
+                });
+                let snapshot = Box::pin(
+                    crate::experimental::geometry::extract_scene_geometry_with_resolver(
+                        &graph,
+                        &crate::experimental::geometry::SceneGeometryOptions {
+                            scene_id,
+                            frame: spec.head_frame,
+                            include_hidden: false,
+                            selected_model_ids: None,
+                        },
+                        scoped.clone(),
+                    ),
+                )
+                .await
+                .map_err(|e| fail(e.to_string()))?;
+                let dependencies = scoped
+                    .dependencies
+                    .lock()
+                    .expect("dependency lock")
+                    .iter()
+                    .cloned()
+                    .collect();
+                (
+                    crate::experimental::geometry::export_scene_glb(&snapshot)
+                        .map_err(|e| fail(e.to_string()))?,
+                    dependencies,
+                )
+            };
+            // Recompute with the dependencies discovered by the first geometry bake.
+            let mut hasher = DefaultHasher::new();
+            format!("{spec:?}").hash(&mut hasher);
+            body_bytes.hash(&mut hasher);
+            read(head.as_deref().or(spec.head_scene.as_deref()).unwrap_or(""))
+                .map_err(|e| fail(e.to_string()))?
+                .hash(&mut hasher);
+            for dependency in &dependencies {
+                dependency.hash(&mut hasher);
+                read(dependency)
+                    .map_err(|e| fail(e.to_string()))?
+                    .hash(&mut hasher);
+            }
+            let signature = hasher.finish();
+            let combined = crate::scene::head_swap::compose(&body_bytes, &head_bytes, &spec)
+                .map_err(|e| fail(e.to_string()))?;
+            let source = format!("motionloom:headswap:{id}:{signature:016x}");
+            if let Some((_, old_source, _)) = self.head_swap_cache.get(&id) {
+                self.generated_assets.remove(old_source);
+            }
+            self.generated_assets.insert(source.clone(), combined);
+            if let Some(revision) = revision {
+                self.head_swap_memory_revisions
+                    .insert(id.clone(), (revision, recipe_signature));
+            }
+
+            self.retained_scene_3d_world_cache.clear();
+            self.head_swap_cache
+                .insert(id.clone(), (signature, source.clone(), dependencies));
+            self.model_asset_sources
+                .insert(id, GraphAssetSource::External { src: source });
+        }
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "The render boundary carries independent frame, target and timing inputs."
@@ -11383,11 +11645,20 @@ impl SceneFrameRenderer {
         }
         // Expand universal volume instances before the established 3D bridge
         // resolves anchors, surfaces, lighting, and ordinary Model actors.
-        let mut expanded_composite = composite.clone();
-        let repeated_nodes = expand_scene_volume_repeats(composite, time_norm, time_sec)?;
-        expanded_composite.nodes_3d =
-            self.expand_scene_surface_scatters(&repeated_nodes, time_norm, time_sec)?;
-        let composite = &expanded_composite;
+        let expanded_composite = if composite
+            .nodes_3d
+            .iter()
+            .any(|node| matches!(node, Scene3DNode::VolumeRepeat(_) | Scene3DNode::Scatter(_)))
+        {
+            let mut expanded = composite.clone();
+            let repeated_nodes = expand_scene_volume_repeats(composite, time_norm, time_sec)?;
+            expanded.nodes_3d =
+                self.expand_scene_surface_scatters(&repeated_nodes, time_norm, time_sec)?;
+            Some(expanded)
+        } else {
+            None
+        };
+        let composite = expanded_composite.as_ref().unwrap_or(composite);
         let island_size = canvas_size;
         let mut camera = WorldCamera::default();
         let mut active_scene_camera = None;
@@ -12162,20 +12433,14 @@ impl SceneFrameRenderer {
                         .id
                         .clone()
                         .unwrap_or_else(|| format!("model_{}", actors.len()));
-                    let authored_source = node
-                        .primitive
-                        .clone()
-                        .map(GraphAssetSource::Primitive)
-                        .or_else(|| self.model_asset_sources.get(&node.asset).cloned())
-                        .unwrap_or_else(|| GraphAssetSource::External {
-                            src: node.asset.clone(),
-                        });
-                    let compound = match &authored_source {
-                        GraphAssetSource::Compound(asset) => Some(asset.clone()),
-                        GraphAssetSource::External { .. }
-                        | GraphAssetSource::Primitive(_)
-                        | GraphAssetSource::Terrain(_)
-                        | GraphAssetSource::Vegetation(_) => None,
+                    let authored_source = self.model_asset_sources.get(&node.asset);
+                    let compound = if node.primitive.is_none() {
+                        authored_source.and_then(|source| match source {
+                            GraphAssetSource::Compound(asset) => Some(asset),
+                            _ => None,
+                        })
+                    } else {
+                        None
                     };
                     // Scene-authored model and environment paths are relative
                     // to the MotionLoom document, not to the legacy World
@@ -12183,29 +12448,48 @@ impl SceneFrameRenderer {
                     // crossing the internal Scene3D bridge. HTTP(S) sources
                     // remain unchanged because canonicalization simply fails
                     // and falls back to the original URL string.
-                    let (src, primitive, terrain, vegetation) = match authored_source {
-                        GraphAssetSource::External { src } => {
-                            let resolved = resolve_local_scene_asset_path(&src);
-                            (
-                                std::fs::canonicalize(&resolved)
-                                    .unwrap_or(resolved)
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                None,
-                                None,
-                                None,
-                            )
+                    let (src, primitive, terrain, vegetation) = if let Some(asset) = &node.primitive
+                    {
+                        (asset.id.clone(), Some(asset.clone()), None, None)
+                    } else {
+                        match authored_source {
+                            Some(GraphAssetSource::External { src }) => {
+                                let resolved = resolve_local_scene_asset_path(src);
+                                (
+                                    std::fs::canonicalize(&resolved)
+                                        .unwrap_or(resolved)
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                    None,
+                                    None,
+                                    None,
+                                )
+                            }
+                            Some(GraphAssetSource::Primitive(asset)) => {
+                                (asset.id.clone(), Some(asset.clone()), None, None)
+                            }
+                            Some(GraphAssetSource::Terrain(asset)) => {
+                                (asset.id.clone(), None, Some(asset.clone()), None)
+                            }
+                            Some(GraphAssetSource::Vegetation(asset)) => {
+                                (asset.id.clone(), None, None, Some(asset.clone()))
+                            }
+                            Some(GraphAssetSource::Compound(asset)) => {
+                                (asset.id.clone(), None, None, None)
+                            }
+                            None => {
+                                let resolved = resolve_local_scene_asset_path(&node.asset);
+                                (
+                                    std::fs::canonicalize(&resolved)
+                                        .unwrap_or(resolved)
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                    None,
+                                    None,
+                                    None,
+                                )
+                            }
                         }
-                        GraphAssetSource::Primitive(asset) => {
-                            (asset.id.clone(), Some(asset), None, None)
-                        }
-                        GraphAssetSource::Terrain(asset) => {
-                            (asset.id.clone(), None, Some(asset), None)
-                        }
-                        GraphAssetSource::Vegetation(asset) => {
-                            (asset.id.clone(), None, None, Some(asset))
-                        }
-                        GraphAssetSource::Compound(asset) => (asset.id.clone(), None, None, None),
                     };
                     let mut position = if let Some(position) = node
                         .id
@@ -12315,7 +12599,7 @@ impl SceneFrameRenderer {
                             rig_sample.unwrap_or_default();
                         let parent_rotation = rotation_quaternion
                             .unwrap_or_else(|| scene_quaternion_from_euler(rotation));
-                        for instance in compound.instances {
+                        for instance in &compound.instances {
                             let Some(mut primitive) = self
                                 .model_asset_sources
                                 .get(&instance.asset)
@@ -14138,17 +14422,27 @@ impl SceneFrameRenderer {
         time_norm: f32,
         time_sec: f32,
     ) -> Result<GpuSceneNativeTexture, MotionLoomSceneRenderError> {
-        self.ensure_gpu_compositor_size(canvas_size.0.max(1), canvas_size.1.max(1))
-            .await?;
-        let (world_graph, world_asset_root, material_overrides) = self.prepare_scene_3d_composite(
-            composite,
-            frame,
-            fps,
-            duration_ms,
-            canvas_size,
-            time_norm,
-            time_sec,
-        )?;
+        // The parent compositor already has the output resolution. Render the
+        // 3D island at its fitted output size, while keeping logical canvas
+        // dimensions for camera and overlay placement.
+        self.ensure_head_swap_assets().await?;
+        let output_size = self
+            .gpu_compositor
+            .as_ref()
+            .map(|compositor| (compositor.width, compositor.height))
+            .unwrap_or(canvas_size);
+        let target_size = scene_3d_island_target_size(canvas_size, output_size);
+        let (mut world_graph, world_asset_root, material_overrides) = self
+            .prepare_scene_3d_composite(
+                composite,
+                frame,
+                fps,
+                duration_ms,
+                canvas_size,
+                time_norm,
+                time_sec,
+            )?;
+        world_graph.render_size = Some(target_size);
         let frame = self
             .scene_3d_renderer
             .render_frame_to_gpu_texture_with_material_overrides(
@@ -15064,9 +15358,13 @@ impl SceneFrameRenderer {
                                     time_sec,
                                 )
                                 .await?;
+                            let island_to_canvas = Affine2::scale_xy(
+                                canvas_size.0 as f32 / texture.width.max(1) as f32,
+                                canvas_size.1 as f32 / texture.height.max(1) as f32,
+                            );
                             texture_layers.push(GpuSceneTextureLayer {
                                 source: GpuSceneTextureSource::Gpu(texture),
-                                transform: group_transform,
+                                transform: group_transform.mul(island_to_canvas),
                                 projected_quad: None,
                                 opacity,
                                 blend: SceneBlendMode::Normal,
@@ -25509,6 +25807,46 @@ mod tests {
     }
 
     #[test]
+    fn sampled_animation_graph_reuses_static_assets_across_nonsequential_frames() {
+        let graph = parse_graph_script(
+            r##"<Graph fps={30} duration="2s" size={[64,64]}>
+  <Assets>
+    <MaterialAsset id="plain" shading="pbr" baseColor="#FFFFFF" />
+    <GeometryAsset id="cube_geometry"><Primitive shape="box" size={[1,1,1]} /></GeometryAsset>
+    <MeshAsset id="cube" material="plain" geometry="cube_geometry" />
+  </Assets>
+  <Scene id="main"><Timeline><Track><Sequence duration="2s"><Layer>
+    <Rect id="card" x="0" y="0" width="10" height="10" color="#000000" />
+  </Layer></Sequence></Track></Timeline></Scene>
+  <AnimationTarget node="card" property="color">
+    <Key time="0s" value="#000000" />
+    <Key time="1s" value="#52E8FF" />
+  </AnimationTarget>
+  <Present from="main" />
+</Graph>"##,
+        )
+        .expect("animation graph");
+        let mut renderer = pollster::block_on(SceneFrameRenderer::new());
+        let mut retained_address = None;
+        for frame in [0, 30, 15, 0, 30] {
+            let resolved = renderer
+                .compiled_animation_graph_for_frame(&graph, frame)
+                .expect("sampled frame")
+                .expect("compiled graph");
+            let address = Arc::as_ptr(&resolved);
+            if let Some(previous) = retained_address {
+                assert_eq!(address, previous, "frame {frame} cloned the graph");
+            }
+            retained_address = Some(address);
+            let expected = apply_animation_targets_at_frame(&graph, frame)
+                .expect("reference frame")
+                .expect("reference graph");
+            assert_eq!(resolved.assets, expected.assets, "frame {frame}");
+            assert_eq!(resolved.scenes, expected.scenes, "frame {frame}");
+        }
+    }
+
+    #[test]
     fn retained_mixed_scene_instances_repeat_and_quantizes_random_updates() {
         let graph = parse_graph_script(
             r##"
@@ -30016,7 +30354,7 @@ mod tests {
         let mut renderer = pollster::block_on(SceneRenderer::new(SceneRenderProfile::Gpu)).unwrap();
         let graph = parse_graph_script(
             r##"
-<Graph fps={30} duration="1s" size={[64,48]}>
+<Graph fps={30} duration="1s" size={[128,96]} renderSize={[64,48]}>
   <Scene id="mixed_scene">
     <Timeline>
       <Track id="three_d" space="3d">
@@ -30054,6 +30392,30 @@ mod tests {
         assert_eq!(gpu_texture.width, 64);
         assert_eq!(gpu_texture.height, 48);
         assert_eq!(gpu_texture.format, wgpu::TextureFormat::Rgba8Unorm);
+
+        let SceneNode::Timeline(timeline) = &graph.scenes[0].children[0] else {
+            panic!("expected timeline");
+        };
+        let SceneNode::Track(track) = &timeline.children[0] else {
+            panic!("expected 3D track");
+        };
+        let SceneNode::Sequence(sequence) = &track.children[0] else {
+            panic!("expected 3D sequence");
+        };
+        let SceneNode::Group(group) = &sequence.children[0] else {
+            panic!("expected 3D group");
+        };
+        let island = pollster::block_on(renderer.inner.render_scene_3d_composite(
+            group.composite.as_ref().expect("3D composite"),
+            0,
+            30.0,
+            1_000,
+            graph.size,
+            0.0,
+            0.0,
+        ))
+        .expect("3D island render");
+        assert_eq!((island.width, island.height), (64, 48));
     }
 
     #[test]
@@ -30897,3 +31259,7 @@ mod tests {
         assert!((mapped_tip[1] - 4.0).abs() < 1.0e-5);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "head_swap_tests.rs"]
+mod head_swap_tests;

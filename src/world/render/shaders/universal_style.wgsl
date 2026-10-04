@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/universal_style.wgsl
+// src/world/render/shaders/universal_style.wgsl
 
 // Every preset returns display RGB; universal controls never depend on its implementation.
 // Work on straight colour and restore coverage exactly once, including transparent islands.
@@ -42,8 +42,9 @@ fn preview_world_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     // Remove the current projection jitter before reconstructing the ray.
     let stable_uv = uv - lighting.preview1.xy / dimensions;
     let ndc = vec2<f32>(stable_uv.x * 2.0 - 1.0, 1.0 - stable_uv.y * 2.0);
-    let view_x = ndc.x * distance * dimensions.x / max(2.0 * lighting.camera0.w, 0.000001);
-    let view_y = ndc.y * distance * dimensions.y / max(2.0 * lighting.camera0.w, 0.000001);
+    let projection_distance = select(distance, 1.0, lighting.camera3.w < 0.0);
+    let view_x = ndc.x * projection_distance * dimensions.x / max(2.0 * lighting.camera0.w, 0.000001);
+    let view_y = ndc.y * projection_distance * dimensions.y / max(2.0 * lighting.camera0.w, 0.000001);
     return lighting.camera0.xyz + lighting.camera3.xyz * distance
         + lighting.camera1.xyz * view_x + lighting.camera2.xyz * view_y;
 }
@@ -57,9 +58,10 @@ fn preview_previous_uv(world: vec3<f32>) -> vec2<f32> {
     if (view_z <= max(lighting.previous_camera1.w, 0.0001)) {
         return vec2<f32>(-1.0);
     }
+    let projection_distance = select(view_z, 1.0, lighting.previous_camera3.w < 0.0);
     var uv = vec2<f32>(
-        0.5 + view_x * lighting.previous_camera0.w / (view_z * dimensions.x),
-        0.5 - view_y * lighting.previous_camera0.w / (view_z * dimensions.y)
+        0.5 + view_x * lighting.previous_camera0.w / (projection_distance * dimensions.x),
+        0.5 - view_y * lighting.previous_camera0.w / (projection_distance * dimensions.y)
     );
     uv += lighting.preview1.zw / dimensions;
     return uv;

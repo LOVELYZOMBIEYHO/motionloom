@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/preview/mod.rs
+// src/weaver/preview/mod.rs
 
 //! Progressive Weaver preview sessions.
 //!

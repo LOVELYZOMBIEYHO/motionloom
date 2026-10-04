@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/process/cpu_effects.rs
+// src/process/cpu_effects.rs
 // =========================================
 
 use image::{Rgba, RgbaImage};

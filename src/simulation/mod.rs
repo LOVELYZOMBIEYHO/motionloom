@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/mod.rs
+// src/simulation/mod.rs
 
 pub mod bodies;
 pub mod bridge;

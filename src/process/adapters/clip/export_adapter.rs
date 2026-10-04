@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/adapters/clip/export_adapter.rs
+// src/process/adapters/clip/export_adapter.rs
 
 use crate::process::graph::MotionGraph;
 

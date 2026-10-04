@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/geometry/mod.rs
+// src/weaver/geometry/mod.rs
 
 use super::{WeaverError, scene::Snapshot};
 use crate::world::gltf_loader::GlbAlphaMode;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/runtime.rs
+// src/simulation/runtime.rs
 
 use crate::simulation::bodies::dynamic_curve::{build_dynamic_curve, resample_polyline};
 use crate::simulation::clock::SimulationClock;

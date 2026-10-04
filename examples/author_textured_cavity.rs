@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/author_textured_cavity.rs
+// examples/author_textured_cavity.rs
 
 use motionloom::{ControlCageNode, api::mesh_authoring::bake_mesh_asset_geometry};
 use std::{env, fs};

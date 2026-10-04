@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/render_style.rs
+// tests/render_style.rs
 
 use motionloom::api::{parse_graph_script, resolve_scene_render_style};
 
@@ -255,7 +255,7 @@ fn universal_controls_affect_every_preset_on_gpu() {
 fn character1_opaque_glb_has_visible_outline() {
     use motionloom::api::{SceneRenderProfile, SceneRenderer};
     let asset = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../../motionloom-example/assets/sample_assets/characters/character1/character1.glb",
+        "../motionloom-example/assets/sample_assets/characters/character1/character1.glb",
     );
     assert!(asset.is_file());
     let source = script(
@@ -484,7 +484,7 @@ fn styles_are_scene_local_and_serialized_graphs_roundtrip() {
 #[ignore = "requires the sibling motionloom-example checkout"]
 fn existing_showcases_remain_parseable() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../motionloom-example/showcase");
+        .join("../motionloom-example/showcase");
     for number in 1..=79 {
         let file = root.join(format!("s-{number:06}/main.motionloom"));
         let text = std::fs::read_to_string(&file).unwrap();
@@ -497,7 +497,7 @@ fn existing_showcases_remain_parseable() {
 #[ignore = "requires the sibling motionloom-example checkout"]
 fn showcases_80_to_88_remain_parseable() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../motionloom-example/showcase");
+        .join("../motionloom-example/showcase");
     for number in 80..=88 {
         let file = root.join(format!("s-{number:06}/main.motionloom"));
         let text = std::fs::read_to_string(&file).unwrap();

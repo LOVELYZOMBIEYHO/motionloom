@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/tests/physics.rs
+// src/weaver/tests/physics.rs
 
 use crate::experimental::geometry::ResolvedMesh;
 use crate::weaver::*;

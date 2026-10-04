@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/geometry/uv.rs
+// src/geometry/uv.rs
 
 use super::*;
 use image::{Rgba, RgbaImage};

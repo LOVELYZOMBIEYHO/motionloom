@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/volumetric_inject.wgsl
+// src/world/render/shaders/volumetric_inject.wgsl
 
 struct FroxelParams {
     grid: vec4<f32>,

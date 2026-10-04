@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/mod.rs
+// src/scene/compositor/mod.rs
 
 //! Renderer-independent scene composition contracts.
 //!

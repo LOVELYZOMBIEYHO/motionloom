@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_reference/topology.rs
+// src/mesh_reference/topology.rs
 
 use super::{MeshProposalValidationOptions, MeshReferenceDiagnostic, MeshTopologyReport};
 use crate::ControlCageNode;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/analyze_image_reference.rs
+// examples/analyze_image_reference.rs
 
 use motionloom::api::mesh_reference::{
     AnalyzeImageReferenceRequest, analysis_internal_edge_png, analysis_mask_png,

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/color/mod.rs
+// src/weaver/color/mod.rs
 
 use crate::world::WorldLighting;
 fn matrix(m: [[f32; 3]; 3], c: [f32; 3]) -> [f32; 3] {

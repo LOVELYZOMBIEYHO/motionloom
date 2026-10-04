@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/head_surface_mesh.rs
+// src/world/primitive/head_surface_mesh.rs
 
 use std::f32::consts::{PI, TAU};
 

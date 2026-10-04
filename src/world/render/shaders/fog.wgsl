@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/fog.wgsl
+// src/world/render/shaders/fog.wgsl
 
 // Return fog-path length, edge weight, and representative height for either
 // the legacy global medium or an authored local box volume.

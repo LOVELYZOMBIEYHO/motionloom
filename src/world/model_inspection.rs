@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/model_inspection.rs
+// src/world/model_inspection.rs
 
 //! Automatic GLB skeleton inspection and humanoid profile proposals.
 

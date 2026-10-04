@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/bindings.wgsl
+// src/world/render/shaders/bindings.wgsl
 
 struct Params {
     canvas: vec4<f32>,

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/head_fitting/mod.rs
+// src/head_fitting/mod.rs
 
 //! Opt-in, filesystem-free head authoring. Images and annotations never enter DSL.
 mod projection;

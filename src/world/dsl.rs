@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/dsl.rs
+// src/world/dsl.rs
 
 use std::collections::HashSet;
 

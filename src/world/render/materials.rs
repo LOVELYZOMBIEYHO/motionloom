@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/materials.rs
+// src/world/render/materials.rs
 
 //! Retained, semantic mip chains shared by native and browser uploads.
 

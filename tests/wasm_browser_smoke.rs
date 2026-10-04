@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/tests/wasm_browser_smoke.rs
+// tests/wasm_browser_smoke.rs
 
 //! Browser smoke tests for the MotionLoom WASM API.
 //!
@@ -18,7 +18,7 @@ mod wasm_tests {
 
     // These tests do not require browser-only APIs, so they run in Node.js by
     // default. They can also be executed in a real browser with:
-    //   wasm-pack test crates/motionloom --headless --chrome --test wasm_browser_smoke
+    //   wasm-pack test . --headless --chrome --test wasm_browser_smoke
     // (Chrome must be installed; this macOS environment only has Safari/Firefox
     // and both drivers fail due to system restrictions.)
 

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/model.rs
+// src/scene/model.rs
 
 use serde::{Deserialize, Serialize};
 
@@ -1132,6 +1132,11 @@ fn default_scene_surface_space() -> String {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneCamera3DNode {
+    /// Typed host cameras can request orthographic review without extending DSL syntax.
+    #[serde(default)]
+    pub projection: crate::WorldCameraProjection,
+    #[serde(default)]
+    pub orthographic_scale: Option<String>,
     pub id: Option<String>,
     pub position: String,
     pub target: String,

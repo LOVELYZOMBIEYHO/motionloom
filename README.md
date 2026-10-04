@@ -1,12 +1,47 @@
 # MotionLoom
 
-Generated geometry uses the canonical [GeometryAsset structure](GEOMETRY_ASSETS.md).
+MotionLoom is an agent-native motion graphics and compositing engine for Rust
+and WebAssembly. It turns a portable text DSL into deterministic 2D, 2.5D,
+true-3D, and GPU effect compositions.
+
+MotionLoom powers motion graphics in [Anica](https://github.com/LOVELYZOMBIEYHO/anica),
+but the crate is designed to be embedded independently in editors, renderers,
+automation systems, and LLM authoring tools.
+
+Start with [Install](#install) and [Quick Start](#quick-start), then use the
+[documentation index](docs/README.md) to choose a feature or AI workflow.
+
+## Repository layout and development
+
+The root `Cargo.toml` is both the public `motionloom` package and a workspace.
+`src/`, `docs/`, `skills/`, `tests/`, `examples/` and bundled `assets/` belong to
+that engine. `crates/motionloom-action-tool/` contains the separate offline
+animation importer; its native FBX dependencies do not enter the engine WASM build.
+
+Run these commands from this repository:
+
+```sh
+cargo check --workspace --all-targets --all-features
+cargo test --workspace
+cargo check -p motionloom --target wasm32-unknown-unknown
+```
+
+The engine and required regression fixtures are self-contained. Optional GPU
+or showcase acceptance tests document their requirements. To run the external
+showcase tests, clone `motionloom-example` beside this repository; large showcase
+models and Action libraries remain in that separate example repository.
+
+For local Anica development, keep `anica/` and `motionloom/` as sibling checkouts.
+Anica depends on `../motionloom`; the landing page rebuilds WASM from that same
+checkout. MotionLoom itself does not depend on either host.
+
+Generated geometry uses the canonical [GeometryAsset structure](docs/GEOMETRY_ASSETS.md).
 
 Use `motionloom fmt main.motionloom` to format DSL, or `motionloom fmt --check
-showcase/` to check a directory. The [formatter](FORMATTING.md) is shared by the
+showcase/` to check a directory. The [formatter](docs/FORMATTING.md) is shared by the
 CLI, Rust API, WASM and source editors.
 
-The [native CLI](CLI.md) also provides `motionloom render main.motionloom
+The [native CLI](docs/CLI.md) also provides `motionloom render main.motionloom
 --renderer weaver --frame 1 --samples 128` and `motionloom export main.motionloom
 --renderer weaver --samples 64 --out output/`. Resolution, timeline and camera
 settings follow the DSL; the CLI and examples share the library Weaver API.
@@ -15,17 +50,23 @@ Native high-quality rendering is available through the opt-in `weaver` feature
 and `motionloom::api::weaver`; see [Weaver](src/weaver/README.md) for its current
 capabilities and validation notes. Immediate preview remains a separate path.
 
-The opt-in [filmic physical and lens presets](RENDER_STYLE.md#filmic-physical-and-lens-presets)
+The opt-in [filmic physical and lens presets](docs/RENDER_STYLE.md#filmic-physical-and-lens-presets)
 provide `filmic_physical_v1`, `filmic_bokeh_v1` and `filmic_aces_v1` with a
 41-sample golden-angle bokeh kernel.
 
-Experimental [geometry tooling](GEOMETRY_TOOLING.md) provides UV inspection and
+Headless [character authoring](docs/CHARACTER_AUTHORING.md) is available through
+`motionloom::api::character_authoring`: editable T-pose starters, semantic mesh
+editing, attachments, revisions, asynchronous review and in-memory persistence.
+Its [rig API](docs/RIG_AUTHORING.md) inspects mesh bytes while ignoring input skeletons,
+generates the CC0-aligned humanoid65 core and verifies immutable skin candidates.
+
+Experimental [geometry tooling](docs/GEOMETRY_TOOLING.md) provides UV inspection and
 camera-free static GLB export directly from existing Scene DSL.
 
-Opt-in [froxel volumetrics](VOLUMETRICS.md) provide shadowed underwater light
+Opt-in [froxel volumetrics](docs/VOLUMETRICS.md) provide shadowed underwater light
 transport and procedural volume caustics in the immediate WebGPU renderer.
 
-Scene-owned visual style resources are documented in [RENDER_STYLE.md](RENDER_STYLE.md).
+Scene-owned visual style resources are documented in [RENDER_STYLE.md](docs/RENDER_STYLE.md).
 The `ink_wash_soft_v1` WGSL preset provides soft 3D-to-2D ink rendering.
 Optional `ColorStyle` and `ToneStyle` controls work across all GPU shading modes;
 start with the [ink template](examples/ink_wash.motionloom).
@@ -36,15 +77,7 @@ An authored RenderStyle opts out of anti-aliasing unless it contains an explicit
 `AntiAliasingStyle`; this keeps AA cost visible in LLM-authored scenes.
 Immediate GPU preview uses semantic material mipmaps, independent material AO,
 and HDR intermediates; anti-aliasing is explicitly authored per RenderStyle; see
-[scope and validation](IMMEDIATE_PREVIEW.md).
-
-MotionLoom is an agent-native motion graphics and compositing engine for Rust
-and WebAssembly. It turns a portable text DSL into deterministic 2D, 2.5D,
-true-3D, and GPU effect compositions.
-
-MotionLoom powers motion graphics in [Anica](https://github.com/LOVELYZOMBIEYHO/anica),
-but the crate is designed to be embedded independently in editors, renderers,
-automation systems, and LLM authoring tools.
+[scope and validation](docs/IMMEDIATE_PREVIEW.md).
 
 - Declarative timeline and scene DSL
 - Unified 2D, 2.5D, 3D, and Process render graph
@@ -97,7 +130,7 @@ and browser WebGPU use the same bounded ray integration.
 motionloom = "0.1"
 ```
 
-MotionLoom requires Rust 1.85 or newer. `wgpu` is part of the core renderer and
+MotionLoom requires Rust 1.88 or newer. `wgpu` is part of the core renderer and
 is enabled by default.
 
 Video export requires an FFmpeg binary supplied by the host. Parsing,
@@ -685,7 +718,7 @@ Example retrieval → Syntax discovery → DSL authoring
 source-addressed diagnostics, effective behavior, and recommended repairs.
 Per-example `schema.json` files describe the syntax demonstrated by individual
 documents. The complete protocol is documented in
-[LLM_AUTHORING.md](LLM_AUTHORING.md).
+[LLM_AUTHORING.md](docs/LLM_AUTHORING.md).
 
 ## Visual Action Authoring
 
@@ -703,6 +736,11 @@ below **Puppet Warp**, while keeping the DSL textarea as the source of truth.
 
 ## Rig Diagnostics
 
+For generating a new humanoid binding, start with the
+[AI binding workflow and S104 lessons](docs/HUMANOID_BINDING.md). The
+[A-pose/T-pose and knee inference API design](docs/HUMANOID_POSE_API.md) distinguishes
+proposed operations from the current companion authoring API.
+
 Humanoid parity checks use a non-mutating API, not extra DSL. Call
 `SceneRenderer::evaluate_rig_frame` to capture the exact rendered pose and
 `compare_humanoid_poses` to compare two actors or documents by Action phase and
@@ -710,8 +748,8 @@ canonical bone. Reports include provenance, active layers, pose drivers,
 effective axis maps, contact settings, stage transforms and screen projection.
 The same report is available in browsers through
 `WasmSceneRenderer.evaluate_rig_json`; CLI examples are documented in
-[PUBLIC_API.md](PUBLIC_API.md), with the report contract and comparison rules in
-[RIG_DIAGNOSTICS.md](RIG_DIAGNOSTICS.md).
+[PUBLIC_API.md](docs/PUBLIC_API.md), with the report contract and comparison rules in
+[RIG_DIAGNOSTICS.md](docs/RIG_DIAGNOSTICS.md).
 
 ## Public API
 
@@ -722,7 +760,7 @@ New integrations should start with:
 - `motionloom::experimental` — advanced or lower-stability editor helpers
 
 The crate root retains broader re-exports for compatibility with existing
-hosts. See [PUBLIC_API.md](PUBLIC_API.md) for parsing, rendering, GPU texture,
+hosts. See [PUBLIC_API.md](docs/PUBLIC_API.md) for parsing, rendering, GPU texture,
 export, compatibility inspection, and authoring-analysis APIs.
 
 ## Platform Support
@@ -740,13 +778,19 @@ fallback or renderer-capability report.
 
 ## Documentation
 
-- [Immediate Preview](IMMEDIATE_PREVIEW.md) — retained rendering, host quality
+The [documentation index](docs/README.md) groups all feature guides by task and
+includes reading paths for AI authoring, humanoid binding and image-based mesh
+fitting. Reusable execution workflows live in [AI skills](docs/README.md#ai-skills).
+The [MotionLoom skill](skills/motionloom/SKILL.md) selects the appropriate workflow;
+API callers can also use the feature guides directly.
+
+- [Immediate Preview](docs/IMMEDIATE_PREVIEW.md) — retained rendering, host quality
   profiles, capability reporting, and frame metrics
-- [Hair cards authoring](HAIR_CARDS.md): shared defaults, root normals, mirrored
+- [Hair cards authoring](docs/HAIR_CARDS.md): shared defaults, root normals, mirrored
   guides, absolute roll, curved normals, and closed tapered tips.
 
-- [LLM Authoring Guide](LLM_AUTHORING.md) — DSL rules and agent repair protocol
-- [Public API](PUBLIC_API.md) — supported Rust integration surface
+- [LLM Authoring Guide](docs/LLM_AUTHORING.md) — DSL rules and agent repair protocol
+- [Public API](docs/PUBLIC_API.md) — supported Rust integration surface
 - [Changelog](CHANGELOG.md) — release history
 - [Path DSL benchmark](benchmarks/path-dsl/README.md) — benchmark methodology
 - [MotionLoom examples](https://github.com/LOVELYZOMBIEYHO/motionloom-example) — portable core example documents
@@ -754,31 +798,32 @@ fallback or renderer-capability report.
 ## Contributing
 
 Issues and focused pull requests are welcome through the
-[Anica repository](https://github.com/LOVELYZOMBIEYHO/anica). Please include a
+[MotionLoom repository](https://github.com/LOVELYZOMBIEYHO/motionloom). Please include a
 minimal `.motionloom` reproduction for parser or renderer issues and identify
 the native or WASM target used for testing.
 
 ## License
 
-MotionLoom is available under the [Apache License 2.0](../../LICENSE).
+MotionLoom is available under the [Apache License 2.0](LICENSE).
 
 ### Head reference fitting
 
 `motionloom::api::head_fitting` provides opt-in typed/JSON multi-view head
 authoring, bounded parameter fitting, reviewed source patches and CPU comparison
-overlays. See [Head reference fitting](HEAD_REFERENCE_FITTING.md) for the contract,
+overlays. See [Head reference fitting](docs/HEAD_REFERENCE_FITTING.md) for the contract,
 WASM exports, CLI examples and geometry limitations. Existing DSL/runtime behavior
 is unchanged.
 
 ### Subdivision and facial cages
 
-`MeshAsset` accepts a connected polygon cage using
+`GeometryAsset/Mesh` contains a connected polygon cage using
 `Vertex position={[x,y,z]}` (with optional `uv={[u,v]}` and
 `pinned="true"`) and `Face indices={[a,b,c,d]}`. Indices are
 zero-based in declaration order; triangles and quads are supported. Native and
-WASM share Catmull–Clark tessellation (`subdivision="0|1|2"`, default 0 for
-`MeshAsset`). Set `subdivisionScheme="catmullClark"` explicitly when useful for
-authoring clarity. Pin the
+WASM share subdivision through `GeometryAsset/Modifiers/Subdivision` with
+`levels="0|1|2"` and `scheme="linear|catmullClark"`; omission leaves the authored
+cage unsubdivided. `MeshAsset` references the geometry and material rather than
+owning vertices or subdivision attributes. Pin the
 surrounding head vertices when fitting orbital or lip rings so subdivision does
 not change the accepted silhouette. Shared indices join the socket to the skin.
 Eye generates a convex sclera surface; optional Iris and repeatable Eyeliner
@@ -790,8 +835,8 @@ position-derived coordinates used before this addition.
 `Head topology="facialCage"` uses compact, semantic `HeadProfile`,
 `HeadDome`, `FaceLayout`, and `FacialCage` declarations; Rust expands them to the
 same control-cage IR on native and WASM. This is not automatic retopology or a
-facial rig. See [Facial and subdivision cages](FACIAL_CAGES.md),
-[PUBLIC_API.md](PUBLIC_API.md), [Mesh authoring API](MESH_AUTHORING.md), and S86
+facial rig. See [Facial and subdivision cages](docs/FACIAL_CAGES.md),
+[PUBLIC_API.md](docs/PUBLIC_API.md), [Mesh authoring API](docs/MESH_AUTHORING.md), and S86
 for both authoring levels.
 `FaceLayout` contains explicit `Eye`, `Eyebrow`, `Nose`, `Mouth`, and `Ear` components.
 `Eyebrow` generates a curved ribbon from position, width, thickness, arch, and
@@ -801,7 +846,7 @@ children. Iris is omitted for eyes that intentionally have no iris. Iris positio
 is Eye-local; shape accepts circle, ellipse, or square, and its scale reshapes the
 generated geometry independently from nested Texture UV transforms.
 Each component owns its position and dimensions. Nested `Texture asset="..."`
-follows that component's generated surface. See [Face components](FACE_COMPONENTS.md).
+follows that component's generated surface. See [Face components](docs/FACE_COMPONENTS.md).
 
 ### Audio editing
 
@@ -809,4 +854,4 @@ Add `AudioClip` regions referencing `AudioAsset`, then animate `gainDb`, `pan`, 
 `playbackRate` using `AudioTarget` with the existing `Key time/frame/value/ease`
 syntax. Native video export mixes through the existing FFmpeg path; the browser
 uses the shared WASM mixer, Web Audio playback, and Mediabunny/WebCodecs AV export.
-See [AUDIO.md](AUDIO.md) for syntax, timing, migration, host integration and limits.
+See [AUDIO.md](docs/AUDIO.md) for syntax, timing, migration, host integration and limits.

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/render_frame_to_wgpu_texture.rs
+// examples/render_frame_to_wgpu_texture.rs
 
 use motionloom::{SceneRenderProfile, SceneRenderer, parse_graph_script};
 

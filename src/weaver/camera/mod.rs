@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/camera/mod.rs
+// src/weaver/camera/mod.rs
 
 use crate::weaver::{LensSource, RenderJob, WeaverError};
 use crate::world::WorldCamera;

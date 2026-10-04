@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/api.rs
+// src/api.rs
 
 //! Recommended MotionLoom public API surface.
 //!
@@ -9,6 +9,10 @@
 //!
 //! Prefer this module for new host applications, examples, and third-party
 //! integrations.
+//!
+//! Headless modeling and humanoid binding are available through
+//! [`character_authoring`] and [`character_authoring::rig`]. Hosts own sessions,
+//! storage and scheduling; the DSL remains authoritative.
 //!
 //! # Parse and render
 //!
@@ -97,6 +101,7 @@ pub use crate::scene::atmosphere::{
 };
 // Image-reference analysis and safe MeshAsset proposals stay outside the DSL.
 /// Deterministic, recipe-driven MeshAsset construction and revision workflow.
+pub use crate::character_authoring;
 pub use crate::mesh_authoring;
 pub use crate::mesh_reference;
 // Formatting operates on source text and needs no renderer or asset resolver.
@@ -134,6 +139,7 @@ pub use crate::{
     animation_properties_for_node_kind, animation_property_descriptor,
     animation_property_schema_json, auto_correct_skeleton, build_skeleton_overlay,
     builtin_proportion_profile, builtin_proportion_profiles, builtin_skeleton_pose_presets,
+    export_scene_head_swap_glb, export_scene_head_swap_glb_with_resolver,
     clear_scene_asset_roots, compare_glb_head_to_head_asset_json,
     compare_glb_head_to_head_asset_path, compile_render_pass_dag, compile_runtime_program,
     evaluate_world_actor_rig, inspect_animation_targets, inspect_glb_environment_bytes,

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/render_style/resolve.rs
+// src/render_style/resolve.rs
 
 //! Resolve authored styles and lower them into scene-owned runtime payloads.
 

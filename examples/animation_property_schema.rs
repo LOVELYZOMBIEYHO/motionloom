@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/animation_property_schema.rs
+// examples/animation_property_schema.rs
 
 fn main() {
     // The runtime-owned registry prevents generated editor metadata from

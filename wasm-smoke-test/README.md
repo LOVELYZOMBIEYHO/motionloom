@@ -15,7 +15,7 @@ curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 From the repository root:
 
 ```bash
-wasm-pack build crates/motionloom --target web --out-dir wasm-smoke-test/pkg
+wasm-pack build . --target web --out-dir wasm-smoke-test/pkg
 ```
 
 ## Run in a browser
@@ -23,7 +23,7 @@ wasm-pack build crates/motionloom --target web --out-dir wasm-smoke-test/pkg
 Serve the `wasm-smoke-test` directory with any static file server, for example:
 
 ```bash
-cd crates/motionloom/wasm-smoke-test
+cd wasm-smoke-test
 python3 -m http.server 8080
 ```
 
@@ -38,13 +38,13 @@ Open <http://localhost:8080> and click the buttons to verify:
 ## Run headless tests
 
 ```bash
-wasm-pack test crates/motionloom --headless --chrome --test wasm_browser_smoke
+wasm-pack test . --headless --chrome --test wasm_browser_smoke
 ```
 
 Or with Node:
 
 ```bash
-wasm-pack test crates/motionloom --node --test wasm_browser_smoke
+wasm-pack test . --node --test wasm_browser_smoke
 ```
 
-The tests live in `crates/motionloom/tests/wasm_browser_smoke.rs`.
+The tests live in `tests/wasm_browser_smoke.rs`.

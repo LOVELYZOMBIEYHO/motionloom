@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/jobs/mod.rs
+// src/weaver/jobs/mod.rs
 
 use super::api::{CancellationToken, FrameDeltaKind, RenderProgress, RenderReport};
 use super::{

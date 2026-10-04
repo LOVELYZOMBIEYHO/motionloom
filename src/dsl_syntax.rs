@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/dsl_syntax.rs
+// src/dsl_syntax.rs
 
 //! Source scanners shared by parsing and lossless formatting.
 

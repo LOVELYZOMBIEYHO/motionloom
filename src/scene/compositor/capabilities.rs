@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/capabilities.rs
+// src/scene/compositor/capabilities.rs
 
 use std::collections::HashSet;
 

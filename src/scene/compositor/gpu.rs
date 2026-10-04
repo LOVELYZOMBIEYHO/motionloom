@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/compositor/gpu.rs
+// src/scene/compositor/gpu.rs
 
 use std::sync::Arc;
 

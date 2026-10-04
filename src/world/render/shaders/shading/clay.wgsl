@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/shading/clay.wgsl
+// src/world/render/shaders/shading/clay.wgsl
 
 fn clay_base_color() -> vec3<f32> {
     return vec3<f32>(0.55, 0.48, 0.40);

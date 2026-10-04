@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/geometry/mod.rs
+// src/geometry/mod.rs
 
 //! Camera-independent, static asset tooling. The DSL remains authoritative.
 mod glb;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/shading/stylized.wgsl
+// src/world/render/shaders/shading/stylized.wgsl
 
 fn stylized_intensity(normal: vec3<f32>, light: vec3<f32>) -> f32 {
     return clamp(

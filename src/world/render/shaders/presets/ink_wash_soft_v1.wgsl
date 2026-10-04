@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/presets/ink_wash_soft_v1.wgsl
+// src/world/render/shaders/presets/ink_wash_soft_v1.wgsl
 
 // Soft coloured-ink recipe: depth-aware washes, five ink densities, broken contours,
 // world-anchored pigment and stationary paper grain. No temporal history is required.

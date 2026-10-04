@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/simulation/state.rs
+// src/simulation/state.rs
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParticleState {

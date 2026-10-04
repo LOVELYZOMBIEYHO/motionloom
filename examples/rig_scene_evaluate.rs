@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/rig_scene_evaluate.rs
+// examples/rig_scene_evaluate.rs
 
 use motionloom::api::{
     RigEvaluationRequest, RigReportDetail, RigSamplePoint, SceneRenderProfile, SceneRenderer,

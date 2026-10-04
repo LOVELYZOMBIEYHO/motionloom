@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/sphere_mesh.rs
+// src/world/primitive/sphere_mesh.rs
 
 use super::MeshBuilder;
 use std::f32::consts::{PI, TAU};

@@ -7,7 +7,7 @@ world units are metres: the pair is about 41 cm wide, rather than the earlier
 four-metre interpretation. Preview AO/contact shadows remain preview-only aids;
 Weaver obtains its contact and soft-shadow detail from sampled light transport.
 
-From the `anica` directory:
+From the `motionloom` directory:
 
 ```sh
 WEAVER_TEST_WIDTH=480 WEAVER_TEST_HEIGHT=272 WEAVER_TEST_SAMPLES=128 \

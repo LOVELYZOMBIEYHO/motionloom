@@ -1,5 +1,5 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/backend/mod.rs
+// src/weaver/backend/mod.rs
 
 pub(crate) mod wgpu;

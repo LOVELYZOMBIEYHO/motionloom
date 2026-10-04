@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/subdivision_surface_mesh.rs
+// src/world/primitive/subdivision_surface_mesh.rs
 
 use super::{MeshBuilder, normalize, triangle_cross};
 use crate::dsl::ControlCageNode;

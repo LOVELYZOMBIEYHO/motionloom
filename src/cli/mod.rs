@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/cli/mod.rs
+// src/cli/mod.rs
 
 //! Native command adapters. Applications should use `motionloom::api` directly.
 mod format;
@@ -87,7 +87,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<u8, CliError
     #[cfg(not(feature = "weaver"))]
     {
         let _ = options;
-        Err(CliError::Arguments("Weaver is not enabled in this binary. Build with:\n  cargo build -p motionloom --release --bin motionloom --features weaver\nOr install with:\n  cargo install --path crates/motionloom --bin motionloom --features weaver".into()))
+        Err(CliError::Arguments("Weaver is not enabled in this binary. Build with:\n  cargo build -p motionloom --release --bin motionloom --features weaver\nOr install with:\n  cargo install --path . --bin motionloom --features weaver".into()))
     }
 }
 

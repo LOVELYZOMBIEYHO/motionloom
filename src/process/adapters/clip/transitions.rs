@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/adapters/clip/transitions.rs
+// src/process/adapters/clip/transitions.rs
 
 use super::model::SlideDirection;
 use std::time::Duration;

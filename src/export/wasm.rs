@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/export/wasm.rs
+// src/export/wasm.rs
 
 use crate::export::{EncodeError, VideoEncoder};
 

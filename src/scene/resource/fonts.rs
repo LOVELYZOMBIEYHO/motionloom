@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/resource/fonts.rs
+// src/scene/resource/fonts.rs
 
 use cosmic_text::FontSystem;
 

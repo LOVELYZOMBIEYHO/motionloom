@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/mesh_authoring.rs
+// examples/mesh_authoring.rs
 
 use motionloom::api::mesh_authoring::{
     ApplyTopologyProposalResult, GeometryRecipe, apply_mesh_topology_proposal_json,

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/render/shaders/color.wgsl
+// src/world/render/shaders/color.wgsl
 
 fn white_balance(color: vec3<f32>, kelvin: f32) -> vec3<f32> {
     let temperature = clamp((kelvin - 6500.0) / 6500.0, -0.75, 0.75);

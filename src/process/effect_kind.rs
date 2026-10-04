@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/process/effect_kind.rs
+// src/process/effect_kind.rs
 // =========================================
 
 use crate::process::pass::normalize_effect_key;

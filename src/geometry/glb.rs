@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/geometry/glb.rs
+// src/geometry/glb.rs
 
 use super::*;
 use serde_json::{Value, json};

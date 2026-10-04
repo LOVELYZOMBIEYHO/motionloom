@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/export_scene_glb.rs
+// examples/export_scene_glb.rs
 
 use motionloom::experimental::*;
 

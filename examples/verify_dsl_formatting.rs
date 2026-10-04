@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/verify_dsl_formatting.rs
+// examples/verify_dsl_formatting.rs
 
 //! Verify lossless edits, idempotence and parsed semantics across a DSL corpus.
 

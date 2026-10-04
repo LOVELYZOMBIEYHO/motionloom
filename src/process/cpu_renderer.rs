@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/process/cpu_renderer.rs
+// src/process/cpu_renderer.rs
 // =========================================
 
 use image::RgbaImage;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/scene/bridge.rs
+// src/weaver/scene/bridge.rs
 
 // Compiled under scene::render to reuse private lowering without widening its API.
 use super::*;
@@ -44,6 +44,7 @@ pub(crate) async fn weaver_snapshot(
             .map_err(|e| WeaverError::Scene(e.to_string()))?;
     }
     renderer.prepare_frame_caches(&graph);
+    renderer.ensure_head_swap_assets().await.map_err(err)?;
     let scene = &graph.scenes[scene_index];
     let composition = crate::scene::compositor::build_scene_composition_plan(&graph, &scene_id)
         .map_err(|error| WeaverError::Scene(error.to_string()))?;

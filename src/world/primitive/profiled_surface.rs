@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/primitive/profiled_surface.rs
+// src/world/primitive/profiled_surface.rs
 
 /// One horizontal cross-section shared by semantic cage generators.
 #[derive(Clone, Copy, Debug, PartialEq)]

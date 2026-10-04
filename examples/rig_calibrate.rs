@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/examples/rig_calibrate.rs
+// examples/rig_calibrate.rs
 
 use motionloom::api::{RigComparisonReport, propose_rig_calibration};
 use std::{env, fs};

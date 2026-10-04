@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/error.rs
+// src/weaver/error.rs
 
 /// Errors remain typed until a host chooses a transport representation.
 #[derive(Debug, thiserror::Error)]

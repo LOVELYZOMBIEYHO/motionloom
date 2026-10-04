@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/scene/editor_keyframes.rs
+// src/scene/editor_keyframes.rs
 
 use crate::dsl::{AnimationKeyNode, AnimationTargetNode, parse_graph_script, parse_time_seconds};
 use crate::error::GraphParseError;

@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/world/optics.rs
+// src/world/optics.rs
 
 /// Physical camera values shared by raster preview and offline ray generation.
 /// Focus is axial depth in scene units; one scene unit is one meter.

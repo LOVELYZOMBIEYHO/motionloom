@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/weaver/backend/wgpu/shaders/denoise.wgsl
+// src/weaver/backend/wgpu/shaders/denoise.wgsl
 
 // GPU denoiser for the Weaver film buffer. `denoise_seed` converts the accumulated
 // film into radiance, normal, albedo and variance planes; `denoise_wavelet` runs an

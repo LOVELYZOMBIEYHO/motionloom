@@ -1,5 +1,5 @@
 // =========================================
-// crates/motionloom/src/scene/atmosphere.rs
+// src/scene/atmosphere.rs
 // =========================================
 
 use serde::{Deserialize, Serialize};

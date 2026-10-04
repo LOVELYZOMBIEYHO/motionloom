@@ -1,6 +1,6 @@
 // =========================================
 // =========================================
-// crates/motionloom/src/mesh_authoring/geometry.rs
+// src/mesh_authoring/geometry.rs
 
 use super::{
     Axis, GeometryOperation, GeometryRecipe, MESH_AUTHORING_SCHEMA_VERSION, MeshAuthoringError,
