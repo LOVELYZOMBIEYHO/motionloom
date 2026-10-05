@@ -12598,7 +12598,21 @@ fn gpu_texture_for_material(
     } else {
         material_color(mesh, material_index, fallback, 1.0, 1.0)
     };
-    GpuWorldTexture::new(1, 1, vec![color[0], color[1], color[2], color[3]])
+    // The CPU painter uses translucent fallback colors for its approximation.
+    // GPU surfaces must retain authored coverage: an opaque GLB has alpha one.
+    let alpha = if primitive_material_uniform {
+        1.0 // Primitive coverage is already supplied by its material uniform.
+    } else {
+        material_index
+            .and_then(|index| mesh.materials.get(index))
+            .map_or(1.0, |material| material.base_color_factor[3])
+            .clamp(0.0, 1.0)
+    };
+    GpuWorldTexture::new(
+        1,
+        1,
+        vec![color[0], color[1], color[2], (alpha * 255.0).round() as u8],
+    )
 }
 
 fn gpu_texture_for_index(

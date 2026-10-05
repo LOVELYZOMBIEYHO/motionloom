@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve authored alpha when generating GPU color texels for textureless GLB
+  materials. Opaque characters no longer reveal their rear surfaces through
+  the CPU preview fallback alpha; transparent materials retain their coverage.
+
 - Resolve legacy `../sample_assets/` references from standalone asset collection
   roots while preserving host lookup precedence. Verify bundled fixture lookup
   without relying on sibling editor or example checkouts. Run CI unit/integration

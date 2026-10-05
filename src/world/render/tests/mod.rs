@@ -190,6 +190,45 @@ fn camera_hidden_hips_hides_the_whole_actor_color_pass() {
 }
 
 #[test]
+fn textureless_gpu_material_preserves_authored_coverage() {
+    let mut mesh = super::GlbMeshData {
+        path: "coverage.glb".into(),
+        positions: Vec::new(),
+        normals: Vec::new(),
+        texcoords: Vec::new(),
+        colors: Vec::new(),
+        joints: Vec::new(),
+        weights: Vec::new(),
+        indices: Vec::new(),
+        triangles: Vec::new(),
+        materials: vec![super::GlbMaterialData::default()],
+        textures: Vec::new(),
+        mesh_names: Vec::new(),
+        nodes: Vec::new(),
+        skin: None,
+        animations: Vec::new(),
+        bounds_min: [0.0; 3],
+        bounds_max: [0.0; 3],
+    };
+    let key = super::GpuWorldDrawKey {
+        material: Some(0),
+        texture: None,
+        mesh: None,
+        mesh_node: None,
+    };
+    for (alpha, expected) in [(1.0, 255), (0.5, 128), (0.0, 0)] {
+        mesh.materials[0].base_color_factor[3] = alpha;
+        let texel = super::gpu_texture_for_material(&mesh, Some(0), key, [111, 145, 190], false);
+        assert_eq!(texel.rgba[3], expected, "authored coverage {alpha}");
+        // Primitive alpha is applied once in the uniform, not in this texel.
+        let primitive = super::gpu_texture_for_material(&mesh, Some(0), key, [111, 145, 190], true);
+        assert_eq!(primitive.rgba.as_slice(), &[255; 4]);
+    }
+    let fallback = super::gpu_texture_for_material(&mesh, None, key, [111, 145, 190], false);
+    assert_eq!(fallback.rgba[3], 255);
+}
+
+#[test]
 fn transmissive_material_defaults_to_sorted_non_depth_writing_phase() {
     let material = super::GlbMaterialData {
         transmission_factor: 0.94,
