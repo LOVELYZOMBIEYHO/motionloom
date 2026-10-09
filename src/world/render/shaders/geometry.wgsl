@@ -182,9 +182,11 @@ fn cel_shared_vertex(input: VertexIn, instance_id: u32) -> VertexOut {
     out.bitangent = bitangent_world;
     out.face_forward = vec3<f32>(0.0,0.0,1.0);
     out.face_right = vec3<f32>(1.0,0.0,0.0);
-    if (params.cel_material0.y > 2.5) {
-        out.face_forward = cel_basis(input, vec3<f32>(0.0,0.0,1.0));
-        out.face_right = cel_basis(input, vec3<f32>(1.0,0.0,0.0));
+    if (!PHYSICAL_STYLE_ONLY) {
+        if (params.cel_material0.y > 2.5) {
+            out.face_forward = cel_basis(input, vec3<f32>(0.0,0.0,1.0));
+            out.face_right = cel_basis(input, vec3<f32>(1.0,0.0,0.0));
+        }
     }
     var hidden_weight = params.style.w;
     if (hidden_weight <= 0.01 && weight_sum > 0.000001) {

@@ -440,14 +440,15 @@ impl WgpuSceneCompositor {
         }
     }
 
-    /// Start collecting all command buffers for one native frame.
+    /// Admit one native frame before collecting its command buffers. The
+    /// embedded World renderer submits on this queue during Scene lowering.
     pub(crate) fn begin_native_frame(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.current_cpu_upload = Duration::ZERO;
             self.current_cpu_encode = Duration::ZERO;
             self.current_cpu_wait = Duration::ZERO;
-            self.poll_native_submissions();
+            self.acquire_native_frame_slot();
             self.frame_recording = true;
             self.pending_command_encoder = Some(self.device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor {
@@ -511,18 +512,10 @@ impl WgpuSceneCompositor {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn submit_native_frame(
-        &mut self,
-        command_buffers: Vec<wgpu::CommandBuffer>,
-        keepalive: WgpuDispatchKeepalive,
-        timestamp: Option<NativeGpuTimestampFrame>,
-        poll_before_submit: bool,
-    ) {
+    fn acquire_native_frame_slot(&mut self) {
         const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
-        if poll_before_submit {
-            self.poll_native_submissions();
-        }
+        self.poll_native_submissions();
         while self.in_flight_submissions.len() >= MAX_FRAMES_IN_FLIGHT {
             let Some(mut oldest) = self.in_flight_submissions.pop_front() else {
                 break;
@@ -534,6 +527,21 @@ impl WgpuSceneCompositor {
                 .ok();
             self.current_cpu_wait += wait_started.elapsed();
             self.collect_gpu_timestamp_result(&mut oldest);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn submit_native_frame(
+        &mut self,
+        command_buffers: Vec<wgpu::CommandBuffer>,
+        keepalive: WgpuDispatchKeepalive,
+        timestamp: Option<NativeGpuTimestampFrame>,
+        acquire_before_submit: bool,
+    ) {
+        // Recorded frames acquired their slot before World3D queue submission.
+        // Standalone compositor dispatches still acquire exactly once here.
+        if acquire_before_submit {
+            self.acquire_native_frame_slot();
         }
         let index = self.queue.submit(command_buffers);
         if let Some(timestamp) = timestamp.as_ref() {

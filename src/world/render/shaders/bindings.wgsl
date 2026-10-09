@@ -2,6 +2,10 @@
 // =========================================
 // src/world/render/shaders/bindings.wgsl
 
+// Native investigation only. The renderer specializes this constant after
+// proving the evaluated lighting style is exactly physical for this module.
+const PHYSICAL_STYLE_ONLY: bool = false;
+
 struct Params {
     canvas: vec4<f32>,
     model: vec4<f32>,
@@ -21,6 +25,9 @@ struct Params {
     material6: vec4<f32>,
     material7: vec4<f32>,
     material8: vec4<f32>,
+    material9: vec4<f32>,
+    material10: vec4<f32>,
+    material11: vec4<f32>,
     cel_material0: vec4<f32>,
     cel_material1: vec4<f32>,
     vegetation: vec4<f32>,
@@ -89,7 +96,12 @@ struct Lighting {
     universal_tone: vec4<f32>,
     universal_shadow: vec4<f32>,
     universal_highlight: vec4<f32>,
+    environment_sh: array<vec4<f32>, 9>,
+    baked0: vec4<f32>,
+    baked1: vec4<f32>,
     lights: array<Light, 8>,
+    // Requested reflection bounces, host quality, geometry revision, enabled.
+    reflection0: vec4<f32>,
 };
 
 struct BoneMatrices {
@@ -142,3 +154,19 @@ var<private> params: Params;
 @group(1) @binding(4) var shadow_sampler: sampler_comparison;
 @group(2) @binding(0) var opaque_scene_texture: texture_2d<f32>;
 @group(2) @binding(1) var opaque_scene_sampler: sampler;
+
+struct PlanarReflectionParams {
+    camera0: vec4<f32>,
+    camera1: vec4<f32>,
+    camera2: vec4<f32>,
+    camera3: vec4<f32>,
+    plane: vec4<f32>,
+    control: vec4<f32>,
+};
+@group(0) @binding(9) var planar_texture: texture_2d<f32>;
+@group(0) @binding(10) var planar_sampler: sampler;
+@group(0) @binding(11) var<uniform> planar: PlanarReflectionParams;
+@group(1) @binding(5) var environment_brdf_texture: texture_2d<f32>;
+@group(1) @binding(6) var environment_brdf_sampler: sampler;
+@group(1) @binding(7) var environment_background_texture: texture_2d<f32>;
+@group(2) @binding(2) var opaque_scene_depth: texture_depth_2d;

@@ -80,11 +80,18 @@ fn preview_required_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .and_then(|value| value.checked_mul(1024 * 1024));
+    preview_limits_with_buffer_cap(adapter_limits, configured_max)
+}
+
+fn preview_limits_with_buffer_cap(adapter_limits: wgpu::Limits, configured_max: Option<u64>) -> wgpu::Limits {
     wgpu::Limits {
         max_buffer_size: configured_max
             .unwrap_or(adapter_limits.max_buffer_size)
             .min(adapter_limits.max_buffer_size),
-        ..wgpu::Limits::default()
+        // The renderer selects supported reflection/evidence paths from the
+        // requested device limits. Minimum WebGPU defaults would hide native
+        // capabilities (notably >16 fragment textures), forcing full queries.
+        ..adapter_limits
     }
 }
 
@@ -345,6 +352,44 @@ impl NativeAudioPreview {
     }
 }
 
+#[derive(Default)]
+struct PresentationRate {
+    window_started_at: Option<Instant>,
+    intervals: u32,
+    fps: Option<f64>,
+}
+
+impl PresentationRate {
+    fn completed_frame_ms(&self, render_started_at: Instant, presented_at: Instant) -> Option<f32> {
+        // Skip the first completed frame after startup or an activity reset.
+        // Its shader compilation and asset preparation are not steady playback.
+        self.window_started_at?;
+        Some(presented_at.duration_since(render_started_at).as_secs_f32() * 1000.0)
+    }
+
+    fn presented_at(&mut self, now: Instant) {
+        let Some(started) = self.window_started_at else {
+            // The first completed present starts measurement; asset loading
+            // and shader compilation before it are startup, not playback FPS.
+            self.window_started_at = Some(now);
+            return;
+        };
+        self.intervals += 1;
+        let elapsed = now.duration_since(started);
+        if elapsed >= Duration::from_secs(1) {
+            self.fps = Some(f64::from(self.intervals) / elapsed.as_secs_f64());
+            self.window_started_at = Some(now);
+            self.intervals = 0;
+        }
+    }
+
+    fn label(&self) -> String {
+        self.fps
+            .map(|fps| format!("{fps:.1}"))
+            .unwrap_or_else(|| "pending".to_string())
+    }
+}
+
 struct LivePreviewApp {
     script_source: String,
     base_script: String,
@@ -394,6 +439,7 @@ struct LivePreviewApp {
     last_cpu_profile: SceneCpuFrameProfile,
     last_3d_profile: Scene3DFrameProfile,
     last_present_ms: f32,
+    presentation_rate: PresentationRate,
     render_times: Vec<f32>,
     present_times: Vec<f32>,
     requested_window_bounds: Option<PreviewWindowBounds>,
@@ -402,6 +448,8 @@ struct LivePreviewApp {
     // Controller visibility is a hard gate; frame updates must not re-show a hidden host window.
     controller_window_visible_allowed: bool,
     window_visible: bool,
+    window_occluded: bool,
+    rendering_suspended: bool,
     interaction_mode: PreviewInteractionMode,
     interaction_graph_width: f32,
     interaction_graph_height: f32,
@@ -548,6 +596,7 @@ impl LivePreviewApp {
             last_cpu_profile: SceneCpuFrameProfile::default(),
             last_3d_profile: Scene3DFrameProfile::default(),
             last_present_ms: 0.0,
+            presentation_rate: PresentationRate::default(),
             render_times: Vec::with_capacity(240),
             present_times: Vec::with_capacity(240),
             requested_window_bounds: None,
@@ -555,6 +604,8 @@ impl LivePreviewApp {
             needs_redraw: true,
             controller_window_visible_allowed: !host_mode,
             window_visible: !host_mode,
+            window_occluded: false,
+            rendering_suspended: false,
             interaction_mode: PreviewInteractionMode::Move,
             interaction_graph_width: 1280.0,
             interaction_graph_height: 720.0,
@@ -597,6 +648,7 @@ impl LivePreviewApp {
         self.present_cache.clear();
         self.render_times.clear();
         self.present_times.clear();
+        self.presentation_rate = PresentationRate::default();
         self.update_title_now();
     }
 
@@ -630,7 +682,15 @@ impl LivePreviewApp {
 
     fn resume_adaptive_quality(&mut self) {
         self.adaptive_quality.resume_auto();
+        self.presentation_rate = PresentationRate::default();
         self.request_redraw();
+    }
+
+    fn reset_presentation_activity(&mut self) {
+        self.presentation_rate = PresentationRate::default();
+        // Reset only observations, preserving enabled and manual-lock policy.
+        self.adaptive_quality
+            .set_target_fps(self.base_graph.fps.max(1.0));
     }
 
     fn load_script_text(&mut self, script: String, source: Option<String>) -> Result<(), String> {
@@ -734,6 +794,9 @@ impl LivePreviewApp {
                 let visible = visible && self.frontmost_app_allows_visibility();
                 let changed = self.window_visible != visible;
                 self.window_visible = visible;
+                if changed {
+                    self.reset_presentation_activity();
+                }
                 if changed && let Some(window) = self.window.as_ref() {
                     window.set_visible(visible);
                 }
@@ -837,6 +900,9 @@ impl LivePreviewApp {
             return;
         }
         if !self.controller_window_visible_allowed {
+            if self.window_visible {
+                self.reset_presentation_activity();
+            }
             self.window_visible = false;
             self.last_attach_heartbeat = None;
             if let Some(window) = self.window.as_ref() {
@@ -848,6 +914,9 @@ impl LivePreviewApp {
             if preview_host_debug_enabled() {
                 eprintln!("preview host hide: frontmost app is not controller/host");
             }
+            if self.window_visible {
+                self.reset_presentation_activity();
+            }
             self.window_visible = false;
             self.last_attach_heartbeat = None;
             if let Some(window) = self.window.as_ref() {
@@ -857,6 +926,9 @@ impl LivePreviewApp {
         }
         let changed = !self.window_visible;
         self.window_visible = true;
+        if changed {
+            self.reset_presentation_activity();
+        }
         self.last_attach_heartbeat = Some(Instant::now());
         if let Some(window) = self.window.as_ref() {
             if changed {
@@ -1681,6 +1753,7 @@ impl LivePreviewApp {
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
+        self.reset_presentation_activity();
         let Some(surface) = self.surface.as_ref() else {
             return;
         };
@@ -1907,6 +1980,15 @@ impl LivePreviewApp {
         }
         queue.submit(Some(encoder.finish()));
         surface_texture.present();
+        let presented_at = Instant::now();
+        // Include surface acquisition and GPU queue backpressure, but omit
+        // event-loop idle time and intentional redraw pacing from the budget.
+        let completed_frame_ms = self
+            .presentation_rate
+            .completed_frame_ms(render_start, presented_at);
+        // Complete-presentation intervals include GPU queue backpressure,
+        // surface acquisition and blit time omitted by render_ms alone.
+        self.presentation_rate.presented_at(presented_at);
         let present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
         let rendered_frame = self.frame;
 
@@ -1928,12 +2010,21 @@ impl LivePreviewApp {
             frame: rendered_frame,
         });
         self.broadcast_frame_metrics(rendered_frame);
-        if let Some(quality) = self.adaptive_quality.observe(self.quality, render_ms) {
+        let active_playback = self.auto_advance
+            && !self.window_occluded
+            && !self.rendering_suspended
+            && self.window.as_ref().is_some_and(|window| window.has_focus());
+        if active_playback
+            && let Some(completed_frame_ms) = completed_frame_ms
+            && let Some(quality) = self
+                .adaptive_quality
+                .observe(self.quality, completed_frame_ms)
+        {
             preview_host_debug_log(format!(
-                "adaptive preview quality: {} -> {} after {:.2} ms frame",
+                "adaptive preview quality: {} -> {} after {:.2} ms completed frame",
                 self.quality.label(),
                 quality.label(),
-                render_ms
+                completed_frame_ms
             ));
             self.set_quality_internal(quality);
         }
@@ -1952,6 +2043,7 @@ impl LivePreviewApp {
             return;
         }
         self.last_attach_heartbeat = None;
+        self.reset_presentation_activity();
         self.window_visible = false;
         if let Some(window) = self.window.as_ref() {
             window.set_visible(false);
@@ -1974,18 +2066,17 @@ impl LivePreviewApp {
         let min_render = min_or_zero(&self.render_times);
         let max_render = max_or_zero(&self.render_times);
         let timeline_fps = self.graph.as_ref().map(|graph| graph.fps).unwrap_or(0.0);
-        let actual_fps = if self.last_render_ms > 0.0 {
-            1000.0 / self.last_render_ms
-        } else {
-            0.0
-        };
+        let actual_fps = self.presentation_rate.label();
         let gpu_frame_label = self
             .last_gpu_frame_ms
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "pending".to_string());
         let measured_cpu_ms = self.measured_cpu_ms();
+        let world_gpu_label = self.last_3d_profile.gpu_ms
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "pending".to_string());
         window.set_title(&format!(
-            "MotionLoom wgpu live preview | frame {}/{} | FPS {:.1} | CPU {:.2} ms | frame wall {:.2} ms | 3D prep/submit {:.2}/{:.2} ms | GPU {} ms | avg {:.2} ms | min/max {:.2}/{:.2} ms | blit {:.2} ms | timeline {:.1} fps | target {}x{} | surface {:?} | quality {} (0 Auto, 1 Full, 2 Balanced, 3 Speed, 4 High Speed, 5 Ultra Speed) | {}",
+            "MotionLoom wgpu live preview | frame {}/{} | FPS {} | CPU/driver {:.2} ms | frame wall {:.2} ms | 3D prep/submit {:.2}/{:.2} ms | 3D GPU span {} ms | compositor GPU {} ms | avg {:.2} ms | min/max {:.2}/{:.2} ms | blit {:.2} ms | timeline {:.1} fps | target {}x{} | surface {:?} | quality {} (0 Auto, 1 Full, 2 Balanced, 3 Speed, 4 High Speed, 5 Ultra Speed) | {}",
             self.frame,
             self.total_frames,
             actual_fps,
@@ -1993,6 +2084,7 @@ impl LivePreviewApp {
             self.last_render_ms,
             self.last_3d_profile.prepare_ms,
             self.last_3d_profile.submit_ms,
+            world_gpu_label,
             gpu_frame_label,
             avg_render,
             min_render,
@@ -2020,12 +2112,16 @@ impl LivePreviewApp {
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "pending".to_string());
         println!(
-            "quality={} target={}x{} frame={}/{} frame_wall_last_ms={:.2} cpu_last_ms={:.2} expression_ms={:.3} traversal_ms={:.3} upload_ms={:.3} encode_ms={:.3} wait_ms={:.3} scene3d_prepare_ms={:.3} scene3d_asset_resolve_ms={:.3} texture_decode_ms={:.3} texture_decodes={} texture_cache_hits={} texture_decoded_bytes={} scene3d_submit_ms={:.3} scene3d_draw_calls={} scene3d_resources={} scene3d_texture_resources={} scene3d_geometry_resources={} scene3d_targets={} gpu_last_ms={} gpu_timestamp_supported={} render_avg_ms={:.2} render_min_ms={:.2} render_max_ms={:.2} blit_last_ms={:.2} blit_avg_ms={:.2}",
+            "quality={} target={}x{} frame={}/{} present_fps={} frame_wall_last_ms={:.2} cpu_last_ms={:.2} expression_ms={:.3} traversal_ms={:.3} upload_ms={:.3} encode_ms={:.3} wait_ms={:.3} scene3d_prepare_ms={:.3} scene3d_asset_resolve_ms={:.3} texture_decode_ms={:.3} texture_decodes={} texture_cache_hits={} texture_decoded_bytes={} scene3d_submit_ms={:.3} scene3d_draw_calls={} scene3d_resources={} scene3d_texture_resources={} scene3d_geometry_resources={} scene3d_targets={} gpu_last_ms={} gpu_scope=compositor gpu_timestamp_supported={} render_avg_ms={:.2} render_min_ms={:.2} render_max_ms={:.2} blit_last_ms={:.2} blit_avg_ms={:.2}",
             self.quality.label(),
             self.target_width,
             self.target_height,
             self.frame,
             self.total_frames,
+            self.presentation_rate
+                .fps
+                .map(|fps| format!("{fps:.3}"))
+                .unwrap_or_else(|| "pending".to_string()),
             self.last_render_ms,
             self.measured_cpu_ms(),
             self.last_cpu_profile.expression_ms,
@@ -2055,6 +2151,10 @@ impl LivePreviewApp {
             self.last_present_ms,
             avg(&self.present_times)
         );
+        if let (Some(frame), Some(stages)) = (self.last_3d_profile.gpu_frame_index, self.last_3d_profile.gpu_stages_ms) {
+            println!("scene3d_gpu_frame={} scene3d_gpu_span_ms={:.3} shadows_planar_ms={:.3} rough_evidence_ms={:.3} route_ms={:.3} opaque_ms={:.3} glass_ms={:.3} post_ms={:.3}",
+                frame,stages.iter().sum::<f64>(),stages[0],stages[1],stages[2],stages[3],stages[4],stages[5]);
+        }
     }
 
     fn broadcast_frame_metrics(&mut self, frame: u32) {
@@ -2077,9 +2177,10 @@ impl LivePreviewApp {
     fn measured_cpu_ms(&self) -> f64 {
         // Traversal includes CPU-side 3D batching, resource lookup, command
         // encoding, and queue submission, so keep that interval in the CPU
-        // render-thread metric. Explicit readback and queue/device waits are
-        // reported separately because they block the frame without doing
-        // active CPU work.
+        // render-thread wall metric. This includes implicit GPU-driver
+        // backpressure during command encoding/submission; it is not CPU
+        // execution time or utilization. Explicit readback and compositor
+        // queue/device waits are reported separately.
         let active_traversal_ms =
             (self.last_cpu_profile.traversal_ms - self.last_3d_profile.readback_ms).max(0.0);
         self.last_cpu_profile.expression_ms
@@ -2116,12 +2217,22 @@ fn configure_host_companion_window(_window: &Window) {}
 
 impl ApplicationHandler<PreviewHostUserEvent> for LivePreviewApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.rendering_suspended {
+            self.rendering_suspended = false;
+            self.reset_presentation_activity();
+            self.request_redraw();
+        }
         if self.window.is_none()
             && let Err(err) = self.init_wgpu(event_loop)
         {
             eprintln!("failed to initialize wgpu live preview: {err}");
             event_loop.exit();
         }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.rendering_suspended = true;
+        self.reset_presentation_activity();
     }
 
     fn window_event(
@@ -2186,13 +2297,26 @@ impl ApplicationHandler<PreviewHostUserEvent> for LivePreviewApp {
                 ..
             } => self.end_interaction_drag(),
             WindowEvent::Focused(focused) => {
+                self.reset_presentation_activity();
                 if self.host_mode && preview_host_platform::should_emit_host_focus_events() {
                     self.broadcast_event(PreviewEvent::HostFocus { focused });
                 }
             }
+            WindowEvent::Occluded(occluded) => {
+                if self.window_occluded != occluded {
+                    self.window_occluded = occluded;
+                    self.reset_presentation_activity();
+                    if !occluded {
+                        self.request_redraw();
+                    }
+                }
+            }
             WindowEvent::Resized(size) => self.resize(size),
             WindowEvent::RedrawRequested => {
-                if self.host_mode && (!self.window_visible || !self.needs_redraw) {
+                if self.rendering_suspended
+                    || self.window_occluded
+                    || (self.host_mode && (!self.window_visible || !self.needs_redraw))
+                {
                     return;
                 }
                 self.needs_redraw = false;
@@ -2211,7 +2335,9 @@ impl ApplicationHandler<PreviewHostUserEvent> for LivePreviewApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.hide_stale_attached_window();
         let now = Instant::now();
-        let can_draw = !self.host_mode || self.window_visible;
+        let can_draw = !self.rendering_suspended
+            && !self.window_occluded
+            && (!self.host_mode || self.window_visible);
         if can_draw && (self.auto_advance || self.needs_redraw) && now >= self.next_redraw_at {
             self.needs_redraw = true;
             if let Some(window) = self.window.as_ref() {
@@ -2220,7 +2346,7 @@ impl ApplicationHandler<PreviewHostUserEvent> for LivePreviewApp {
             self.next_redraw_at = now + self.frame_interval();
         }
         let heartbeat_at = now + Duration::from_millis(100);
-        let wake_at = if self.auto_advance || self.needs_redraw {
+        let wake_at = if can_draw && (self.auto_advance || self.needs_redraw) {
             self.next_redraw_at.min(heartbeat_at)
         } else {
             heartbeat_at
@@ -2501,7 +2627,87 @@ fn format_live_number(value: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{aspect_fit_viewport, local_scene_asset_root_for_source};
+    use super::{PresentationRate, aspect_fit_viewport, local_scene_asset_root_for_source, preview_limits_with_buffer_cap};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn native_preview_preserves_adapter_capabilities_when_capping_buffers() {
+        let adapter = wgpu::Limits {
+            max_sampled_textures_per_shader_stage: 31,
+            max_storage_buffers_per_shader_stage: 12,
+            max_buffer_size: 2 * 1024 * 1024 * 1024,
+            ..wgpu::Limits::default()
+        };
+        assert_eq!(preview_limits_with_buffer_cap(adapter.clone(), None), adapter);
+        let mut expected = adapter.clone();
+        expected.max_buffer_size = 128 * 1024 * 1024;
+        assert_eq!(preview_limits_with_buffer_cap(adapter.clone(), Some(expected.max_buffer_size)), expected);
+        assert_eq!(preview_limits_with_buffer_cap(adapter.clone(), Some(u64::MAX)), adapter);
+    }
+
+    #[test]
+    fn presented_fps_excludes_startup_and_waits_for_a_complete_window() {
+        let started = Instant::now();
+        let mut rate = PresentationRate::default();
+        rate.presented_at(started + Duration::from_secs(20));
+        assert_eq!(rate.fps, None);
+        assert_eq!(rate.label(), "pending");
+        rate.presented_at(started + Duration::from_millis(20_100));
+        assert_eq!(rate.fps, None);
+        rate.presented_at(started + Duration::from_secs(21));
+        assert_eq!(rate.fps, Some(2.0));
+    }
+
+    #[test]
+    fn presented_fps_counts_slow_surface_and_gpu_completion_intervals() {
+        let started = Instant::now();
+        let mut rate = PresentationRate::default();
+        rate.presented_at(started);
+        rate.presented_at(started + Duration::from_secs(12));
+        assert_eq!(rate.fps, Some(1.0 / 12.0));
+        rate.presented_at(started + Duration::from_secs(24));
+        assert_eq!(rate.fps, Some(1.0 / 12.0));
+        // A new target or newly visible window starts a fresh interval rather
+        // than charging hidden time to the resumed playback measurement.
+        rate = PresentationRate::default();
+        rate.presented_at(started + Duration::from_secs(600));
+        assert_eq!(rate.fps, None);
+        rate.presented_at(started + Duration::from_secs(601));
+        assert_eq!(rate.fps, Some(1.0));
+    }
+
+    #[test]
+    fn adaptive_frame_budget_skips_startup_and_activity_resets() {
+        let started = Instant::now();
+        let mut rate = PresentationRate::default();
+        let startup_finished = started + Duration::from_secs(20);
+        assert_eq!(rate.completed_frame_ms(started, startup_finished), None);
+        rate.presented_at(startup_finished);
+        assert_eq!(
+            rate.completed_frame_ms(startup_finished, startup_finished + Duration::from_secs(12)),
+            Some(12_000.0)
+        );
+        rate = PresentationRate::default();
+        assert_eq!(
+            rate.completed_frame_ms(startup_finished, startup_finished + Duration::from_secs(60)),
+            None
+        );
+    }
+
+    #[test]
+    fn adaptive_frame_budget_includes_surface_backpressure_and_excludes_idle_pacing() {
+        let started = Instant::now();
+        let mut rate = PresentationRate::default();
+        rate.presented_at(started);
+        // The host waits between redraws, then submits for 10 ms and blocks
+        // acquiring the next surface texture for 90 ms before presenting.
+        let render_started = started + Duration::from_secs(30);
+        let presented = render_started + Duration::from_millis(100);
+        let measured_ms = rate
+            .completed_frame_ms(render_started, presented)
+            .expect("the first completed presentation already anchored the budget");
+        assert!((measured_ms - 100.0).abs() < 0.001);
+    }
 
     #[test]
     fn aspect_fit_viewport_letterboxes_wide_surface() {

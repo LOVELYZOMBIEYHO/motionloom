@@ -809,8 +809,12 @@ impl WasmSceneRenderer {
     /// Compose a recipe using assets registered with add_asset; no GPU is required.
     pub async fn export_head_swap_glb(&self, asset_id: &str) -> Result<Vec<u8>, JsValue> {
         crate::api::export_scene_head_swap_glb_with_resolver(
-            &self.graph, asset_id, self.resolver.clone(),
-        ).await.map_err(|error| js_error(error.to_string()))
+            &self.graph,
+            asset_id,
+            self.resolver.clone(),
+        )
+        .await
+        .map_err(|error| js_error(error.to_string()))
     }
 
     /// List active 3D model ids that can be flattened into a static GLB.

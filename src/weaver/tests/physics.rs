@@ -223,9 +223,9 @@ fn gpu_lambertian_energy_and_batch_invariance() {
     let mut p = [[0.0f32; 4]; 26];
     p[0] = [8.0, 8.0, 32.0, f32::from_bits(1989)];
     p[1] = [
-        packed.triangle_offset as f32,
-        packed.material_offset as f32,
-        packed.light_offset as f32,
+        f32::from_bits(packed.triangle_offset),
+        f32::from_bits(packed.material_offset),
+        f32::from_bits(packed.light_offset),
         0.0,
     ];
     p[2] = [0.0, 0.0, 2.0, 0.0];
@@ -235,9 +235,10 @@ fn gpu_lambertian_energy_and_batch_invariance() {
     p[7] = [512.0, 512.0, 0.0, 0.0];
     p[8] = [4.0, 4.0, 4.0, 4.0];
     p[9][3] = 64.0;
-    p[10] = [env as f32, 1.0, 1.0, 0.0];
-    p[11] = [1.0, 1.0, 0.0, 0.0];
+    p[10] = [f32::from_bits(env as u32), 1.0, 1.0, 0.0];
+    p[11] = [1.0, 1.0, 1.0, 1.0];
     p[12] = [0.0, 0.0, 8.0, 8.0];
+    p[19] = [1.0, 1.0, 1.0, 1.0];
     let tile = gpu.tile(
         64,
         &vec![0; 64 * super::super::backend::wgpu::FILM_BYTES_PER_PIXEL],
@@ -289,4 +290,150 @@ fn gpu_lambertian_energy_and_batch_invariance() {
         &raw[index..index + super::super::backend::wgpu::FILM_BYTES_PER_PIXEL],
         cropped_bytes.as_slice()
     );
+}
+
+#[test]
+#[ignore = "requires GPU; validates multi-submit sampling and partial-round checkpoint resume"]
+fn bounded_tile_rounds_preserve_samples_and_resume() {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    fn checkpoints(output: &Path) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(output.join("checkpoints"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "film-v2")
+            })
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read(path).unwrap())
+            })
+            .collect()
+    }
+
+    fn assert_samples(films: &BTreeMap<String, Vec<u8>>, expected: f32) {
+        for (name, raw) in films {
+            assert_eq!(
+                raw.len() % super::super::backend::wgpu::FILM_BYTES_PER_PIXEL,
+                0
+            );
+            let film = super::super::output::floats(raw);
+            assert!(!film.is_empty(), "empty checkpoint {name}");
+            for pixel in film.chunks_exact(super::super::backend::wgpu::FILM_FLOATS_PER_PIXEL) {
+                assert!(
+                    pixel.iter().all(|value| value.is_finite()),
+                    "nonfinite film in {name}"
+                );
+                assert_eq!(pixel[7], 0.0, "invalid sample in {name}");
+                assert_eq!(pixel[3], expected, "sample accounting in {name}");
+            }
+        }
+    }
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "weaver-tile-rounds-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("scene.motionloom");
+    // Eighteen tiles cross multiple submission groups, including one-pixel edges.
+    // This fixture owns its geometry and needs no sibling showcase assets.
+    std::fs::write(
+        &source,
+        r##"<Graph fps={24} duration="1s" size={[1025,129]}>
+  <RenderStyle id="tile_physical">
+    <SurfaceStyle shading="physical" specular="1" />
+    <LightingStyle ambientIntensity="1" ambientColor="#FFFFFF" />
+    <PostStyle toneMapping="aces" exposure="1" />
+  </RenderStyle>
+  <Assets>
+    <MaterialAsset id="diffuse" shading="pbr" baseColor="#808080" roughness="1" specular="0" />
+    <GeometryAsset id="wall_geometry"><Primitive shape="box" size={[100,100,0.1]} /></GeometryAsset>
+    <MeshAsset id="wall" material="diffuse" geometry="wall_geometry" collision="none" />
+  </Assets>
+  <Scene id="tile_scene" renderStyle="tile_physical">
+    <Timeline>
+      <Track id="world_track" space="3d">
+        <Sequence from="0s" duration="1s">
+          <CompositeGroup id="world" space="3d">
+            <Camera3D position={[0,0,2]} target={[0,0,0]} fov="20" />
+            <DirectionalLight id="sun" direction={[0,0,-1]} color="#FFFFFF" intensity="2" castShadow="true" />
+            <Model asset="wall" />
+          </CompositeGroup>
+        </Sequence>
+      </Track>
+    </Timeline>
+  </Scene>
+  <Present from="tile_scene" />
+</Graph>"##,
+    )
+    .unwrap();
+    let mut job = RenderJob::new(&source, QualityPreset::Production);
+    job.scene_id = "tile_scene".into();
+    job.render_style = "tile_physical".into();
+    job.resolution = [1025, 129];
+    job.seed = 1989;
+    job.sampling.min_samples = 8;
+    job.sampling.max_samples = 8;
+    job.sampling.noise_threshold = 0.0;
+    job.sampling.batch_samples = 4;
+    job.light_paths.total = 4;
+    job.light_paths.diffuse = 2;
+    job.light_paths.glossy = 2;
+    job.light_paths.transmission = 4;
+    job.light_paths.roulette_start = 3;
+    job.output = dir.join("batch-four");
+    let baseline = pollster::block_on(render(&job, &CancellationToken::default(), |_| {})).unwrap();
+    assert_eq!(baseline.status, "sample_limit_reached");
+    let baseline_films = checkpoints(&baseline.output);
+    let tile_count = job.resolution[0].div_ceil(128) * job.resolution[1].div_ceil(128);
+    assert_eq!(baseline_films.len(), tile_count as usize);
+    assert_samples(&baseline_films, 8.0);
+
+    // The requested batch changes scheduling, never the per-pixel RNG sequence.
+    job.sampling.batch_samples = 8;
+    job.output = dir.join("batch-eight");
+    let larger_batch =
+        pollster::block_on(render(&job, &CancellationToken::default(), |_| {})).unwrap();
+    let larger_batch_films = checkpoints(&larger_batch.output);
+    assert_samples(&larger_batch_films, 8.0);
+    assert_eq!(baseline_films, larger_batch_films);
+
+    job.output = dir.join("partial-round");
+    let cancel = CancellationToken::default();
+    let mut callbacks = 0;
+    let partial = pollster::block_on(render(&job, &cancel, |_| {
+        callbacks += 1;
+        // Initial progress precedes dispatch; the next callback follows a saved group.
+        if callbacks == 2 {
+            cancel.cancel();
+        }
+    }))
+    .unwrap();
+    assert_eq!(partial.status, "cancelled");
+    assert!(!partial.output.join("render.lock").exists());
+    let partial_films = checkpoints(&partial.output);
+    assert!(
+        !partial_films.is_empty(),
+        "cancellation lost the completed group"
+    );
+    assert!(
+        partial_films.len() < tile_count as usize,
+        "cancellation completed the entire round"
+    );
+    assert_samples(&partial_films, 4.0);
+
+    let resumed = pollster::block_on(render(&job, &CancellationToken::default(), |_| {})).unwrap();
+    assert_eq!(resumed.status, "sample_limit_reached");
+    let resumed_films = checkpoints(&resumed.output);
+    assert_samples(&resumed_films, 8.0);
+    assert_eq!(larger_batch_films, resumed_films);
+    // Remove only the successful fixture's uniquely named directory.
+    std::fs::remove_dir_all(dir).unwrap();
 }

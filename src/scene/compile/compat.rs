@@ -41,7 +41,6 @@ pub(crate) fn scene_nodes_contain_image_or_svg(nodes: &[SceneNode]) -> bool {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
 pub(crate) fn scene_nodes_contain_3d_island(nodes: &[SceneNode]) -> bool {
     nodes.iter().any(|node| match node {
         SceneNode::Timeline(timeline) => scene_nodes_contain_3d_island(&timeline.children),

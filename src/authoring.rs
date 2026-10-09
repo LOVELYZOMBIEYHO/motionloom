@@ -1946,6 +1946,9 @@ fn supports_inline_expression(tag: &str, attribute: &str) -> Option<bool> {
     if is_style_tag(tag) {
         return Some(false);
     }
+    if tag == "MaterialAsset" && attribute == "refractionMode" {
+        return Some(false);
+    }
     if matches!(
         tag,
         "ParticleEmitter"
@@ -2392,11 +2395,17 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "emissiveTexture",
             "emissiveStrength",
             "specular",
+            "sheen",
+            "sheenColor",
+            "sheenRoughness",
+            "clearcoat",
+            "clearcoatRoughness",
             "doubleSided",
             "receiveCaustics",
             "alphaMode",
             "alphaCutoff",
             "transmission",
+            "refractionMode",
             "ior",
             "thickness",
             "attenuationColor",
@@ -2667,7 +2676,14 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "saturation",
             "outline",
         ]),
-        "LightingStyle" => strict(&["preset", "ambientIntensity", "ambientColor", "shadowStyle"]),
+        "LightingStyle" => strict(&[
+            "preset",
+            "ambientIntensity",
+            "ambientColor",
+            "shadowStyle",
+            "shadowMode",
+            "reflectionBounces",
+        ]),
         "OutlineStyle" => strict(&["enabled", "method", "color", "width", "distanceMode"]),
         "PostStyle" => strict(&[
             "toneMapping",
@@ -2736,6 +2752,8 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
             "surface",
             "uv",
         ]),
+        "BakedLighting" => strict(&["id", "src", "blend", "intensity", "specularIntensity"]),
+        "PlanarReflection" => strict(&["id", "target", "resolutionScale", "clipBias"]),
         "EnvironmentLight" => strict(&[
             "id",
             "asset",
@@ -2755,6 +2773,7 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
         ]),
         "DirectionalLight" => strict(&[
             "id",
+            "angularDiameter",
             "direction",
             "color",
             "intensity",
@@ -2765,6 +2784,7 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
         ]),
         "PointLight" => strict(&[
             "id",
+            "sourceRadius",
             "position",
             "color",
             "intensity",
@@ -2774,6 +2794,7 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
         ]),
         "SpotLight" => strict(&[
             "id",
+            "sourceRadius",
             "position",
             "direction",
             "color",
@@ -2788,6 +2809,7 @@ fn tag_capability(tag: &str) -> Option<TagCapability> {
         ]),
         "RectAreaLight" => strict(&[
             "id",
+            "castShadow",
             "position",
             "direction",
             "color",
@@ -3978,6 +4000,8 @@ const KNOWN_TAGS: &[&str] = &[
     "VolumetricScattering",
     "WaterCaustics",
     "EnvironmentLight",
+    "BakedLighting",
+    "PlanarReflection",
     "DirectionalLight",
     "PointLight",
     "SpotLight",
@@ -4526,6 +4550,29 @@ mod tests {
         ] {
             assert!(attributes.contains(&attribute), "missing {attribute}");
         }
+    }
+
+    #[test]
+    fn complete_schema_exposes_reflection_budget_and_refraction_without_mode_selector() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&motionloom_dsl_schema_json()).unwrap();
+        let attributes = |tag: &str| {
+            schema["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["tag"] == tag)
+                .unwrap()["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item["name"].as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(attributes("MaterialAsset").contains(&"refractionMode"));
+        let lighting = attributes("LightingStyle");
+        assert!(lighting.contains(&"reflectionBounces"));
+        assert!(!lighting.contains(&"reflectionMode"));
     }
 
     #[test]

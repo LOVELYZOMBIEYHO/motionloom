@@ -96,6 +96,34 @@ fn camera_animation_cannot_change_geometry_or_export() {
 }
 
 #[test]
+fn scalar_material_layers_roundtrip_without_changing_geometry() {
+    let plain = snapshot(&source(), 0);
+    let layered_source = source().replace("roughness=\"0.6\"", "roughness=\"0.6\" sheen=\"0.6\" sheenColor=\"#808080\" sheenRoughness=\"0.7\" clearcoat=\"0.8\" clearcoatRoughness=\"0.12\"");
+    let layered = snapshot(&layered_source, 0);
+    assert_eq!(plain.meshes[0].positions, layered.meshes[0].positions);
+    assert_eq!(plain.meshes[0].uvs, layered.meshes[0].uvs);
+    assert_eq!(plain.meshes[0].normals, layered.meshes[0].normals);
+    let authored = &layered.meshes[0].material;
+    assert!(
+        (authored.sheen_color[0] - 0.2158605).abs() < 1e-6,
+        "native DSL sRGB decoded once"
+    );
+    let bytes = export_scene_glb(&layered).unwrap();
+    let imported =
+        load_glb_mesh_data_from_bytes(std::path::Path::new("layers.glb"), &bytes).unwrap();
+    let m = &imported.materials[0];
+    for k in 0..3 {
+        assert!(
+            (m.sheen_color[k] * m.sheen - authored.sheen_color[k] * authored.sheen).abs() < 1e-6
+        );
+    }
+    assert_eq!(m.sheen_roughness, authored.sheen_roughness);
+    assert_eq!(m.clearcoat, authored.clearcoat);
+    assert_eq!(m.clearcoat_roughness, authored.clearcoat_roughness);
+    assert_eq!(imported.positions, layered.meshes[0].positions);
+}
+
+#[test]
 fn glb_roundtrip_preserves_geometry_uvs_and_has_no_cameras() {
     let a = snapshot(&source(), 0);
     let bytes = export_scene_glb(&a).unwrap();
@@ -126,6 +154,37 @@ fn glb_roundtrip_preserves_geometry_uvs_and_has_no_cameras() {
             .positions
             .iter()
             .all(|p| p[0] >= 2.5 && p[0] <= 3.5)
+    );
+}
+
+#[test]
+fn glb_roundtrip_preserves_solid_refraction_via_material_extras() {
+    let script = source().replace(
+        "roughness=\"0.6\"",
+        "roughness=\"0.06\" transmission=\"0.96\" ior=\"1.52\" refractionMode=\"solid\"",
+    );
+    let snapshot = snapshot(&script, 0);
+    assert_eq!(
+        snapshot.meshes[0].material.refraction_mode,
+        motionloom::MaterialRefractionMode::Solid
+    );
+    let bytes = export_scene_glb(&snapshot).unwrap();
+    let imported =
+        load_glb_mesh_data_from_bytes(std::path::Path::new("solid.glb"), &bytes).unwrap();
+    assert_eq!(
+        imported.materials[0].refraction_mode,
+        motionloom::MaterialRefractionMode::Solid
+    );
+    assert_eq!(imported.materials[0].transmission_factor, 0.96);
+    assert_eq!(imported.positions, snapshot.meshes[0].positions);
+    assert_eq!(
+        imported.texcoords,
+        snapshot.meshes[0]
+            .uvs
+            .iter()
+            .copied()
+            .map(Some)
+            .collect::<Vec<_>>()
     );
 }
 

@@ -145,7 +145,26 @@ pub fn export_scene_glb(snapshot: &GeometrySnapshot) -> Result<Vec<u8>, Geometry
             );
         }
         if m.unlit {
+            // Layer factors are serialized independently of base MR textures.
             ext.insert("KHR_materials_unlit".into(), json!({}));
+        }
+        if m.sheen > 0.0 {
+            ext.insert(
+                "KHR_materials_sheen".into(),
+                json!({
+                    "sheenColorFactor": m.sheen_color.map(|v| (v * m.sheen).clamp(0.0, 1.0)),
+                    "sheenRoughnessFactor": m.sheen_roughness
+                }),
+            );
+        }
+        if m.clearcoat > 0.0 {
+            ext.insert(
+                "KHR_materials_clearcoat".into(),
+                json!({
+                    "clearcoatFactor": m.clearcoat,
+                    "clearcoatRoughnessFactor": m.clearcoat_roughness
+                }),
+            );
         }
         if m.transmission_factor > 0.0 {
             ext.insert(
@@ -156,6 +175,9 @@ pub fn export_scene_glb(snapshot: &GeometrySnapshot) -> Result<Vec<u8>, Geometry
             ext.insert("KHR_materials_volume".into(),json!({"thicknessFactor":m.thickness_factor,"attenuationColor":m.attenuation_color,"attenuationDistance":m.attenuation_distance}));
         }
         extensions.extend(ext.keys().cloned());
+        if m.refraction_mode == crate::dsl::MaterialRefractionMode::Solid {
+            material["extras"] = json!({"motionloom": {"refractionMode": "solid"}});
+        }
         material["extensions"] = Value::Object(ext);
         let index = meshes.len();
         meshes.push(json!({"name":mesh.name,"primitives":[{"attributes":{"POSITION":p,"NORMAL":normal,"TANGENT":tangent,"TEXCOORD_0":uv,"COLOR_0":color},"indices":indices,"material":materials.len(),"mode":4}]}));

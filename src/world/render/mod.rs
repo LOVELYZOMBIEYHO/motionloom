@@ -2,24 +2,39 @@
 // =========================================
 // src/world/render/mod.rs
 
+mod baked;
 mod environment;
+mod hybrid;
+mod reflection_history;
+mod rough_reflections;
+mod reflection_queries;
+mod gpu_timing;
 mod lighting;
 mod materials;
 mod outline;
 mod params;
+mod per_light_shadows;
 mod pipeline;
+mod planar;
 mod resources;
 mod shaders;
 mod shadows;
 mod textures;
+mod transport_tiles;
+mod transport_policy;
+mod visibility;
+mod snapshot_region;
+mod transparent_batches;
 use environment::load_environment_image_from_resolved;
 use materials::{TextureRole, build_mips};
 use params::{pack_gpu_world_lighting, pack_gpu_world_params, pack_ground_grid_params};
 use pipeline::create_world_surface_pipeline;
+mod shader_specialization;
+use shader_specialization::{certify_coating_roughness, draw_requires_geometry_reflection, physical_style_shader_source, shader_variant_selection, requires_primary_glass_shadows, requires_solid_transport};
 use resources::{align_to_256, gpu_world_vertex_chunk_bytes};
 use shaders::{
     WGPU_FROXEL_COMPOSITE_SHADER, WGPU_FROXEL_INJECT_SHADER, WGPU_FROXEL_INTEGRATE_SHADER,
-    WGPU_GROUND_GRID_SHADER, WGPU_WORLD_DOF_SHADER, WGPU_WORLD_SHADER,
+    WGPU_GROUND_GRID_SHADER, WGPU_WORLD_DOF_SHADER, WGPU_WORLD_SHADER, WGPU_WORLD_REALTIME_SHADER,
 };
 use shadows::fit_rigid_shadow_volume;
 #[cfg(test)]
@@ -32,7 +47,7 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 #[cfg(target_arch = "wasm32")]
@@ -44,7 +59,6 @@ use std::time::Instant;
 use std::io::Read;
 
 use base64::Engine as _;
-use half::f16;
 use image::{Rgba, RgbaImage, imageops};
 use thiserror::Error;
 
@@ -62,10 +76,10 @@ use crate::world::gltf_loader::{
 };
 use crate::world::model::{
     WorldAction, WorldActionBone, WorldActionPose, WorldActor, WorldApplyAction,
-    WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap, WorldDirectionFrame,
-    WorldDirectionalCharacter, WorldGraph, WorldLight, WorldLightKind, WorldLighting,
-    WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle, WorldPlay, WorldRetargetMap,
-    WorldSpritePlayback, WorldTime, WorldCameraProjection,
+    WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap, WorldCameraProjection,
+    WorldDirectionFrame, WorldDirectionalCharacter, WorldGraph, WorldLight, WorldLightKind,
+    WorldLighting, WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle, WorldPlay,
+    WorldRetargetMap, WorldSpritePlayback, WorldTime,
 };
 
 /// Keep native profiling instrumentation out of the browser runtime because
@@ -119,6 +133,8 @@ pub enum WorldRenderError {
     RemoteAsset { url: String, message: String },
     #[error("invalid inline asset data URI: {message}")]
     InvalidDataUri { message: String },
+    #[error("failed to load baked lighting {source_ref}: {message}")]
+    BakedLighting { source_ref: String, message: String },
     #[error("invalid world expression '{expr}': {message}")]
     Expression { expr: String, message: String },
     #[error("failed to create output directory ({path}): {source}")]
@@ -162,9 +178,9 @@ pub enum WorldRenderError {
 }
 
 /// CPU-side timings for the most recently submitted true-3D Scene island.
-/// GPU execution time remains available from the parent Scene compositor's
-/// timestamp queries; these fields expose work that previously appeared as an
-/// unexplained preview stall before queue submission.
+/// Submission wall time can include GPU queue backpressure. The compositor's
+/// timestamps exclude separately submitted 3D work; completed presentation
+/// intervals, rather than these CPU fields, determine playback FPS.
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 #[non_exhaustive]
 pub struct Scene3DFrameProfile {
@@ -182,8 +198,19 @@ pub struct Scene3DFrameProfile {
     pub texture_decoded_bytes: usize,
     pub renderer_init_ms: f64,
     pub submit_ms: f64,
+    /// Completed 3D GPU queue span, independently of the compositor. Queue
+    /// idle gaps between stage markers are included; this is not utilization.
+    pub gpu_ms: Option<f64>,
+    pub gpu_frame_index: Option<u32>,
+    /// Shadows/planar, rough evidence, routing, opaque, glass, and post queue spans.
+    pub gpu_stages_ms: Option<[f64; 6]>,
     pub readback_ms: f64,
     pub draw_calls: usize,
+    /// Main-view batches after adjacent instancing and conservative frustum selection.
+    pub camera_draw_batches: usize,
+    pub frustum_rejected_items: usize,
+    /// Current-frame coverage/depth filtering for complex raster islands only.
+    pub raster_visibility_prepass: bool,
     pub mesh_cache_entries: usize,
     pub static_draw_plans: usize,
     pub gpu_resource_entries: usize,
@@ -193,6 +220,10 @@ pub struct Scene3DFrameProfile {
     pub visible_triangles: u64,
     pub light_count: usize,
     pub shadow_map_size: u32,
+    pub shadow_view_count: usize,
+    pub shadow_rendered_views: usize,
+    pub shadow_cache_hits: usize,
+    pub per_light_shadow_bytes: u64,
     pub froxel_grid: Option<[u32; 3]>,
     pub froxel_bytes: u64,
     /// True once a sequential prior frame is available for temporal resolve.
@@ -208,6 +239,35 @@ pub struct Scene3DFrameProfile {
     /// active shadow target. Retained mesh/texture caches are reported
     /// separately because their allocations are asset-dependent.
     pub render_target_bytes: u64,
+    pub planar_capture_count: usize,
+    pub planar_capture_draw_calls: usize,
+    /// Additional main-view draws from the experimental complementary slab route.
+    pub planar_slab_extra_draw_calls: usize,
+    /// Certified main-view triangles, counted once before tiled submission.
+    pub planar_slab_cached_triangles: usize,
+    /// Closed-slab back-facing triangles rejected before rasterization.
+    pub planar_slab_discarded_triangles: usize,
+    pub planar_capture_bytes: u64,
+    pub transmission_layers: u32,
+    pub transmission_copy_pixels: u64,
+    pub baked_probe_bytes: u64,
+    pub local_reflection_bytes: u64,
+    pub environment_ibl_bytes: u64,
+    /// True only for the explicit native transport reference path.
+    pub geometry_transport_enabled: bool,
+    pub baked_lighting_fallback: bool,
+    pub solid_refraction_approximated: bool,
+    pub recursive_reflection_approximated: bool,
+    pub hybrid_scene_bytes: u64,
+    pub hybrid_triangles: usize,
+    pub hybrid_nodes: usize,
+    pub hybrid_objects: usize,
+    pub hybrid_prepare_ms: f64,
+    pub hybrid_cache_hit: bool,
+    pub hybrid_refit: bool,
+    pub reflection_history_bytes: u64,
+    pub rough_reflection_size: Option<[u32; 2]>,
+    pub rough_reflection_bytes: u64,
 }
 
 impl From<crate::export::EncodeError> for WorldRenderError {
@@ -787,8 +847,20 @@ fn diagnose_gpu_shader_projection(
                 ],
             )
             .max(draw.params.camera1[3]);
-            let screen_x = draw.params.canvas[2] + view_x * draw.params.camera0[3] / if draw.params.camera3[3] > 0.5 { 1.0 } else { view_z };
-            let screen_y = draw.params.canvas[3] - view_y * draw.params.camera0[3] / if draw.params.camera3[3] > 0.5 { 1.0 } else { view_z };
+            let screen_x = draw.params.canvas[2]
+                + view_x * draw.params.camera0[3]
+                    / if draw.params.camera3[3] > 0.5 {
+                        1.0
+                    } else {
+                        view_z
+                    };
+            let screen_y = draw.params.canvas[3]
+                - view_y * draw.params.camera0[3]
+                    / if draw.params.camera3[3] > 0.5 {
+                        1.0
+                    } else {
+                        view_z
+                    };
             if !screen_x.is_finite() || !screen_y.is_finite() {
                 nonfinite += 1;
                 continue;
@@ -919,6 +991,8 @@ pub struct WorldFrameRenderer {
     /// joint picking must not pay for diagnostic matrix reconstruction.
     collect_rig_diagnostics: bool,
     immediate_preview_settings: crate::preview::ImmediatePreviewSettings,
+    preview_fallbacks: u8,
+    reported_preview_diagnostics: HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1087,6 +1161,8 @@ impl WorldFrameRenderer {
             collect_editor_rig_snapshot: cfg!(target_arch = "wasm32"),
             collect_rig_diagnostics: false,
             immediate_preview_settings: crate::preview::ImmediatePreviewSettings::default(),
+            preview_fallbacks: 0,
+            reported_preview_diagnostics: HashSet::new(),
         }
     }
 
@@ -1416,7 +1492,24 @@ impl WorldFrameRenderer {
             return Ok(canvas.expect("readback frame requested a CPU background"));
         }
         let init_started = ProfileClock::now();
-        self.ensure_gpu_renderer(width, height, lighting.params.preview0[0] > 0.5)
+        let geometry_transport_enabled = transport_policy::reference_geometry_transport_enabled();
+        if !geometry_transport_enabled && requires_solid_transport(&draw_calls) {
+            self.preview_fallbacks |= 2;
+            self.record_preview_diagnostic("Preview uses bounded screen-space refraction for solid glass; geometry-derived exit paths require an offline renderer.".into());
+        }
+        let (physical_style_only, alpha_evaluation_enabled) = if geometry_transport_enabled {
+            shader_variant_selection(lighting.params.surface0[0], &draw_calls)
+        } else {
+            // Exact physical style is a uniform proof: no scene/vertex scan.
+            // Keep primary coverage evaluation regardless of that style proof.
+            (shader_specialization::physical_style_proven(lighting.params.surface0[0]), true)
+        };
+        self.ensure_gpu_renderer(width, height, lighting.params.preview0[0] > 0.5,
+            geometry_transport_enabled,
+            geometry_transport_enabled && requires_solid_transport(&draw_calls),
+            geometry_transport_enabled && requires_primary_glass_shadows(&draw_calls, &lighting.model_shadow_flags, lighting.per_light_shadows),
+            physical_style_only, alpha_evaluation_enabled,
+            !geometry_transport_enabled && visibility::use_prepass(draw_calls.len(), &lighting))
             .await?;
         let renderer_init_ms = init_started.elapsed().as_secs_f64() * 1000.0;
         let render_started = ProfileClock::now();
@@ -1465,7 +1558,24 @@ impl WorldFrameRenderer {
         )?;
         let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1000.0;
         let init_started = ProfileClock::now();
-        self.ensure_gpu_renderer(width, height, lighting.params.preview0[0] > 0.5)
+        let geometry_transport_enabled = transport_policy::reference_geometry_transport_enabled();
+        if !geometry_transport_enabled && requires_solid_transport(&draw_calls) {
+            self.preview_fallbacks |= 2;
+            self.record_preview_diagnostic("Preview uses bounded screen-space refraction for solid glass; geometry-derived exit paths require an offline renderer.".into());
+        }
+        let (physical_style_only, alpha_evaluation_enabled) = if geometry_transport_enabled {
+            shader_variant_selection(lighting.params.surface0[0], &draw_calls)
+        } else {
+            // Exact physical style is a uniform proof: no scene/vertex scan.
+            // Keep primary coverage evaluation regardless of that style proof.
+            (shader_specialization::physical_style_proven(lighting.params.surface0[0]), true)
+        };
+        self.ensure_gpu_renderer(width, height, lighting.params.preview0[0] > 0.5,
+            geometry_transport_enabled,
+            geometry_transport_enabled && requires_solid_transport(&draw_calls),
+            geometry_transport_enabled && requires_primary_glass_shadows(&draw_calls, &lighting.model_shadow_flags, lighting.per_light_shadows),
+            physical_style_only, alpha_evaluation_enabled,
+            !geometry_transport_enabled && visibility::use_prepass(draw_calls.len(), &lighting))
             .await?;
         let renderer_init_ms = init_started.elapsed().as_secs_f64() * 1000.0;
         let submit_started = ProfileClock::now();
@@ -1542,15 +1652,16 @@ impl WorldFrameRenderer {
             .as_ref()
             .is_some_and(|renderer| renderer.temporal_history_enabled)
         {
-            16
+            24
         } else {
             0
         };
         let render_target_bytes = frame_pixels
             // HDR scene, current/history depth, colour/geometry history,
             // transmission, normal/velocity and material MRT attachments,
+            // reflection-only history,
             // plus the pooled display targets.
-            .saturating_mul(32 + temporal_bytes_per_pixel + target_pool_size as u64 * 4)
+            .saturating_mul(92 + temporal_bytes_per_pixel + target_pool_size as u64 * 4)
             .saturating_add(
                 (shadow_map_size as u64)
                     .saturating_mul(shadow_map_size as u64)
@@ -1573,6 +1684,9 @@ impl WorldFrameRenderer {
             submit_ms,
             readback_ms,
             draw_calls,
+            camera_draw_batches: self.gpu_renderer.as_ref().map_or(0, |r| r.last_camera_draw_batches),
+            frustum_rejected_items: self.gpu_renderer.as_ref().map_or(0, |r| r.last_frustum_rejected_items),
+            raster_visibility_prepass: self.gpu_renderer.as_ref().is_some_and(|r| r.raster_visibility_enabled),
             mesh_cache_entries: self.mesh_cache.len(),
             static_draw_plans: self.gpu_static_draw_cache.len(),
             gpu_resource_entries,
@@ -1582,6 +1696,22 @@ impl WorldFrameRenderer {
             visible_triangles,
             light_count,
             shadow_map_size,
+            shadow_view_count: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.per_light_shadows.view_count),
+            shadow_rendered_views: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.per_light_shadows.rendered_views),
+            shadow_cache_hits: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.per_light_shadows.cached_views),
+            per_light_shadow_bytes: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.per_light_shadows.estimated_bytes()),
             froxel_grid,
             froxel_bytes,
             temporal_history_valid,
@@ -1590,7 +1720,11 @@ impl WorldFrameRenderer {
                 .as_ref()
                 .is_some_and(|renderer| renderer.temporal_history_enabled),
             screen_space_reflections: preview_budget.screen_space_reflections,
-            screen_space_global_illumination: preview_budget.screen_space_global_illumination,
+            screen_space_global_illumination: preview_budget.screen_space_global_illumination
+                && !self
+                    .gpu_renderer
+                    .as_ref()
+                    .is_some_and(|r| r.last_baked_active),
             motion_blur: preview_budget.motion_blur
                 && self
                     .gpu_renderer
@@ -1599,7 +1733,69 @@ impl WorldFrameRenderer {
             anti_aliasing_requested: self.last_prepared_draw_stats.anti_aliasing_requested,
             anti_aliasing_effective: self.last_prepared_draw_stats.anti_aliasing_effective,
             anti_aliasing_fallback_used: self.last_prepared_draw_stats.anti_aliasing_fallback_used,
-            render_target_bytes: render_target_bytes.saturating_add(froxel_bytes),
+            render_target_bytes: render_target_bytes
+                .saturating_add(froxel_bytes)
+                .saturating_add(
+                    self.gpu_renderer
+                        .as_ref()
+                        .map_or(0, |r| r.per_light_shadows.estimated_bytes()),
+                ),
+            planar_capture_count: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.planar_resources.len()),
+            planar_capture_draw_calls: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.last_planar_capture_draw_calls),
+            planar_slab_extra_draw_calls: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.last_planar_slab_extra_draw_calls),
+            planar_slab_cached_triangles: self.gpu_renderer.as_ref()
+                .map_or(0, |r| r.last_planar_slab_cached_triangles),
+            planar_slab_discarded_triangles: self.gpu_renderer.as_ref()
+                .map_or(0, |r| r.last_planar_slab_discarded_triangles),
+            planar_capture_bytes: self.gpu_renderer.as_ref().map_or(0, |r| {
+                r.planar_resources
+                    .values()
+                    .map(|p| u64::from(p.color.width()) * u64::from(p.color.height()) * 24)
+                    .sum()
+            }),
+            transmission_layers: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.last_transmission_layers),
+            transmission_copy_pixels: self.gpu_renderer.as_ref().map_or(0, |r| r.last_transmission_copy_pixels),
+            baked_probe_bytes: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.baked_probe_bytes),
+            local_reflection_bytes: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.local_reflection_bytes),
+            environment_ibl_bytes: self
+                .gpu_renderer
+                .as_ref()
+                .map_or(0, |r| r.environment_ibl_bytes),
+            geometry_transport_enabled: self.gpu_renderer.as_ref().is_some_and(|r| r.geometry_transport_enabled),
+            baked_lighting_fallback: self.preview_fallbacks & 1 != 0,
+            solid_refraction_approximated: self.preview_fallbacks & 2 != 0,
+            recursive_reflection_approximated: self.preview_fallbacks & 4 != 0,
+            hybrid_scene_bytes: self.gpu_renderer.as_ref().map_or(0, |r| r.hybrid_stats.0),
+            hybrid_triangles: self.gpu_renderer.as_ref().map_or(0, |r| r.hybrid_stats.1),
+            hybrid_nodes: self.gpu_renderer.as_ref().map_or(0, |r| r.hybrid_stats.2),
+            hybrid_objects: self.gpu_renderer.as_ref().map_or(0, |r| r.hybrid_stats.3),
+            hybrid_prepare_ms: self.gpu_renderer.as_ref().map_or(0.0, |r| r.hybrid_stats.4),
+            hybrid_cache_hit: self.gpu_renderer.as_ref().is_some_and(|r| r.hybrid_stats.5),
+            hybrid_refit: self.gpu_renderer.as_ref().is_some_and(|r| r.hybrid_stats.6),
+            reflection_history_bytes: self.gpu_renderer.as_ref().map_or(0, |r| r.reflection_history.bytes()),
+            rough_reflection_size: self.gpu_renderer.as_ref().and_then(|r| r.rough_reflections.size()),
+            rough_reflection_bytes: self.gpu_renderer.as_ref().map_or(0, |r| r.rough_reflections.bytes()),
+            gpu_ms: self.gpu_renderer.as_ref().and_then(|r| r.gpu_timing.completed.map(|(_, stages)| stages.iter().sum())),
+            gpu_frame_index: self.gpu_renderer.as_ref().and_then(|r| r.gpu_timing.completed.map(|(frame, _)| frame)),
+            gpu_stages_ms: self.gpu_renderer.as_ref().and_then(|r| r.gpu_timing.completed.map(|(_, stages)| stages)),
         };
     }
 
@@ -1817,7 +2013,8 @@ impl WorldFrameRenderer {
             _ => (0.0, 0.0),
         };
         lighting.params.preview2 = [
-            budget.screen_space_global_illumination as u8 as f32,
+            (budget.screen_space_global_illumination && lighting.params.baked0[2] <= 0.0) as u8
+                as f32,
             ssr_steps,
             gi_samples,
             // Balanced previews use a diagonal emitter pair; higher quality
@@ -1829,6 +2026,12 @@ impl WorldFrameRenderer {
                 | crate::preview::ImmediatePreviewProfile::Ultra => 4.0,
             },
         ];
+        lighting.params.reflection0[1] = match self.immediate_preview_settings.profile {
+            crate::preview::ImmediatePreviewProfile::Portable => 1.0,
+            crate::preview::ImmediatePreviewProfile::Balanced => 2.0,
+            crate::preview::ImmediatePreviewProfile::Cinematic => 3.0,
+            crate::preview::ImmediatePreviewProfile::Ultra => 4.0,
+        };
         lighting.frame_index = frame;
         lighting.temporal_jitter = anti_aliasing.jitter_phases > 1;
         if lighting.params.dof_style[0] > 0.5 {
@@ -1857,58 +2060,105 @@ impl WorldFrameRenderer {
         asset_root: &Path,
         camera: PerspectiveCameraView,
     ) -> Result<GpuWorldLighting, WorldRenderError> {
-        let Some(environment) = lighting.environment.as_ref() else {
-            let mut fallback = GpuWorldLighting::fallback(camera);
-            fallback.params = GpuWorldLightingParams::from_world(lighting, camera, false, 1);
-            return Ok(fallback);
+        let environment = if let Some(environment) = lighting.environment.as_ref() {
+            // Local content changes invalidate preprocessing; immutable URL and
+            // memory sources remain keyed by the authored resolver source.
+            let mut key = PathBuf::from(&environment.src);
+            let local = if key.is_absolute() {
+                key.clone()
+            } else {
+                asset_root.join(&key)
+            };
+            if let Ok(meta) = std::fs::metadata(&local) {
+                let mut h = DefaultHasher::new();
+                meta.len().hash(&mut h);
+                meta.modified().ok().hash(&mut h);
+                key = PathBuf::from(format!("{}#{}", local.to_string_lossy(), h.finish()));
+            }
+            if let Some(image) = self.environment_cache.get(&key).cloned() {
+                image
+            } else {
+                let resolved = resolve_world_asset_source(
+                    asset_root,
+                    &environment.src,
+                    WorldPathStyle::Relative,
+                    self.asset_resolver.as_ref(),
+                )?;
+                let image = Arc::new(load_environment_image_from_resolved(&resolved)?);
+                self.environment_cache.insert(key, image.clone());
+                image
+            }
+        } else {
+            GpuWorldLighting::fallback(camera).environment
         };
-        // URL and memory assets use their authored source as the stable cache
-        // key. Check it before resolution: resolving a native URL downloads
-        // its complete payload, so checking only afterwards silently fetched
-        // the same HDRI on every preview frame even though decoding was cached.
-        let source_key = PathBuf::from(&environment.src);
-        if let Some(image) = self.environment_cache.get(&source_key).cloned() {
-            return Ok(GpuWorldLighting {
-                params: GpuWorldLightingParams::from_world(
-                    lighting,
-                    camera,
-                    true,
-                    image.mip_bytes.len(),
-                ),
-                environment: image,
-                frame_index: 0,
-                temporal_jitter: false,
-                froxel: None,
-            });
+        let mut params = GpuWorldLightingParams::from_world(
+            lighting,
+            camera,
+            lighting.environment.is_some(),
+            environment.mip_bytes.len(),
+        );
+        params.environment_sh = environment.diffuse_sh;
+        self.preview_fallbacks = 0;
+        let baked = if let Some(binding) = &lighting.baked_lighting {
+            if transport_policy::reference_geometry_transport_enabled() {
+                Some(baked::load_baked_lighting(binding, asset_root, self.asset_resolver.as_ref())?)
+            } else {
+                let loaded = baked::load_preview_baked_lighting(binding, asset_root, self.asset_resolver.as_ref())?;
+                if let Some(diagnostic) = loaded.diagnostic {
+                    self.preview_fallbacks |= 1;
+                    self.record_preview_diagnostic(format!("{}: {}", diagnostic.source_ref, diagnostic.message));
+                }
+                loaded.lighting
+            }
+        } else { None };
+        if !transport_policy::reference_geometry_transport_enabled() {
+            if lighting.render_style.as_ref().is_some_and(|s| s.reflection_bounces > 1) {
+                self.preview_fallbacks |= 4;
+                self.record_preview_diagnostic("Preview approximates repeated reflections with screen-space/probe evidence; exact geometry bounces require an offline renderer.".into());
+            }
         }
-        let resolved = resolve_world_asset_source(
-            asset_root,
-            &environment.src,
-            WorldPathStyle::Relative,
-            self.asset_resolver.as_ref(),
-        )?;
-        let key = resolved.key().to_path_buf();
-        if !self.environment_cache.contains_key(&key) {
-            let decoded = Arc::new(load_environment_image_from_resolved(&resolved)?);
-            self.environment_cache.insert(key.clone(), decoded);
+        if let (Some(binding), Some(data)) = (&lighting.baked_lighting, &baked) {
+            params.baked0 = [
+                data.volume_count as f32,
+                binding.blend,
+                binding.intensity,
+                binding.specular_intensity,
+            ];
+            params.baked1 = [
+                (data.signature & 0xffffff) as f32,
+                ((data.signature >> 24) & 0xffffff) as f32,
+                0.0,
+                0.0,
+            ];
         }
-        let image = self
-            .environment_cache
-            .get(&key)
-            .expect("environment image inserted before frame lighting")
-            .clone();
+        params.baked1[2] = (environment.signature & 0xffffff) as f32;
+        params.baked1[3] = ((environment.signature >> 24) & 0xffffff) as f32;
+        let budget = self.immediate_preview_settings.budget();
         Ok(GpuWorldLighting {
-            params: GpuWorldLightingParams::from_world(
-                lighting,
-                camera,
-                true,
-                image.mip_bytes.len(),
-            ),
-            environment: image,
+            params,
+            environment,
+            baked,
             frame_index: 0,
             temporal_jitter: false,
             froxel: None,
+            planar_reflections: lighting.planar_reflections.clone(),
+            planar_capture_budget: budget.planar_capture_limit as u32,
+            planar_resolution_limit: budget.planar_resolution_limit,
+            transmission_layer_budget: budget.transmission_layer_limit as u32,
+            shadow_lights: lighting.lights.clone(),
+            per_light_shadows: lighting
+                .render_style
+                .as_ref()
+                .is_some_and(|s| s.per_light_shadows),
+            model_shadow_flags: lighting.model_shadow_flags.clone(),
         })
+    }
+
+    fn record_preview_diagnostic(&mut self, message: String) {
+        if self.reported_preview_diagnostics.insert(message.clone()) {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("MotionLoom preview: {message}");
+        }
     }
 
     /// Reuse the Scene compositor device whenever the 3D backend is embedded.
@@ -1917,6 +2167,12 @@ impl WorldFrameRenderer {
         width: u32,
         height: u32,
         temporal_history_enabled: bool,
+        geometry_transport_enabled: bool,
+        solid_transport_enabled: bool,
+        primary_glass_shadows_enabled: bool,
+        physical_style_only: bool,
+        alpha_evaluation_enabled: bool,
+        raster_visibility_enabled: bool,
     ) -> Result<(), WorldRenderError> {
         let preview_budget = self.immediate_preview_settings.budget();
         let texture_anisotropy = preview_budget.texture_anisotropy;
@@ -1925,6 +2181,12 @@ impl WorldFrameRenderer {
                 || renderer.height != height
                 || renderer.texture_anisotropy != texture_anisotropy
                 || renderer.temporal_history_enabled != temporal_history_enabled
+                || renderer.geometry_transport_enabled != geometry_transport_enabled
+                || renderer.solid_transport_enabled != solid_transport_enabled
+                || renderer.primary_glass_shadows_enabled != primary_glass_shadows_enabled
+                || renderer.physical_style_only != physical_style_only
+                || renderer.alpha_evaluation_enabled != alpha_evaluation_enabled
+                || renderer.raster_visibility_enabled != raster_visibility_enabled
         });
         if needs_renderer {
             self.gpu_renderer = Some(
@@ -1936,6 +2198,12 @@ impl WorldFrameRenderer {
                         height,
                         texture_anisotropy,
                         temporal_history_enabled,
+                        geometry_transport_enabled,
+                        solid_transport_enabled,
+                        primary_glass_shadows_enabled,
+                        physical_style_only,
+                        alpha_evaluation_enabled,
+                        raster_visibility_enabled,
                     )
                     .await?
                 } else {
@@ -1944,6 +2212,12 @@ impl WorldFrameRenderer {
                         height,
                         texture_anisotropy,
                         temporal_history_enabled,
+                        geometry_transport_enabled,
+                        solid_transport_enabled,
+                        primary_glass_shadows_enabled,
+                        physical_style_only,
+                        alpha_evaluation_enabled,
+                        raster_visibility_enabled,
                     )
                     .await?
                 },
@@ -2110,6 +2384,54 @@ impl CharacterDesignGpuViewport {
     }
 }
 
+fn upload_hdr_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    mips: &[Vec<u8>],
+    label: &str,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: mips.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (level, bytes) in mips.iter().enumerate() {
+        let w = (width >> level).max(1);
+        let h = (height >> level).max(1);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 8),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    texture
+}
+
 fn inverse_display(value: f32, mode: f32) -> f32 {
     let y = value.clamp(0.0, 1.0).powf(2.2);
     if mode > 1.5 {
@@ -2123,6 +2445,22 @@ fn inverse_display(value: f32, mode: f32) -> f32 {
     }
 }
 
+// Host canvases arrive in display space. Cancel invertible scene grading so
+// they can share the HDR resolve without inheriting ordinary 3D color changes.
+// Clipped colors and zero grading factors cannot be inverted exactly.
+fn inverse_scene_display(color: [f32; 3], lighting: &GpuWorldLightingParams) -> [f32; 3] {
+    let tone = color.map(|value| inverse_display(value, lighting.color0[3]));
+    let saturation = lighting.surface1[3].max(0.0001);
+    let luminance = tone[0] * 0.2126 + tone[1] * 0.7152 + tone[2] * 0.0722;
+    let temperature = ((lighting.color0[1] - 6500.0) / 6500.0).clamp(-0.75, 0.75);
+    let white_balance = [1.0 + temperature * 0.16, 1.0, 1.0 - temperature * 0.16];
+    std::array::from_fn(|axis| {
+        let unsaturated = (tone[axis] - luminance * (1.0 - saturation)) / saturation;
+        let uncontrasted = (unsaturated - 0.18) / lighting.color0[2].max(0.0001) + 0.18;
+        uncontrasted / lighting.color0[0].max(0.0001) / white_balance[axis]
+    })
+}
+
 struct GpuWorldRenderer {
     device: Arc<wgpu::Device>,
     queue: wgpu::Queue,
@@ -2132,15 +2470,39 @@ struct GpuWorldRenderer {
     background_empty_bind_group: wgpu::BindGroup,
     shadow_lighting_bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
+    rough_pipeline: wgpu::RenderPipeline,
+    coarse_pipeline: Option<wgpu::RenderPipeline>,
+    query_input_pipeline: Option<wgpu::RenderPipeline>,
+    query_pipelines: Option<reflection_queries::QueryPipelines>,
+    cached_reflection_pipeline: Option<wgpu::RenderPipeline>,
+    rough_reflections: rough_reflections::RoughReflections,
+    gpu_timing: gpu_timing::GpuTiming,
+    opaque_depth_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
     transparent_depth_write_pipeline: wgpu::RenderPipeline,
     transmissive_pipeline: wgpu::RenderPipeline,
     transmissive_depth_write_pipeline: wgpu::RenderPipeline,
+    planar_slab_pipelines: Option<PlanarSlabPipelines>,
+    capture_transmissive_pipeline: wgpu::RenderPipeline,
+    capture_transmissive_depth_write_pipeline: wgpu::RenderPipeline,
+    capture_transparent_pipeline: wgpu::RenderPipeline,
+    planar_pipeline: wgpu::RenderPipeline,
+    capture_opaque_pipeline: wgpu::RenderPipeline,
+    planar_background_pipeline: wgpu::RenderPipeline,
+    planar_resources: HashMap<String, planar::GpuPlanarResource>,
+    planar_default_texture: wgpu::Texture,
+    _planar_default_uniform: wgpu::Buffer,
+    planar_sampler: wgpu::Sampler,
     transmission_scene_texture: wgpu::Texture,
+    transmission_depth_texture: wgpu::Texture,
     transmission_scene_bind_group: wgpu::BindGroup,
+    transmission_scene_bind_group_layout: wgpu::BindGroupLayout,
     background_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    per_light_shadow_pipeline: wgpu::RenderPipeline,
+    per_light_shadow_pass_layout: wgpu::BindGroupLayout,
+    per_light_shadows: per_light_shadows::ShadowResources,
     grid_pipeline: wgpu::RenderPipeline,
     dof_pipeline: wgpu::RenderPipeline,
     motion_blur_pipeline: wgpu::RenderPipeline,
@@ -2165,6 +2527,12 @@ struct GpuWorldRenderer {
     dof_sampler: wgpu::Sampler,
     lighting_params_buffer: wgpu::Buffer,
     environment_resource: Option<GpuWorldEnvironmentResource>,
+    hybrid_cache: hybrid::HybridSceneCache,
+    hybrid_buffer: wgpu::Buffer,
+    hybrid_signature: u64,
+    hybrid_object_ids: HashMap<GpuWorldInstanceKey, u32>,
+    hybrid_stats: (u64, usize, usize, usize, f64, bool, bool),
+    reflection_history: reflection_history::ReflectionHistory,
     /// Reusable render targets. Triple buffering avoids allocating a new 1080p
     /// texture merely because the Scene compositor still owns the previous
     /// frame. Extra targets are only added when an external caller deliberately
@@ -2174,15 +2542,36 @@ struct GpuWorldRenderer {
     history_texture: wgpu::Texture,
     history_depth_texture: wgpu::Texture,
     history_gbuffer_texture: wgpu::Texture,
+    history_reflection_texture: wgpu::Texture,
     temporal_history_enabled: bool,
+    geometry_transport_enabled: bool,
+    solid_transport_enabled: bool,
+    primary_glass_shadows_enabled: bool,
+    physical_style_only: bool,
+    alpha_evaluation_enabled: bool,
+    raster_visibility_enabled: bool,
+    last_camera_draw_batches: usize,
+    last_frustum_rejected_items: usize,
     preview_gbuffer_texture: wgpu::Texture,
     preview_material_texture: wgpu::Texture,
+    preview_reflection_texture: wgpu::Texture,
     history_valid: bool,
     last_history_frame: Option<u32>,
     last_camera: Option<PreviewCameraHistory>,
     last_temporal_style_signature: Option<u64>,
     object_motion_history: HashMap<GpuWorldInstanceKey, PreviousObjectMotion>,
     target_cursor: usize,
+    last_planar_capture_draw_calls: usize,
+    last_planar_slab_extra_draw_calls: usize,
+    last_planar_slab_cached_triangles: usize,
+    last_planar_slab_discarded_triangles: usize,
+    last_transmission_layers: u32,
+    last_transmission_copy_pixels: u64,
+    last_baked_active: bool,
+    baked_probe_bytes: u64,
+    local_reflection_bytes: u64,
+    environment_ibl_bytes: u64,
+
     depth_texture: wgpu::Texture,
     shadow_texture: wgpu::Texture,
     readback_buffer: wgpu::Buffer,
@@ -2190,6 +2579,11 @@ struct GpuWorldRenderer {
     height: u32,
     padded_bytes_per_row: u32,
     texture_anisotropy: u16,
+}
+
+struct PlanarSlabPipelines {
+    cached: wgpu::RenderPipeline,
+    cached_depth_write: wgpu::RenderPipeline,
 }
 
 struct GpuFroxelResources {
@@ -2528,6 +2922,10 @@ fn preview_temporal_style_signature(params: &GpuWorldLightingParams) -> u64 {
         params.universal_tone,
         params.universal_shadow,
         params.universal_highlight,
+        params.baked1,
+        // The runtime revision flag changes every scene update; only static
+        // transport quality and bounce controls belong in style identity.
+        [params.reflection0[0], params.reflection0[1], 0.0, params.reflection0[3]],
     ] {
         values.map(f32::to_bits).hash(&mut hasher);
     }
@@ -2537,7 +2935,8 @@ fn preview_temporal_style_signature(params: &GpuWorldLightingParams) -> u64 {
 /// Transparent surfaces use the same shader and bindings as opaque PBR draws,
 struct GpuWorldEnvironmentResource {
     signature: u64,
-    _texture: wgpu::Texture,
+    _textures: Vec<wgpu::Texture>,
+    _probes: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -2839,6 +3238,7 @@ impl GpuWorldRenderer {
 
     fn reset_temporal_history(&mut self) {
         self.history_valid = false;
+        self.reflection_history.invalidate();
         self.last_history_frame = None;
         self.last_camera = None;
         self.last_temporal_style_signature = None;
@@ -2850,6 +3250,12 @@ impl GpuWorldRenderer {
         height: u32,
         texture_anisotropy: u16,
         temporal_history_enabled: bool,
+        geometry_transport_enabled: bool,
+        solid_transport_enabled: bool,
+        primary_glass_shadows_enabled: bool,
+        physical_style_only: bool,
+        alpha_evaluation_enabled: bool,
+        raster_visibility_enabled: bool,
     ) -> Result<Self, WorldRenderError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = request_adapter_async(
@@ -2896,6 +3302,12 @@ impl GpuWorldRenderer {
             height,
             texture_anisotropy,
             temporal_history_enabled,
+            geometry_transport_enabled,
+            solid_transport_enabled,
+            primary_glass_shadows_enabled,
+            physical_style_only,
+            alpha_evaluation_enabled,
+            raster_visibility_enabled,
         )
         .await
     }
@@ -2908,6 +3320,12 @@ impl GpuWorldRenderer {
         height: u32,
         texture_anisotropy: u16,
         temporal_history_enabled: bool,
+        geometry_transport_enabled: bool,
+        solid_transport_enabled: bool,
+        primary_glass_shadows_enabled: bool,
+        physical_style_only: bool,
+        alpha_evaluation_enabled: bool,
+        raster_visibility_enabled: bool,
     ) -> Result<Self, WorldRenderError> {
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         if width > max_texture_dimension_2d || height > max_texture_dimension_2d {
@@ -2919,12 +3337,143 @@ impl GpuWorldRenderer {
             });
         }
         let poller = DevicePoller::start(device.clone());
+        let gpu_timing = gpu_timing::GpuTiming::new(&device);
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("MOTIONLOOM_TRACE_BATCHES").is_some() {
+            eprintln!("motionloom shader selection: solid={solid_transport_enabled} casting_glass={primary_glass_shadows_enabled} alpha_evaluation={alpha_evaluation_enabled} physical_only={physical_style_only}");
+        }
+        let source = if geometry_transport_enabled {
+            WGPU_WORLD_SHADER.as_str()
+        } else {
+            WGPU_WORLD_REALTIME_SHADER.as_str()
+        };
+        let shader_source = physical_style_shader_source(source, physical_style_only);
+        let shader_source = shader_source.replace(
+            "override RASTER_VISIBILITY_ENABLED: bool = false;",
+            if raster_visibility_enabled { "const RASTER_VISIBILITY_ENABLED: bool = true;" }
+            else { "const RASTER_VISIBILITY_ENABLED: bool = false;" },
+        );
 
+        // A scene without solid interfaces never needs medium stacks or TIR.
+        // Specialize at shader creation so native compilers can remove that
+        // entire call graph, rather than reserve its private storage per pixel.
+        let shader_source = shader_source.replace(
+            "override HYBRID_SOLID_TRANSPORT: bool = true;",
+            if solid_transport_enabled {
+                "const HYBRID_SOLID_TRANSPORT: bool = true;"
+            } else {
+                "const HYBRID_SOLID_TRANSPORT: bool = false;"
+            },
+        );
+        let shader_source = shader_source.replace(
+            "override PRIMARY_GLASS_SHADOWS_ENABLED: bool = true;",
+            if primary_glass_shadows_enabled { "const PRIMARY_GLASS_SHADOWS_ENABLED: bool = true;" }
+            else { "const PRIMARY_GLASS_SHADOWS_ENABLED: bool = false;" },
+        );
+        // The selected native module key already proves complete coverage for
+        // every evaluated draw. Full shaded alpha stays intact in either module.
+        let shader_source = shader_source.replace(
+            "override HYBRID_ALPHA_EVALUATION_ENABLED: bool = true;",
+            if alpha_evaluation_enabled { "const HYBRID_ALPHA_EVALUATION_ENABLED: bool = true;" }
+            else { "const HYBRID_ALPHA_EVALUATION_ENABLED: bool = false;" },
+        );
+        // Diagnostic cost isolation only. These deliberately unlit/unshadowed
+        // results are never used as visual acceptance evidence.
+        #[cfg(not(target_arch = "wasm32"))]
+        let shader_source = match std::env::var("MOTIONLOOM_TRACE_RASTER_COST").as_deref() {
+            Ok("diffuse_probes") => shader_source.replace("fn sample_baked_irradiance(",
+                "fn diagnostic_baked_irradiance(") +
+                "\nfn sample_baked_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec4<f32> { return vec4<f32>(0.0); }\n",
+            Ok("shadow_filter") => shader_source.replace("fn emitter_visibility(",
+                "fn diagnostic_emitter_visibility(") +
+                "\nfn emitter_visibility(light: u32, sample: u32, world: vec3<f32>, normal: vec3<f32>) -> f32 { return 1.0; }\n",
+            _ => shader_source,
+        };
+        // Native investigation control. Never use these captures as reflection
+        // quality evidence; the authored graph and transmission remain intact.
+        #[cfg(not(target_arch = "wasm32"))]
+        let shader_source = if std::env::var_os("MOTIONLOOM_TRACE_DISABLE_REFLECTIONS").is_some() {
+            eprintln!("motionloom diagnostic: geometry reflections disabled for cost isolation");
+            shader_source.replace("override GEOMETRY_REFLECTION_ENABLED: bool = true;",
+                "override GEOMETRY_REFLECTION_ENABLED: bool = false;")
+        } else { shader_source };
+        #[cfg(not(target_arch = "wasm32"))]
+        let shader_source = match std::env::var("MOTIONLOOM_TRACE_REFLECTION_CLASS").as_deref() {
+            Ok("opaque") => shader_source.replace("if (GEOMETRY_REFLECTION_ENABLED && lighting.reflection0.w",
+                "if (GEOMETRY_REFLECTION_ENABLED && transmission <= 0.001 && lighting.reflection0.w"),
+            Ok("transmissive") => shader_source.replace("if (GEOMETRY_REFLECTION_ENABLED && lighting.reflection0.w",
+                "if (GEOMETRY_REFLECTION_ENABLED && transmission > 0.001 && lighting.reflection0.w"),
+            _ => shader_source,
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let shader_source = if std::env::var_os("MOTIONLOOM_TRACE_DISABLE_PRIMARY_GLASS_SHADOWS").is_some() {
+            eprintln!("motionloom diagnostic: primary glass shadows disabled for cost isolation");
+            shader_source.replace("fn surface_glass_visibility(", "fn diagnostic_original_glass_visibility(") +
+                "\nfn surface_glass_visibility(light_index: u32, world: vec3<f32>, direction: vec3<f32>, distance: f32) -> vec3<f32> { return vec3<f32>(1.0); }\n"
+        } else { shader_source };
+        #[cfg(not(target_arch = "wasm32"))]
+        let shader_source = if std::env::var_os("MOTIONLOOM_TRACE_ROUGH_EVIDENCE").is_some() {
+            shader_source.replace("let authored_ior = clamp(params.material6.y, 1.0, 3.0);", r#"
+                let base_eligible = roughness > 0.12 && roughness < 0.75;
+                let coat_eligible = params.material10.x > 0.0 && params.material10.y > 0.12 && params.material10.y < 0.75;
+                let base = /* sample rough evidence */sample_rough_reflection_evidence(input,normal,geometric_normal,roughness,false);
+                let coat = /* sample rough evidence */sample_rough_reflection_evidence(input,normal,geometric_normal,params.material10.y,true);
+                if (params.material0.x >= -1.0) { return vec4<f32>(select(0.0,select(1.0,0.25,base.valid),base_eligible),
+                    select(0.0,select(1.0,0.5,coat.valid && params.material11.z > 0.5),coat_eligible),
+                    select(select(0.0,-base.distance/8.0,base_eligible && !base.valid),1.0,params.material6.x > 0.001),alpha); }
+                let authored_ior = clamp(params.material6.y, 1.0, 3.0);"#)
+        } else { shader_source };
+        #[cfg(not(target_arch = "wasm32"))]
+        let query_enabled = geometry_transport_enabled && std::env::var_os("MOTIONLOOM_TRACE_COMPACT_REFLECTION_QUERIES").is_some()
+            && !primary_glass_shadows_enabled && !solid_transport_enabled
+            && device.limits().max_color_attachments >= 5
+            && device.limits().max_color_attachment_bytes_per_sample >= 32
+            && reflection_queries::supports(&device.limits(), width, height);
+        #[cfg(target_arch = "wasm32")]
+        let query_enabled = false;
+        let query_source = if query_enabled {
+            shader_source.replace("/* sample completed query */rough_reflection_unavailable(", "sample_completed_reflection_query(")
+                .replace("/* completed query route */rough_reflection_default_route(", "completed_reflection_query_route(") +
+                include_str!("shaders/reflection_query_compute.wgsl")
+        } else { shader_source.clone() };
+        let coarse_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("world-rough-reflection-evidence-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(query_source.clone())),
+        });
+        let cached_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("world-cached-reflection-surface-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(query_source.replace(
+                "/* primary reflection query */trace_geometry_reflection(",
+                "rough_reflection_unavailable_query(",
+            ))),
+        });
+        // Only the coarse opaque pipeline may reach group 3. Stub that call in
+        // ordinary/transparent/capture entries rather than depend on a compiler
+        // eliminating a constant branch before binding validation.
+        let surface_source = shader_source.replace(
+            "/* sample rough evidence */sample_rough_reflection_evidence(",
+            "rough_reflection_unavailable(",
+        ).replace("/* sample reflection route */sample_primary_reflection_route(",
+            "rough_reflection_default_route(");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("anica-motionloom-world-gpu-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                WGPU_WORLD_SHADER.as_str(),
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&surface_source)),
+        });
+        // A cached slab entry needs neither reflection BVH queries nor solid
+        // transport or casting-glass shadow queries. Use the same complete-
+        // scene proofs as ordinary shader specialization before constructing
+        // the light module. Automatic captures remain native diagnostic opt-in.
+        let planar_slab_shader = (planar::automatic_glass_enabled()
+            && !solid_transport_enabled && !primary_glass_shadows_enabled).then(|| {
+            let source = surface_source
+                .replace("override GEOMETRY_REFLECTION_ENABLED: bool = true;",
+                    "const GEOMETRY_REFLECTION_ENABLED: bool = false;")
+                .replace("override GEOMETRY_REFLECTION_ENABLED: bool = false;",
+                    "const GEOMETRY_REFLECTION_ENABLED: bool = false;");
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("world-cached-planar-slab-shader"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(source)),
+            })
         });
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("anica-motionloom-ground-grid-gpu-shader"),
@@ -3070,15 +3619,33 @@ impl GpuWorldRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                uniform_layout_entry(11, wgpu::ShaderStages::FRAGMENT),
             ],
         });
+        let lighting_stages = wgpu::ShaderStages::FRAGMENT | if query_enabled { wgpu::ShaderStages::COMPUTE } else { wgpu::ShaderStages::empty() };
         let lighting_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("anica-motionloom-world-lighting-bind-group-layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX | lighting_stages,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -3088,7 +3655,7 @@ impl GpuWorldRenderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: lighting_stages,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -3098,13 +3665,13 @@ impl GpuWorldRenderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: lighting_stages,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: lighting_stages,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -3114,8 +3681,45 @@ impl GpuWorldRenderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: lighting_stages,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    texture_2d_layout_entry(5, lighting_stages),
+                    filtering_sampler_layout_entry(6, lighting_stages),
+                    texture_2d_layout_entry(7, lighting_stages),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: lighting_stages,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: lighting_stages,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    filtering_sampler_layout_entry(10, lighting_stages),
+                    { let mut entry = per_light_shadows::depth_array_layout(11);
+                        entry.visibility = lighting_stages; entry },
+                    uniform_layout_entry(12, lighting_stages),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 20,
+                        visibility: lighting_stages,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
                         count: None,
                     },
                 ],
@@ -3210,6 +3814,8 @@ impl GpuWorldRenderer {
                         },
                         count: None,
                     },
+                    texture_2d_layout_entry(9, wgpu::ShaderStages::FRAGMENT),
+                    texture_2d_layout_entry(10, wgpu::ShaderStages::FRAGMENT),
                 ],
             });
         let transmission_scene_bind_group_layout =
@@ -3230,6 +3836,16 @@ impl GpuWorldRenderer {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Depth,
+                        },
                         count: None,
                     },
                 ],
@@ -3266,7 +3882,7 @@ impl GpuWorldRenderer {
             });
         let lighting_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("anica-motionloom-world-lighting-params"),
-            size: 1168,
+            size: 1360,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -3278,6 +3894,27 @@ impl GpuWorldRenderer {
                 resource: lighting_params_buffer.as_entire_binding(),
             }],
         });
+        let per_light_shadow_pass_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("per-light-shadow-pass-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(80),
+                    },
+                    count: None,
+                }],
+            });
+        let per_light_shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("per-light-shadow-pipeline-layout"),
+                bind_group_layouts: &[&bind_group_layout, &per_light_shadow_pass_layout],
+                push_constant_ranges: &[],
+            });
+        let per_light_shadows = per_light_shadows::ShadowResources::new(&device, 1, 1);
         let grid_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("anica-motionloom-ground-grid-bind-group-layout"),
@@ -3350,9 +3987,22 @@ impl GpuWorldRenderer {
                 bind_group_layouts: &[&froxel_composite_layout],
                 push_constant_ranges: &[],
             });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let rough_reflections = rough_reflections::RoughReflections::new(
+            &device, &queue, &coarse_shader, &bind_group_layout,
+            &lighting_bind_group_layout, &transmission_scene_bind_group_layout,
+            geometry_transport_enabled, query_enabled,
+        );
+        let opaque_depth_pipeline = create_world_surface_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            "world-opaque-visibility-prepass",
+            "fs_depth_prepass",
+            true,
+        );
+        let mut opaque_descriptor = wgpu::RenderPipelineDescriptor {
             label: Some("anica-motionloom-world-gpu-pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&transmissive_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -3429,6 +4079,11 @@ impl GpuWorldRenderer {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
             }),
             primitive: wgpu::PrimitiveState {
@@ -3446,13 +4101,122 @@ impl GpuWorldRenderer {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
+        };
+        let pipeline = device.create_render_pipeline(&opaque_descriptor);
+        let rough_constants: &[(&str, f64)] = if geometry_transport_enabled {
+            &[("GEOMETRY_REFLECTION_ENABLED", 0.0)]
+        } else { &[] };
+        opaque_descriptor.label = Some("world-rough-material-pipeline");
+        opaque_descriptor.fragment.as_mut().unwrap().compilation_options.constants = rough_constants;
+        let rough_pipeline = device.create_render_pipeline(&opaque_descriptor);
+        // Existing surface layouts use fifteen sampled textures. Devices with
+        // the WebGPU minimum sixteen retain the established full-pixel path.
+        let (coarse_pipeline, cached_reflection_pipeline, query_input_pipeline) = if geometry_transport_enabled
+            && rough_reflections::supports_evidence(&device.limits()) {
+            let coarse_surface_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("world-coarse-reflection-surface-layout"),
+                bind_group_layouts: &[&bind_group_layout, &lighting_bind_group_layout,
+                    &transmission_scene_bind_group_layout, &rough_reflections.layout],
+                push_constant_ranges: &[],
+            });
+            let mut coarse_constants = vec![("COARSE_REFLECTION_ENABLED", 1.0), ("COARSE_ROUTE_FULL_ONLY", 1.0)];
+            if query_enabled { coarse_constants.push(("REFLECTION_QUERY_ENABLED",1.0)); }
+            opaque_descriptor.label = Some("world-coarse-reflection-surface-pipeline");
+            opaque_descriptor.layout = Some(&coarse_surface_layout);
+            let coarse_fragment = opaque_descriptor.fragment.as_mut().unwrap();
+            coarse_fragment.module = &coarse_shader;
+            coarse_fragment.compilation_options.constants = &coarse_constants;
+            let full_pipeline = device.create_render_pipeline(&opaque_descriptor);
+            let mut cached_constants = vec![("COARSE_REFLECTION_ENABLED", 1.0), ("COARSE_ROUTE_FAST_ONLY", 1.0)];
+            if query_enabled { cached_constants.push(("REFLECTION_QUERY_ENABLED",1.0)); }
+            opaque_descriptor.label = Some("world-cached-reflection-surface-pipeline");
+            let cached_fragment = opaque_descriptor.fragment.as_mut().unwrap();
+            cached_fragment.module = &cached_shader;
+            cached_fragment.compilation_options.constants = &cached_constants;
+            let cached_pipeline = device.create_render_pipeline(&opaque_descriptor);
+            let query_input_pipeline = if query_enabled {
+                let targets = reflection_queries::INPUT_FORMATS.map(|format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL }));
+                let constants = [("REFLECTION_QUERY_ENABLED",1.0)];
+                opaque_descriptor.label = Some("world-reflection-query-input-pipeline");
+                let fragment = opaque_descriptor.fragment.as_mut().unwrap();
+                fragment.module = &coarse_shader;
+                fragment.entry_point = Some("fs_reflection_query_inputs");
+                fragment.targets = &targets;
+                fragment.compilation_options.constants = &constants;
+                Some(device.create_render_pipeline(&opaque_descriptor))
+            } else { None };
+            (Some(full_pipeline), Some(cached_pipeline), query_input_pipeline)
+        } else { (None, None, None) };
+        let query_pipelines = query_enabled.then(|| reflection_queries::QueryPipelines::new(
+            &device, &queue, &coarse_shader, &bind_group_layout, &lighting_bind_group_layout,
+            &rough_reflections.layout, width, height));
+        let planar_pipeline = create_world_surface_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            "planar-room-capture",
+            "fs_main",
+            true,
+        );
+        let capture_opaque_pipeline = create_world_surface_pipeline(
+            &device,
+            &shader,
+            &transmissive_pipeline_layout,
+            "planar-visible-room-capture",
+            "fs_capture_opaque",
+            true,
+        );
+        let planar_background_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("planar-room-background"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_background"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_planar_background"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+        let planar_default_texture = Self::make_hdr_texture(&device, 1, 1);
+        let planar_default_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planar-disabled"),
+            size: 96,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let planar_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("planar-clamp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let transparent_pipeline = create_world_surface_pipeline(
             &device,
             &shader,
             &pipeline_layout,
             "anica-motionloom-world-transparent-pipeline",
-            "fs_main",
+            "fs_main_mrt",
             false,
         );
         let transparent_depth_write_pipeline = create_world_surface_pipeline(
@@ -3460,7 +4224,7 @@ impl GpuWorldRenderer {
             &shader,
             &pipeline_layout,
             "anica-motionloom-world-transparent-depth-write-pipeline",
-            "fs_main",
+            "fs_main_mrt",
             true,
         );
         let transmissive_pipeline = create_world_surface_pipeline(
@@ -3468,7 +4232,7 @@ impl GpuWorldRenderer {
             &shader,
             &transmissive_pipeline_layout,
             "anica-motionloom-world-transmissive-pipeline",
-            "fs_transmissive",
+            "fs_transmissive_mrt",
             false,
         );
         let transmissive_depth_write_pipeline = create_world_surface_pipeline(
@@ -3476,8 +4240,42 @@ impl GpuWorldRenderer {
             &shader,
             &transmissive_pipeline_layout,
             "anica-motionloom-world-transmissive-depth-write-pipeline",
+            "fs_transmissive_mrt",
+            true,
+        );
+        let planar_slab_pipelines = planar_slab_shader.as_ref().map(|cached_shader| {
+            PlanarSlabPipelines {
+                cached: create_world_surface_pipeline(&device, cached_shader,
+                    &transmissive_pipeline_layout, "world-cached-planar-slab",
+                    "fs_transmissive_planar_cached_mrt", false),
+                cached_depth_write: create_world_surface_pipeline(&device, cached_shader,
+                    &transmissive_pipeline_layout, "world-cached-planar-slab-depth",
+                    "fs_transmissive_planar_cached_mrt", true),
+            }
+        });
+        let capture_transmissive_pipeline = create_world_surface_pipeline(
+            &device,
+            &shader,
+            &transmissive_pipeline_layout,
+            "capture-glass",
+            "fs_transmissive",
+            false,
+        );
+        let capture_transmissive_depth_write_pipeline = create_world_surface_pipeline(
+            &device,
+            &shader,
+            &transmissive_pipeline_layout,
+            "capture-glass-depth",
             "fs_transmissive",
             true,
+        );
+        let capture_transparent_pipeline = create_world_surface_pipeline(
+            &device,
+            &shader,
+            &pipeline_layout,
+            "capture-transparent",
+            "fs_main",
+            false,
         );
         let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("anica-motionloom-world-environment-background-pipeline"),
@@ -3590,6 +4388,92 @@ impl GpuWorldRenderer {
             multiview: None,
             cache: None,
         });
+        let per_light_shadow_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("per-light-shadow-map-pipeline"),
+                layout: Some(&per_light_shadow_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_per_light_shadow"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 116,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 24,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 40,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 56,
+                                shader_location: 4,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 64,
+                                shader_location: 5,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 80,
+                                shader_location: 6,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 92,
+                                shader_location: 7,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 104,
+                                shader_location: 8,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_per_light_shadow"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
         let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("anica-motionloom-ground-grid-pipeline"),
             layout: Some(&grid_pipeline_layout),
@@ -3738,9 +4622,17 @@ impl GpuWorldRenderer {
             Self::make_depth_texture(&device, history_width, history_height);
         let history_gbuffer_texture =
             Self::make_hdr_texture(&device, history_width, history_height);
+        let history_reflection_texture =
+            Self::make_hdr_texture(&device, history_width, history_height);
         let preview_gbuffer_texture = Self::make_hdr_texture(&device, width, height);
         let preview_material_texture = Self::make_target_texture(&device, width, height);
+        let preview_reflection_texture = Self::make_hdr_texture(&device, width, height);
+        let reflection_history = reflection_history::ReflectionHistory::new(&device,
+            if geometry_transport_enabled { width } else { 1 },
+            if geometry_transport_enabled { height } else { 1 });
         let transmission_scene_texture = Self::make_hdr_texture(&device, width, height);
+        let transmission_depth_texture = Self::make_depth_texture(&device, width, height);
+        let transmission_depth_view = transmission_depth_texture.create_view(&Default::default());
         let transmission_scene_view =
             transmission_scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let transmission_scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -3763,6 +4655,10 @@ impl GpuWorldRenderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&transmission_scene_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&transmission_depth_view),
                 },
             ],
         });
@@ -3877,6 +4773,12 @@ impl GpuWorldRenderer {
             "fs_outline",
             false,
         );
+        let hybrid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hybrid-scene-empty"),
+            size: 256,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             device,
             queue,
@@ -3887,14 +4789,38 @@ impl GpuWorldRenderer {
             shadow_lighting_bind_group,
             outline_pipeline,
             pipeline,
+            rough_pipeline,
+            coarse_pipeline,
+            query_input_pipeline,
+            query_pipelines,
+            cached_reflection_pipeline,
+            rough_reflections,
+            gpu_timing,
+            opaque_depth_pipeline,
             transparent_pipeline,
             transparent_depth_write_pipeline,
             transmissive_pipeline,
             transmissive_depth_write_pipeline,
+            planar_slab_pipelines,
+            capture_transmissive_pipeline,
+            capture_transmissive_depth_write_pipeline,
+            capture_transparent_pipeline,
+            planar_pipeline,
+            capture_opaque_pipeline,
+            planar_background_pipeline,
+            planar_resources: HashMap::new(),
+            planar_default_texture,
+            _planar_default_uniform: planar_default_uniform,
+            planar_sampler,
             transmission_scene_texture,
+            transmission_depth_texture,
             transmission_scene_bind_group,
+            transmission_scene_bind_group_layout,
             background_pipeline,
             shadow_pipeline,
+            per_light_shadow_pipeline,
+            per_light_shadow_pass_layout,
+            per_light_shadows,
             grid_pipeline,
             dof_pipeline,
             motion_blur_pipeline,
@@ -3919,20 +4845,47 @@ impl GpuWorldRenderer {
             dof_sampler,
             lighting_params_buffer,
             environment_resource: None,
+            hybrid_cache: hybrid::HybridSceneCache::default(),
+            hybrid_buffer,
+            hybrid_signature: 0,
+            hybrid_object_ids: HashMap::new(),
+            hybrid_stats: Default::default(),
+            reflection_history,
             targets,
             hdr_target,
             history_texture,
             history_depth_texture,
             history_gbuffer_texture,
+            history_reflection_texture,
             temporal_history_enabled,
+            geometry_transport_enabled,
+            solid_transport_enabled,
+            primary_glass_shadows_enabled,
+            physical_style_only,
+            alpha_evaluation_enabled,
+            raster_visibility_enabled,
+            last_camera_draw_batches: 0,
+            last_frustum_rejected_items: 0,
             preview_gbuffer_texture,
             preview_material_texture,
+            preview_reflection_texture,
             history_valid: false,
             last_history_frame: None,
             last_camera: None,
             last_temporal_style_signature: None,
             object_motion_history: HashMap::new(),
             target_cursor: 0,
+            last_planar_capture_draw_calls: 0,
+            last_planar_slab_extra_draw_calls: 0,
+            last_planar_slab_cached_triangles: 0,
+            last_planar_slab_discarded_triangles: 0,
+            last_transmission_layers: 0,
+            last_transmission_copy_pixels: 0,
+            last_baked_active: false,
+            baked_probe_bytes: 0,
+            local_reflection_bytes: 0,
+            environment_ibl_bytes: 0,
+
             depth_texture,
             shadow_texture,
             readback_buffer,
@@ -4026,6 +4979,7 @@ impl GpuWorldRenderer {
             self.environment_resource = None;
         }
         let target = Arc::clone(&self.hdr_target);
+        let transport_changed = self.prepare_hybrid_scene(draw_calls, lighting)?;
         if clear_color.is_none() {
             let background = background.ok_or_else(|| WorldRenderError::GpuRender {
                 message: "world GPU render requires a background when no clear color is supplied"
@@ -4034,7 +4988,7 @@ impl GpuWorldRenderer {
             self.write_texture_hdr_background(
                 &target,
                 background.as_raw(),
-                lighting.params.color0[3],
+                &lighting.params,
             );
         }
         // Fit small rigid scenes without increasing shadow texture resolution.
@@ -4058,6 +5012,25 @@ impl GpuWorldRenderer {
             shadow_bounds.push((bounds, draw.params));
         }
         let mut fitted_lighting = fit_rigid_shadow_volume(lighting.params, &shadow_bounds);
+        if !self.geometry_transport_enabled {
+            fitted_lighting.reflection0[3] = 0.0;
+        }
+        if lighting.per_light_shadows {
+            if let Some(scene) = self.hybrid_cache.scene() {
+                per_light_shadows::fit_primary_directional_depth(&mut fitted_lighting, scene);
+            }
+        }
+        fitted_lighting.reflection0[2] = transport_changed as u8 as f32;
+        let evidence_triangles = if fitted_lighting.reflection0[3] > 0.5 && fitted_lighting.surface0[0] < 0.5 {
+            self.hybrid_stats.1
+        } else { 0 };
+        let coarse_active = self.geometry_transport_enabled && self.coarse_pipeline.is_some() && self.rough_reflections.prepare(&self.device, self.width,
+            self.height, evidence_triangles, self.hybrid_stats.3, fitted_lighting.reflection0[1]);
+        if lighting.froxel.is_some() {
+            // Geometry reflection is attenuated by the volume composite. An
+            // SSR replacement afterward would subtract a pre-volume lobe.
+            fitted_lighting.preview0[1] = 0.0;
+        }
         let taa_enabled = fitted_lighting.preview0[0] > 0.5;
         let current_jitter = if taa_enabled && lighting.temporal_jitter {
             let phases = match fitted_lighting.render_compat[2] as u32 {
@@ -4087,6 +5060,9 @@ impl GpuWorldRenderer {
         });
         let previous = usable_previous.unwrap_or(current_camera);
         let history_valid = self.history_valid && usable_previous.is_some() && taa_enabled;
+        // Surface velocity also drives reflection-only history when display
+        // TAA is disabled. Retain physical motion independently of its resolve.
+        let motion_history_valid = usable_previous.is_some();
         fitted_lighting.previous_camera0 = previous.camera0;
         fitted_lighting.previous_camera1 = previous.camera1;
         fitted_lighting.previous_camera2 = previous.camera2;
@@ -4103,6 +5079,15 @@ impl GpuWorldRenderer {
             0,
             &pack_gpu_world_lighting(fitted_lighting),
         );
+        let mut shadow_plan = per_light_shadows::ShadowPlan::new(lighting, &fitted_lighting);
+        if let Some(scene) = self.hybrid_cache.scene() {
+            shadow_plan.certify_secondary(scene);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("MOTIONLOOM_TRACE_BATCHES").is_some() {
+            eprintln!("motionloom secondary shadow coverage: {:?}", shadow_plan.secondary_coverage());
+        }
+        self.prepare_per_light_shadows(&shadow_plan);
         self.ensure_environment_resource(lighting);
         let lighting_bind_group = self
             .environment_resource
@@ -4110,15 +5095,25 @@ impl GpuWorldRenderer {
             .expect("environment resource prepared before 3D draw")
             .bind_group
             .clone();
+        let planar_views = self.prepare_planar_views(draw_calls, lighting)?;
         let mut gpu_draws = Vec::<GpuWorldDrawResources>::with_capacity(draw_calls.len());
         let mut active_texture_keys = HashSet::<GpuWorldTextureKey>::new();
         let mut buffer_writes = 0usize;
+        self.last_frustum_rejected_items = 0;
         // Keep authoring order (including coplanar ties); only adjacent compatible
         // opaque draws coalesce. Visibility is aggregated across a batch instead
         // of splitting on every in/out transition: the GPU clips off-screen
         // instances, while splitting a spatially shuffled scatter would create
         // tens of thousands of tiny buffers and submissions.
-        let mut batches: Vec<(Vec<&GpuWorldDraw>, bool)> = Vec::new();
+        let coating_compatibility = certify_coating_roughness(draw_calls,
+            &self.hybrid_object_ids, self.hybrid_stats.3);
+        // Keep all casters on a shadow refresh and all reflected-view candidates.
+        // Otherwise a proved-empty main bound can skip texture/binding assembly.
+        let early_main_only = !self.geometry_transport_enabled && draw_calls.len() >= 256
+            && planar_views.is_empty()
+            && (self.per_light_depth_valid(&shadow_plan, draw_calls)
+                || (!shadow_plan.enabled && fitted_lighting.color1[3] <= 0.0));
+        let mut batches: Vec<(Vec<&GpuWorldDraw>, transport_tiles::ScreenBounds)> = Vec::new();
         let max_instances = (self.device.limits().max_storage_buffer_binding_size as usize
             / std::mem::size_of::<GpuWorldParams>())
         .max(1);
@@ -4131,13 +5126,22 @@ impl GpuWorldRenderer {
                 .bone_matrices
                 .iter()
                 .all(|matrix| *matrix == mat4_identity());
-            let visible = rigid_draw_visible(
+            let screen_bounds = transport_tiles::ScreenBounds::bounds(
                 if rigid { geometry.rigid_bounds } else { None },
                 draw.params,
+                [self.width, self.height],
             );
+            self.last_frustum_rejected_items += usize::from(screen_bounds == transport_tiles::ScreenBounds::Empty);
+            if early_main_only && screen_bounds == transport_tiles::ScreenBounds::Empty {
+                continue;
+            }
             let compatible = batches.last().is_some_and(|(batch, _)| {
                 let previous = batch[0];
                 batch.len() < max_instances
+                    && !planar_views.iter().any(|view| {
+                        view.matches_target(&draw.instance_key.actor_id)
+                            || view.matches_target(&previous.instance_key.actor_id)
+                    })
                     && draw.phase == GpuWorldDrawPhase::Opaque
                     && draw.depth_write
                     && previous.phase == draw.phase
@@ -4157,14 +5161,16 @@ impl GpuWorldRenderer {
                     && geometry.rigid_bounds.is_some()
             });
             if compatible {
-                let (batch, batch_visible) = batches.last_mut().unwrap();
+                let (batch, batch_bounds) = batches.last_mut().unwrap();
                 batch.push(draw);
-                *batch_visible |= visible;
+                *batch_bounds = batch_bounds.union(screen_bounds);
             } else {
-                batches.push((vec![draw], visible));
+                batches.push((vec![draw], screen_bounds));
             }
         }
-        for (batch, camera_visible) in batches {
+        let mut query_owner = 0u32;
+        for (batch, screen_bounds) in batches {
+            let camera_visible = screen_bounds != transport_tiles::ScreenBounds::Empty;
             let draw = batch[0];
             if draw.indices.is_empty() {
                 continue;
@@ -4288,7 +5294,7 @@ impl GpuWorldRenderer {
                         self.object_motion_history
                             .get(&draw.instance_key)
                             .filter(|previous| {
-                                history_valid
+                                motion_history_valid
                                     && preview_history_frame_compatible(
                                         previous.frame,
                                         lighting.frame_index,
@@ -4297,6 +5303,41 @@ impl GpuWorldRenderer {
                             });
                     let previous_params = previous.map_or(draw.params, |state| state.params);
                     let mut params = draw.params;
+                    params.material11[3] = query_owner as f32;
+                    query_owner += 1;
+                    let object = self.hybrid_object_ids.get(&draw.instance_key)
+                        .copied().unwrap_or(u32::MAX);
+                    params.material11[1] = object as f32;
+                    params.material11[2] = coating_compatibility.get(object as usize)
+                        .copied().unwrap_or(false) as u8 as f32;
+                    let model_id = draw
+                        .instance_key
+                        .actor_id
+                        .split("::")
+                        .next()
+                        .unwrap_or(&draw.instance_key.actor_id);
+                    let flags = lighting
+                        .model_shadow_flags
+                        .get(model_id)
+                        .copied()
+                        .unwrap_or([true, true]);
+                    params.material10[2] = if lighting.per_light_shadows {
+                        flags[0] as u8 as f32
+                    } else {
+                        1.0
+                    };
+                    params.material10[3] = if lighting.per_light_shadows {
+                        flags[1] as u8 as f32
+                    } else {
+                        1.0
+                    };
+                    if draw.phase == GpuWorldDrawPhase::Transmissive {
+                        // Topology belongs to immutable, signature-keyed geometry.
+                        // Instances and later frames reuse the welded-edge result.
+                        params.material8[3] = *geometry.closed_mesh.get_or_init(|| {
+                            planar::closed_mesh(&draw.vertices, &draw.indices)
+                        }) as u8 as f32;
+                    }
                     params.previous_model = previous_params.model;
                     params.previous_actor = previous_params.actor;
                     params.previous_actor_rotation = previous_params.actor_rotation;
@@ -4313,7 +5354,7 @@ impl GpuWorldRenderer {
                 .object_motion_history
                 .get(&draw.instance_key)
                 .filter(|previous| {
-                    history_valid
+                    motion_history_valid
                         && preview_history_frame_compatible(previous.frame, lighting.frame_index)
                         && previous.bone_matrices.len() == draw.bone_matrices.len()
                 })
@@ -4322,11 +5363,27 @@ impl GpuWorldRenderer {
                 });
             let bone_bytes = pack_gpu_world_bone_pair(&draw.bone_matrices, previous_bones);
             let bone_buffer_size = bone_bytes.len().max(64) as u64;
+            let planar_view = planar_views
+                .iter()
+                .find(|view| view.matches_target(&draw.instance_key.actor_id));
+            let planar_signature =
+                planar_view.map(|view| (view.target.clone(), view.width, view.height));
+            let planar_params =
+                planar_view.map_or_else(planar::PlanarParams::default, |view| view.params);
+            let planar_texture_view = planar_view.map_or_else(
+                || self.planar_default_texture.create_view(&Default::default()),
+                |view| {
+                    self.planar_resources[&view.target]
+                        .color
+                        .create_view(&Default::default())
+                },
+            );
             let needs_instance = self
                 .instance_resource_cache
                 .get(&draw.instance_key)
                 .is_none_or(|resource| {
-                    resource.bone_buffer_size < bone_buffer_size
+                    resource.planar_resource_signature != planar_signature
+                        || resource.bone_buffer_size < bone_buffer_size
                         || resource.params_buffer_size < params_bytes.len() as u64
                 });
             if needs_instance {
@@ -4340,6 +5397,12 @@ impl GpuWorldRenderer {
                     label: Some("anica-motionloom-world-gpu-bones"),
                     size: bone_buffer_size,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let planar_uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("planar-instance"),
+                    size: 96,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4384,6 +5447,18 @@ impl GpuWorldRenderer {
                             binding: 8,
                             resource: wgpu::BindingResource::TextureView(&occlusion_texture_view),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&planar_texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::Sampler(&self.planar_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: planar_uniform.as_entire_binding(),
+                        },
                     ],
                 });
                 self.instance_resource_cache.insert(
@@ -4396,6 +5471,8 @@ impl GpuWorldRenderer {
                         last_params: Vec::new(),
                         last_bones: Vec::new(),
                         bind_group,
+                        planar_uniform,
+                        planar_resource_signature: planar_signature,
                     },
                 );
             }
@@ -4403,6 +5480,8 @@ impl GpuWorldRenderer {
                 .instance_resource_cache
                 .get_mut(&draw.instance_key)
                 .expect("GPU world instance resource inserted before draw");
+            self.queue
+                .write_buffer(&instance_resource.planar_uniform, 0, &planar_params.bytes());
             // Retained buffers need no upload when their exact contents are unchanged.
             if instance_resource.last_params != params_bytes {
                 buffer_writes += 1;
@@ -4417,15 +5496,49 @@ impl GpuWorldRenderer {
                 instance_resource.last_bones = bone_bytes;
             }
             let bind_group = instance_resource.bind_group.clone();
+            // A single indexed chunk preserves the original triangle positions
+            // despite vertex remapping. Contiguous runs therefore reuse its
+            // retained index buffer without introducing per-frame allocations.
+            let planar_slab_runs = if self.planar_slab_pipelines.is_some()
+                && batch.len() == 1 && geometry.chunks.len() == 1
+                && draw.phase == GpuWorldDrawPhase::Transmissive
+                && draw.params.material11[0] <= 0.5 {
+                planar_view.filter(|view| view.params.control[3] > 0.0)
+                    .map(|view| planar::certified_slab_face_runs(draw,view,&fitted_lighting))
+            } else { None };
+            #[cfg(not(target_arch = "wasm32"))]
+            if std::env::var_os("MOTIONLOOM_TRACE_BATCHES").is_some() {
+                if let Some(runs) = &planar_slab_runs {
+                    let cached: u32 = runs.iter().filter(|run| run.cached).map(|run| run.index_count).sum();
+                    let remaining: u32 = runs.iter().filter(|run| !run.cached && !run.discarded).map(|run| run.index_count).sum();
+                    let discarded: u32 = runs.iter().filter(|run| run.discarded).map(|run| run.index_count).sum();
+                    eprintln!("motionloom certified planar slab: {} cached_indices={} remaining_indices={} discarded_indices={} runs={}",
+                        draw.instance_key.actor_id,cached,remaining,discarded,runs.len());
+                }
+            }
             for chunk in &geometry.chunks {
                 gpu_draws.push(GpuWorldDrawResources {
+                    instance_key: draw.instance_key.clone(),
                     vertex_buffer: chunk.vertex_buffer.clone(),
                     index_buffer: chunk.index_buffer.clone(),
                     bind_group: bind_group.clone(),
                     index_count: chunk.index_count,
                     instance_count: batch.len() as u32,
                     camera_visible,
+                    snapshot_region: if !self.geometry_transport_enabled && draw_calls.len() >= 256
+                        && draw.phase == GpuWorldDrawPhase::Transmissive {
+                        snapshot_region::slab_region(geometry.rigid_bounds, draw.params,
+                            [self.width,self.height], screen_bounds,
+                            fitted_lighting.preview0[1] > 0.5 && fitted_lighting.preview2[1] > 0.0,
+                            snapshot_region::rigid(&draw.bone_matrices))
+                    } else { [0,0,self.width,self.height] },
+                    screen_bounds,
+                    geometry_reflection_required: batch.iter().any(|draw|
+                        draw_requires_geometry_reflection(draw, &fitted_lighting)),
                     phase: draw.phase,
+                    solid_transmission: self.solid_transport_enabled && draw.phase == GpuWorldDrawPhase::Transmissive
+                        && draw.params.material11[0] > 0.5,
+                    planar_slab_runs: planar_slab_runs.clone(),
                     depth_write: draw.depth_write,
                     sort_priority: draw.sort_priority,
                     camera_depth: draw.camera_depth,
@@ -4436,10 +5549,12 @@ impl GpuWorldRenderer {
         #[cfg(not(target_arch = "wasm32"))]
         if std::env::var_os("MOTIONLOOM_TRACE_BATCHES").is_some() {
             eprintln!(
-                "motionloom batches: items={} batches={} camera_batches={} buffer_writes={}",
+                "motionloom batches: items={} batches={} camera_batches={} rough_batches={} solid_shader={} buffer_writes={}",
                 draw_calls.len(),
                 gpu_draws.len(),
                 gpu_draws.iter().filter(|draw| draw.camera_visible).count(),
+                gpu_draws.iter().filter(|draw| draw.camera_visible && !draw.geometry_reflection_required).count(),
+                self.solid_transport_enabled,
                 buffer_writes
             );
         }
@@ -4456,6 +5571,7 @@ impl GpuWorldRenderer {
                 .cmp(&right.sort_priority)
                 .then_with(|| right.camera_depth.total_cmp(&left.camera_depth)),
         });
+        self.last_camera_draw_batches = gpu_draws.iter().filter(|draw| draw.camera_visible).count();
         // Drop superseded hot-reload/live-binding uploads after each frame;
         // actor resources retain any texture still referenced by in-flight work.
         for resource in self.actor_resource_cache.values() {
@@ -4474,12 +5590,18 @@ impl GpuWorldRenderer {
         let preview_material_view = self
             .preview_material_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let preview_reflection_view = self
+            .preview_reflection_texture
+            .create_view(&Default::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("anica-motionloom-world-gpu-encoder"),
             });
-        if lighting.params.color1[3] > 0.0 {
+        let transport_started = ProfileClock::now();
+        let mut transport_submissions = TransportSubmissions::default();
+        let gpu_timing_frame = self.gpu_timing.begin(&self.device, &self.queue, &mut encoder, lighting.frame_index);
+        if lighting.params.color1[3] > 0.0 && !shadow_plan.enabled {
             let shadow_view = self
                 .shadow_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
@@ -4510,6 +5632,197 @@ impl GpuWorldRenderer {
                 shadow_pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
             }
         }
+        self.encode_per_light_shadows(&mut encoder, &shadow_plan, draw_calls, &gpu_draws);
+        let (planar_encoder, planar_draw_calls) = self.encode_planar_captures(
+            encoder,
+            &mut transport_submissions,
+            draw_calls,
+            &planar_views,
+            &lighting_bind_group,
+            lighting.transmission_layer_budget,
+            [fitted_lighting.preview1[0], fitted_lighting.preview1[1]],
+        );
+        encoder = planar_encoder;
+        self.last_planar_capture_draw_calls = planar_draw_calls;
+        if self.geometry_transport_enabled || self.raster_visibility_enabled {
+        {
+            // Reuse the slab snapshots for nearest depth and exact coverage.
+            // Only fully covering winners can discard hidden expensive shading;
+            // fractional or coplanar-first coverage retains authored blending.
+            let coverage_view = self.transmission_scene_texture.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("world-opaque-visibility-prepass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &coverage_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.opaque_depth_pipeline);
+            pass.set_bind_group(1, &lighting_bind_group, &[]);
+            for draw in gpu_draws.iter().filter(|draw| {
+                draw.camera_visible && draw.phase == GpuWorldDrawPhase::Opaque && draw.depth_write
+            }) {
+                pass.set_bind_group(0, &draw.bind_group, &[]);
+                pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
+            }
+        }
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.depth_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.transmission_depth_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        }
+        self.gpu_timing.mark(&mut encoder, gpu_timing_frame.as_ref(), 1);
+        if coarse_active {
+            let evidence = self.rough_reflections.targets.as_ref().expect("active rough evidence");
+            // Keep the complete projection and all opaque occluders. Each
+            // command bounds only its expensive reflection fragment footprint.
+            for y in (0..evidence.height).step_by(128) {
+                for x in (0..evidence.width).step_by(128) {
+                    let first = x == 0 && y == 0;
+                    let load = |clear| if first { wgpu::LoadOp::Clear(clear) } else { wgpu::LoadOp::Load };
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("world-rough-reflection-evidence-pass"),
+                        color_attachments: &[
+                            Some(wgpu::RenderPassColorAttachment { view: &evidence.radiance_view, resolve_target: None,
+                                ops: wgpu::Operations { load: load(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                            Some(wgpu::RenderPassColorAttachment { view: &evidence.normals_view, resolve_target: None,
+                                ops: wgpu::Operations { load: load(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                            Some(wgpu::RenderPassColorAttachment { view: &evidence.world_position_view, resolve_target: None,
+                                ops: wgpu::Operations { load: load(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                            Some(wgpu::RenderPassColorAttachment { view: &evidence.object_id_view, resolve_target: None,
+                                ops: wgpu::Operations { load: load(wgpu::Color { r: u32::MAX as f64, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } }),
+                            Some(wgpu::RenderPassColorAttachment { view: &evidence.coat_radiance_view, resolve_target: None,
+                                ops: wgpu::Operations { load: load(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                        ],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &evidence.depth_view,
+                            depth_ops: Some(wgpu::Operations { load: if first { wgpu::LoadOp::Clear(0.0) } else { wgpu::LoadOp::Load }, store: wgpu::StoreOp::Store }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None, occlusion_query_set: None,
+                    });
+                    let tile_width = (evidence.width - x).min(128);
+                    let tile_height = (evidence.height - y).min(128);
+                    pass.set_scissor_rect(x, y, tile_width, tile_height);
+                    pass.set_pipeline(self.rough_reflections.pipeline.as_ref().expect("supported rough evidence"));
+                    pass.set_bind_group(1, &lighting_bind_group, &[]);
+                    pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
+                    let full_x = x * self.width / evidence.width;
+                    let full_y = y * self.height / evidence.height;
+                    let full_right = ((x + tile_width) * self.width).div_ceil(evidence.width);
+                    let full_bottom = ((y + tile_height) * self.height).div_ceil(evidence.height);
+                    let full_tile = [full_x, full_y, full_right - full_x, full_bottom - full_y];
+                    for draw in gpu_draws.iter().filter(|draw| draw.camera_visible
+                        && draw.phase == GpuWorldDrawPhase::Opaque && draw.depth_write
+                        && draw.screen_bounds.intersects(full_tile)) {
+                        pass.set_bind_group(0, &draw.bind_group, &[]);
+                        pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                        pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
+                    }
+                    drop(pass);
+                    encoder = self.submit_transport_encoder(encoder, &mut transport_submissions, "rough-evidence-tile-encoder");
+                }
+            }
+        }
+        self.gpu_timing.mark(&mut encoder, gpu_timing_frame.as_ref(), 2);
+        if coarse_active {
+            let evidence = self.rough_reflections.targets.as_ref().expect("active rough evidence");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("world-reflection-nearest-route-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &evidence.route_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None, occlusion_query_set: None,
+            });
+            pass.set_pipeline(self.rough_reflections.route_pipeline.as_ref().expect("supported reflection routing"));
+            pass.set_bind_group(1, &lighting_bind_group, &[]);
+            pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
+            pass.set_bind_group(3, self.rough_reflections.bind_group_for_classification(), &[]);
+            for draw in gpu_draws.iter().filter(|draw| draw.camera_visible
+                && draw.phase == GpuWorldDrawPhase::Opaque && draw.depth_write) {
+                pass.set_bind_group(0, &draw.bind_group, &[]);
+                pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
+            }
+        }
+        if coarse_active && let (Some(input_pipeline), Some(queries), Some(targets)) =
+            (&self.query_input_pipeline, &self.query_pipelines,
+                self.rough_reflections.targets.as_ref().and_then(|targets| targets.query.as_ref())) {
+            // Only unresolved nearest primary pixels enter the GPU worklist.
+            // Dummy query bindings prevent attachment feedback while writing
+            // inputs; the later compute pass uses the completed active inputs.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("world-primary-reflection-query-input-pass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment { view: &targets.input0_view,
+                            resolve_target: None, ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                        Some(wgpu::RenderPassColorAttachment { view: &targets.input1_view,
+                            resolve_target: None, ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view, depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }), stencil_ops: None,
+                    }),
+                    timestamp_writes: None, occlusion_query_set: None,
+                });
+                pass.set_pipeline(input_pipeline);
+                pass.set_bind_group(1, &lighting_bind_group, &[]);
+                pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
+                pass.set_bind_group(3, self.rough_reflections.input_bind_group().expect("query input defaults"), &[]);
+                for draw in gpu_draws.iter().filter(|draw| draw.camera_visible
+                    && draw.phase == GpuWorldDrawPhase::Opaque && draw.depth_write) {
+                    pass.set_bind_group(0, &draw.bind_group, &[]);
+                    pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                    pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
+                }
+            }
+            queries.encode(&mut encoder, &lighting_bind_group, self.rough_reflections.bind_group(), targets);
+        }
+        self.gpu_timing.mark(&mut encoder, gpu_timing_frame.as_ref(), 3);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("anica-motionloom-world-background-grid-pass"),
@@ -4550,9 +5863,45 @@ impl GpuWorldRenderer {
                 pass.draw(0..6, 0..1);
             }
         }
-        // Shade opaque geometry and produce its temporal/material data in the
-        // same submission. This replaces two additional full-scene passes.
+        // Bound expensive fragment work per submission while retaining the
+        // full-resolution viewport, derivatives, depth and authored draw order.
+        #[cfg(not(target_arch = "wasm32"))]
+        let transport_tile_size = std::env::var("MOTIONLOOM_TRACE_TRANSPORT_TILE_SIZE")
+            .ok().and_then(|v| v.parse::<u32>().ok()).filter(|v| [128,256,512].contains(v)).unwrap_or(if self.solid_transport_enabled || self.primary_glass_shadows_enabled { 128 } else { 512 });
+        #[cfg(target_arch = "wasm32")]
+        let transport_tile_size = 128u32;
+        let transport_tiles = if self.hybrid_stats.1 >= 32_768
+            && fitted_lighting.reflection0[3] > 0.5
+            && u64::from(self.width) * u64::from(self.height) > 16_384
         {
+            let mut tiles = Vec::new();
+            for y in (0..self.height).step_by(transport_tile_size as usize) {
+                for x in (0..self.width).step_by(transport_tile_size as usize) {
+                    tiles.push([x, y, (self.width - x).min(transport_tile_size), (self.height - y).min(transport_tile_size)]);
+                }
+            }
+            tiles
+        } else {
+            vec![[0, 0, self.width, self.height]]
+        };
+        if transport_tiles.len() > 1 {
+            encoder = self.submit_transport_encoder(encoder, &mut transport_submissions, "hybrid-pre-color-encoder");
+        }
+        // Diagnostic variants deliberately omit one route. Their output is
+        // incomplete and cannot be used as optical quality evidence.
+        #[cfg(not(target_arch = "wasm32"))]
+        let diagnostic_route = std::env::var("MOTIONLOOM_TRACE_PRIMARY_ROUTE").ok();
+        #[cfg(target_arch = "wasm32")]
+        let diagnostic_route: Option<String> = None;
+        for (tile_index, tile) in transport_tiles.iter().enumerate() {
+            let first_tile = tile_index == 0;
+            if !first_tile && !gpu_draws.iter().any(|draw| {
+                draw.camera_visible && draw.phase == GpuWorldDrawPhase::Opaque && draw.depth_write
+                    && draw.screen_bounds.intersects(*tile)
+            }) {
+                continue;
+            }
+            transport_submissions.passes[0] += 1;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("anica-motionloom-world-opaque-mrt-pass"),
                 color_attachments: &[
@@ -4568,12 +5917,16 @@ impl GpuWorldRenderer {
                         view: &preview_gbuffer_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.5,
-                                g: 0.5,
-                                b: 0.0,
-                                a: 0.0,
-                            }),
+                            load: if first_tile {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.5,
+                                    g: 0.5,
+                                    b: 0.0,
+                                    a: 0.0,
+                                })
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
                             store: wgpu::StoreOp::Store,
                         },
                     }),
@@ -4581,12 +5934,33 @@ impl GpuWorldRenderer {
                         view: &preview_material_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 1.0,
-                                g: 0.0,
-                                b: 1.0,
-                                a: 0.0,
-                            }),
+                            load: if first_tile {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 1.0,
+                                    g: 0.0,
+                                    b: 1.0,
+                                    a: 0.0,
+                                })
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &preview_reflection_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: if first_tile {
+                                wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: -1.0,
+                                })
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
                             store: wgpu::StoreOp::Store,
                         },
                     }),
@@ -4602,16 +5976,79 @@ impl GpuWorldRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            pass.set_scissor_rect(tile[0], tile[1], tile[2], tile[3]);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(1, &lighting_bind_group, &[]);
+            pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
             for draw in gpu_draws.iter().filter(|draw| {
                 draw.camera_visible && draw.phase == GpuWorldDrawPhase::Opaque && draw.depth_write
+                    && draw.screen_bounds.intersects(*tile)
             }) {
+                transport_submissions.draws[0] += 1;
+                if draw.geometry_reflection_required && coarse_active {
+                    if diagnostic_route.as_deref() != Some("full") {
+                    pass.set_pipeline(self.cached_reflection_pipeline.as_ref().expect("supported cached reflections"));
+                    pass.set_bind_group(3, self.rough_reflections.bind_group(), &[]);
+                    pass.set_bind_group(0, &draw.bind_group, &[]);
+                    pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                    pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
+                    }
+                    if diagnostic_route.as_deref() == Some("cached") { continue; }
+                    transport_submissions.draws[0] += 1;
+                    pass.set_pipeline(self.coarse_pipeline.as_ref().expect("supported rough evidence"));
+                } else {
+                    pass.set_pipeline(if draw.geometry_reflection_required { &self.pipeline } else { &self.rough_pipeline });
+                }
                 pass.set_bind_group(0, &draw.bind_group, &[]);
                 pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
                 pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
             }
+            drop(pass);
+            if tile_index + 1 < transport_tiles.len() {
+                encoder = self.submit_transport_encoder(encoder, &mut transport_submissions, "hybrid-opaque-tile-encoder");
+            }
+        }
+        // Filter the opaque indirect lobe before glass and volume composition.
+        self.gpu_timing.mark(&mut encoder, gpu_timing_frame.as_ref(), 4);
+        // Later attenuation must apply to the filtered lobe, rather than adding
+        // an unattenuated opaque delta back into the completed transparent HDR.
+        let target = if self.geometry_transport_enabled { self.reflection_history.encode(
+            &self.device,
+            &mut encoder,
+            &target,
+            &self.preview_reflection_texture,
+            &self.preview_gbuffer_texture,
+            &self.preview_material_texture,
+            &self.depth_texture,
+            &self.lighting_params_buffer,
+            motion_history_valid && !transport_changed,
+        ) } else { target };
+        let view = target.create_view(&Default::default());
+        if self.geometry_transport_enabled {
+        let filtered_reflection = self.reflection_history.reflection_texture();
+        // Keep history's opaque evidence immutable. Transparent draws clear
+        // SSR eligibility in a separate working copy of the filtered lobe.
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: filtered_reflection.as_ref(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.preview_reflection_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
         }
         // Completed opaque depth hides occluded backface outlines.
         if lighting.params.cel0[2] > 0.0 {
@@ -4650,20 +6087,20 @@ impl GpuWorldRenderer {
                 pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
             }
         }
-        // Transmissive shaders sample a stable opaque snapshot. Reading the
-        // active render attachment directly would violate WebGPU alias rules.
+        // Refraction reads an independent opaque-depth snapshot. It never
+        // samples the depth attachment used for front-to-back visibility.
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: target.as_ref(),
+                texture: &self.depth_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+                aspect: wgpu::TextureAspect::DepthOnly,
             },
             wgpu::TexelCopyTextureInfo {
-                texture: &self.transmission_scene_texture,
+                texture: &self.transmission_depth_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+                aspect: wgpu::TextureAspect::DepthOnly,
             },
             wgpu::Extent3d {
                 width: self.width,
@@ -4671,59 +6108,248 @@ impl GpuWorldRenderer {
                 depth_or_array_layers: 1,
             },
         );
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("anica-motionloom-world-transparent-render-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
+        let mut layers = 0u32;
+        self.last_transmission_copy_pixels = 0;
+        self.last_planar_slab_extra_draw_calls = 0;
+        self.last_planar_slab_cached_triangles = 0;
+        self.last_planar_slab_discarded_triangles = 0;
+        let mut current_pane: Option<(&GpuWorldInstanceKey, bool)> = None;
+        let mut pane_has_snapshot = false;
+        if !self.geometry_transport_enabled && transport_tiles.len() == 1 {
+            let draws = gpu_draws.iter().filter(|draw| {
+                draw.camera_visible && (draw.phase != GpuWorldDrawPhase::Opaque || !draw.depth_write)
+            }).collect::<Vec<_>>();
+            let batches = transparent_batches::plan(draws.iter().map(|draw| {
+                (draw.phase == GpuWorldDrawPhase::Transmissive)
+                    .then_some((&draw.instance_key, draw.solid_transmission))
+            }), lighting.transmission_layer_budget);
+            for batch in batches {
+                // Ending the previous pass before this copy makes its complete
+                // ordered composition available to every chunk of the next pane.
+                if batch.copy_snapshot {
+                    // Preserve the full texture coordinate system. Only the
+                    // proved slab read footprint is refreshed; SSR/uncertainty
+                    // use the complete underlay, retaining authored pane order.
+                    let mut region = [self.width, self.height, 0, 0];
+                    for draw in draws[batch.draws.clone()].iter().filter(|d| d.phase == GpuWorldDrawPhase::Transmissive) {
+                        let r = draw.snapshot_region;
+                        region = [region[0].min(r[0]),region[1].min(r[1]),region[2].max(r[2]),region[3].max(r[3])];
+                    }
+                    if region[2] <= region[0] || region[3] <= region[1] {
+                        region = [0,0,self.width,self.height];
+                    }
+                    self.last_transmission_copy_pixels += u64::from(region[2]-region[0]) * u64::from(region[3]-region[1]);
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: target.as_ref(), mip_level: 0,
+                            origin: wgpu::Origin3d { x: region[0], y: region[1], z: 0 }, aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &self.transmission_scene_texture, mip_level: 0,
+                            origin: wgpu::Origin3d { x: region[0], y: region[1], z: 0 }, aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: region[2]-region[0], height: region[3]-region[1], depth_or_array_layers: 1,
+                        },
+                    );
+                    layers += 1;
+                }
+                // Realtime has one main-view tile. Keep ordinary alpha and
+                // same-pane chunks together, retaining sort order and every
+                // per-draw depth/pipeline choice instead of reloading the tile.
+                let tile = transport_tiles[0];
+                if batch.pane_has_snapshot {
+                    for draw in &draws[batch.draws.clone()] {
+                        self.last_planar_slab_cached_triangles += draw.planar_slab_runs.as_ref().map_or(0, |runs|
+                            runs.iter().filter(|run| run.cached).map(|run| run.index_count as usize / 3).sum());
+                        self.last_planar_slab_discarded_triangles += draw.planar_slab_runs.as_ref().map_or(0, |runs|
+                            runs.iter().filter(|run| run.discarded).map(|run| run.index_count as usize / 3).sum());
+                    }
+                }
+                if !draws[batch.draws.clone()].iter().any(|draw| draw.screen_bounds.intersects(tile)) {
+                    continue;
+                }
+                transport_submissions.passes[1] += 1;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("world-ordered-transparent-batch"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &view, resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &preview_reflection_view, resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_bind_group(1, &lighting_bind_group, &[]);
-            for draw in gpu_draws.iter().filter(|draw| {
-                draw.camera_visible
-                    && (draw.phase != GpuWorldDrawPhase::Opaque || !draw.depth_write)
-            }) {
-                match (draw.phase, draw.depth_write) {
-                    (GpuWorldDrawPhase::AlphaBlend, false) => {
-                        pass.set_pipeline(&self.transparent_pipeline);
-                    }
-                    (GpuWorldDrawPhase::AlphaBlend, true) => {
-                        pass.set_pipeline(&self.transparent_depth_write_pipeline);
-                    }
-                    (GpuWorldDrawPhase::Transmissive, false) => {
-                        pass.set_pipeline(&self.transmissive_pipeline);
+                    timestamp_writes: None, occlusion_query_set: None,
+                });
+                pass.set_scissor_rect(tile[0], tile[1], tile[2], tile[3]);
+                pass.set_bind_group(1, &lighting_bind_group, &[]);
+                for draw in draws[batch.draws].iter().filter(|draw| draw.screen_bounds.intersects(tile)) {
+                    transport_submissions.draws[1] += 1;
+                    if draw.phase == GpuWorldDrawPhase::Transmissive && batch.pane_has_snapshot {
+                        pass.set_pipeline(if draw.depth_write { &self.transmissive_depth_write_pipeline }
+                            else { &self.transmissive_pipeline });
                         pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
+                    } else {
+                        pass.set_pipeline(if draw.depth_write { &self.transparent_depth_write_pipeline }
+                            else { &self.transparent_pipeline });
                     }
-                    (GpuWorldDrawPhase::Transmissive, true) => {
-                        pass.set_pipeline(&self.transmissive_depth_write_pipeline);
-                        pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
+                    pass.set_bind_group(0, &draw.bind_group, &[]);
+                    pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
+                    pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    let runs = if draw.phase == GpuWorldDrawPhase::Transmissive && batch.pane_has_snapshot {
+                        draw.planar_slab_runs.as_ref()
+                    } else { None };
+                    if let Some(runs) = runs {
+                        let pipelines = self.planar_slab_pipelines.as_ref().expect("certified slab pipelines");
+                        for run in runs.iter().filter(|run| !run.discarded) {
+                            let pipeline = if run.cached {
+                                if draw.depth_write { &pipelines.cached_depth_write } else { &pipelines.cached }
+                            } else if draw.depth_write { &self.transmissive_depth_write_pipeline }
+                                else { &self.transmissive_pipeline };
+                            pass.set_pipeline(pipeline);
+                            pass.draw_indexed(run.first_index..run.first_index + run.index_count, 0, 0..draw.instance_count);
+                        }
+                        let drawn = runs.iter().filter(|run| !run.discarded).count();
+                        let extra = drawn.saturating_sub(1);
+                        transport_submissions.draws[1] += extra as u64;
+                        if drawn == 0 { transport_submissions.draws[1] -= 1; }
+                        self.last_planar_slab_extra_draw_calls += extra;
+                    } else {
+                        pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
                     }
-                    (GpuWorldDrawPhase::Opaque, false) => {
-                        pass.set_pipeline(&self.transparent_pipeline);
-                    }
-                    (GpuWorldDrawPhase::Opaque, true) => unreachable!(),
+                }
+            }
+        } else {
+        for draw in gpu_draws.iter().filter(|draw| {
+            draw.camera_visible && (draw.phase != GpuWorldDrawPhase::Opaque || !draw.depth_write)
+        }) {
+            if draw.phase == GpuWorldDrawPhase::Transmissive
+                && current_pane != Some((&draw.instance_key, draw.solid_transmission))
+            {
+                current_pane = Some((&draw.instance_key, draw.solid_transmission));
+                // Closed transport reads the BVH, so slab snapshot limits must
+                // never downgrade solid optics to ordinary alpha blending.
+                pane_has_snapshot = draw.solid_transmission || layers < lighting.transmission_layer_budget;
+                if pane_has_snapshot && !draw.solid_transmission {
+                    // Finish the previous pane before copying its composed HDR
+                    // radiance. Reading/writing one attachment in a pass is illegal.
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: target.as_ref(),
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &self.transmission_scene_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: self.width,
+                            height: self.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    layers += 1;
+                }
+            }
+            if pane_has_snapshot {
+                self.last_planar_slab_cached_triangles += draw.planar_slab_runs.as_ref().map_or(0,|runs|
+                    runs.iter().filter(|run| run.cached).map(|run| run.index_count as usize/3).sum());
+                self.last_planar_slab_discarded_triangles += draw.planar_slab_runs.as_ref().map_or(0,|runs|
+                    runs.iter().filter(|run| run.discarded).map(|run| run.index_count as usize/3).sum());
+            }
+            for tile in transport_tiles.iter().filter(|tile| draw.screen_bounds.intersects(**tile)) {
+                transport_submissions.passes[1] += 1;
+                transport_submissions.draws[1] += 1;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("world-ordered-transparent-layer"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &preview_reflection_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_scissor_rect(tile[0], tile[1], tile[2], tile[3]);
+                pass.set_bind_group(1, &lighting_bind_group, &[]);
+                if draw.phase == GpuWorldDrawPhase::Transmissive && pane_has_snapshot {
+                    pass.set_pipeline(if draw.depth_write { &self.transmissive_depth_write_pipeline }
+                        else { &self.transmissive_pipeline });
+                    pass.set_bind_group(2, &self.transmission_scene_bind_group, &[]);
+                } else {
+                    // Excess layers preserve coverage and authored alpha using the
+                    // ordinary transparent path; they do not overwrite from stale HDR.
+                    pass.set_pipeline(if draw.depth_write {
+                        &self.transparent_depth_write_pipeline
+                    } else {
+                        &self.transparent_pipeline
+                    });
                 }
                 pass.set_bind_group(0, &draw.bind_group, &[]);
                 pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
                 pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count);
+                let runs = if draw.phase == GpuWorldDrawPhase::Transmissive && pane_has_snapshot {
+                    draw.planar_slab_runs.as_ref()
+                } else { None };
+                if let Some(runs) = runs {
+                    let pipelines = self.planar_slab_pipelines.as_ref().expect("certified slab pipelines");
+                    for run in runs.iter().filter(|run| !run.discarded) {
+                        let pipeline = if run.cached {
+                            if draw.depth_write { &pipelines.cached_depth_write } else { &pipelines.cached }
+                        } else if draw.depth_write { &self.transmissive_depth_write_pipeline }
+                            else { &self.transmissive_pipeline };
+                        pass.set_pipeline(pipeline);
+                        pass.draw_indexed(run.first_index..run.first_index+run.index_count,0,0..draw.instance_count);
+                    }
+                    let drawn = runs.iter().filter(|run| !run.discarded).count();
+                    let extra = drawn.saturating_sub(1);
+                    transport_submissions.draws[1] += extra as u64;
+                    if drawn == 0 { transport_submissions.draws[1] -= 1; }
+                    self.last_planar_slab_extra_draw_calls += extra;
+                } else { pass.draw_indexed(0..draw.index_count, 0, 0..draw.instance_count); }
+                drop(pass);
+                if transport_tiles.len() > 1 {
+                    encoder = self.submit_transport_encoder(encoder, &mut transport_submissions, "hybrid-transparent-tile-encoder");
+                }
             }
         }
+        }
+        self.gpu_timing.mark(&mut encoder, gpu_timing_frame.as_ref(), 5);
+        self.last_transmission_layers = layers;
+        self.last_baked_active = lighting.params.baked0[2] > 0.0;
         if lighting.froxel.is_some() {
             // The composite samples a stable copy because WebGPU forbids
             // sampling the render attachment that the same pass writes.
@@ -4777,6 +6403,9 @@ impl GpuWorldRenderer {
             let history_gbuffer_view = self
                 .history_gbuffer_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
+            let history_reflection_view = self
+                .history_reflection_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             let dof_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("anica-motionloom-world-dof-bind-group"),
                 layout: &self.dof_bind_group_layout,
@@ -4817,6 +6446,14 @@ impl GpuWorldRenderer {
                         binding: 8,
                         resource: wgpu::BindingResource::TextureView(&history_gbuffer_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(&preview_reflection_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(&history_reflection_view),
+                    },
                 ],
             });
             {
@@ -4843,6 +6480,25 @@ impl GpuWorldRenderer {
         if taa_enabled {
             // Preserve the surface identity alongside colour so the next frame
             // can reject history across disocclusions and moving silhouettes.
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.preview_reflection_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.history_reflection_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: output_target.as_ref(),
@@ -4917,6 +6573,9 @@ impl GpuWorldRenderer {
             let history_gbuffer_view = self
                 .history_gbuffer_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
+            let history_reflection_view = self
+                .history_reflection_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             let motion_blur_bind_group =
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("anica-motionloom-world-motion-blur-bind-group"),
@@ -4958,6 +6617,14 @@ impl GpuWorldRenderer {
                             binding: 8,
                             resource: wgpu::BindingResource::TextureView(&history_gbuffer_view),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&preview_reflection_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(&history_reflection_view),
+                        },
                     ],
                 });
             {
@@ -4983,7 +6650,21 @@ impl GpuWorldRenderer {
         } else {
             output_target
         };
-        self.queue.submit([encoder.finish()]);
+        self.gpu_timing.end(&mut encoder, gpu_timing_frame.as_ref());
+        transport_submissions.pending.push(encoder.finish());
+        transport_submissions.command_buffers += 1;
+        transport_submissions.flush(&self.queue);
+        self.gpu_timing.submitted(gpu_timing_frame);
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("MOTIONLOOM_TRACE_BATCHES").is_some() {
+            eprintln!("motionloom transport: tiles={} opaque_draws={} transparent_draws={} opaque_passes={} transparent_passes={} command_buffers={} queue_submissions={} queue_submit_ms={:.3} encode_submit_ms={:.3}",
+                transport_tiles.len(), transport_submissions.draws[0], transport_submissions.draws[1],
+                transport_submissions.passes[0], transport_submissions.passes[1],
+                transport_submissions.command_buffers, transport_submissions.queue_submissions,
+                transport_submissions.queue_submit_ms, transport_started.elapsed().as_secs_f64() * 1000.0);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = transport_started;
         self.last_camera = Some(current_camera);
         self.last_temporal_style_signature = Some(current_style_signature);
         self.last_history_frame = Some(lighting.frame_index);
@@ -5087,17 +6768,22 @@ impl GpuWorldRenderer {
         })
     }
 
-    // Background pixels are display-referred; invert only the final curve so
-    // the shared resolve preserves them without grading the host's 2D canvas.
-    fn write_texture_hdr_background(&self, texture: &wgpu::Texture, rgba: &[u8], mode: f32) {
+    // Background pixels are display-referred. Cancel the curve and invertible
+    // grade before premultiplying for the shared scene-linear attachment.
+    fn write_texture_hdr_background(&self, texture: &wgpu::Texture, rgba: &[u8], lighting: &GpuWorldLightingParams) {
         let bytes: Vec<u8> = rgba
             .chunks_exact(4)
             .flat_map(|p| {
                 let alpha = p[3] as f32 / 255.0;
+                let linear = inverse_scene_display([
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ], lighting);
                 [
-                    inverse_display(p[0] as f32 / 255.0, mode) * alpha,
-                    inverse_display(p[1] as f32 / 255.0, mode) * alpha,
-                    inverse_display(p[2] as f32 / 255.0, mode) * alpha,
+                    linear[0] * alpha,
+                    linear[1] * alpha,
+                    linear[2] * alpha,
                     alpha,
                 ]
                 .into_iter()
@@ -5125,62 +6811,249 @@ impl GpuWorldRenderer {
         );
     }
 
+    /// Submit bounded work without blocking the immediate preview's caller.
+    fn submit_transport_encoder(
+        &self,
+        encoder: wgpu::CommandEncoder,
+        submissions: &mut TransportSubmissions,
+        label: &'static str,
+    ) -> wgpu::CommandEncoder {
+        submissions.pending.push(encoder.finish());
+        submissions.command_buffers += 1;
+        if submissions.pending.len() >= 16 {
+            submissions.flush(&self.queue);
+        }
+        self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(label),
+        })
+    }
+
+    /// Keep every evaluated object, including offscreen objects, in the ray scene.
+    fn prepare_hybrid_scene(&mut self, draws: &[GpuWorldDraw], lighting: &GpuWorldLighting) -> Result<bool, WorldRenderError> {
+        if !self.geometry_transport_enabled {
+            self.hybrid_stats = Default::default();
+            return Ok(false);
+        }
+        let started = std::time::Instant::now();
+        let scene = self
+            .hybrid_cache
+            .update_with_shadow_flags(draws, 1_000_000, &lighting.model_shadow_flags, lighting.per_light_shadows)
+            .map_err(|error| WorldRenderError::GpuRender {
+                message: error.to_string(),
+            })?;
+        self.hybrid_stats = (scene.vectors.len() as u64 * 16, scene.triangle_count,
+            scene.node_count, scene.object_count, started.elapsed().as_secs_f64() * 1000.0,
+            scene.cache_hit, scene.refit);
+        let changed = scene.signature != self.hybrid_signature;
+        if !changed {
+            return Ok(false);
+        }
+        let bytes = scene.bytes();
+        let limit = u64::from(self.device.limits().max_storage_buffer_binding_size)
+            .min(self.device.limits().max_buffer_size);
+        if bytes.len() as u64 > limit {
+            return Err(WorldRenderError::GpuRender {
+                message: format!(
+                    "hybrid reflection scene requires {} bytes, GPU storage limit is {limit}",
+                    bytes.len()
+                ),
+            });
+        }
+        if bytes.len() as u64 > self.hybrid_buffer.size() {
+            self.hybrid_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("hybrid-scene"),
+                size: (bytes.len() as u64).max(256),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.environment_resource = None;
+        }
+        self.queue.write_buffer(&self.hybrid_buffer, 0, &bytes);
+        self.hybrid_signature = scene.signature;
+        self.hybrid_object_ids = draws.iter().map(|draw|
+            (draw.instance_key.clone(), scene.object_id(draw))).collect();
+        Ok(true)
+    }
+
     /// Upload the linear environment mip chain only when the decoded source
     /// changes. Animated intensity and rotation update the uniform separately.
     fn ensure_environment_resource(&mut self, lighting: &GpuWorldLighting) {
+        let mut hasher = DefaultHasher::new();
+        lighting.environment.signature.hash(&mut hasher);
+        lighting
+            .baked
+            .as_ref()
+            .map(|b| b.signature)
+            .hash(&mut hasher);
+        let signature = hasher.finish();
         if self
             .environment_resource
             .as_ref()
-            .is_some_and(|resource| resource.signature == lighting.environment.signature)
+            .is_some_and(|r| r.signature == signature)
         {
             return;
         }
         let image = lighting.environment.as_ref();
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("anica-motionloom-world-environment-texture"),
+        self.baked_probe_bytes = lighting
+            .baked
+            .as_ref()
+            .map_or(0, |b| b.vectors.len() as u64 * 16);
+        self.local_reflection_bytes = lighting.baked.as_ref().map_or(0, |b| {
+            b.reflections
+                .iter()
+                .flat_map(|i| &i.mip_bytes)
+                .map(|m| m.len() as u64)
+                .sum()
+        });
+        self.environment_ibl_bytes = image
+            .mip_bytes
+            .iter()
+            .chain(&image.background_mip_bytes)
+            .map(|m| m.len() as u64)
+            .sum::<u64>()
+            + image.brdf_bytes.len() as u64;
+
+        let texture = upload_hdr_texture(
+            &self.device,
+            &self.queue,
+            image.width,
+            image.height,
+            &image.mip_bytes,
+            "environment-ggx",
+        );
+        let background = upload_hdr_texture(
+            &self.device,
+            &self.queue,
+            image.background_width,
+            image.background_height,
+            &image.background_mip_bytes,
+            "environment-background",
+        );
+        let brdf = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("environment-brdf"),
             size: wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
+                width: image.brdf_width,
+                height: image.brdf_height,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: image.mip_bytes.len() as u32,
+            mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let mut mip_width = image.width;
-        let mut mip_height = image.height;
-        for (level, bytes) in image.mip_bytes.iter().enumerate() {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: level as u32,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                bytes,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(mip_width * 8),
-                    rows_per_image: Some(mip_height),
-                },
-                wgpu::Extent3d {
-                    width: mip_width,
-                    height: mip_height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            mip_width = (mip_width / 2).max(1);
-            mip_height = (mip_height / 2).max(1);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &brdf,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &image.brdf_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.brdf_width * 8),
+                rows_per_image: Some(image.brdf_height),
+            },
+            wgpu::Extent3d {
+                width: image.brdf_width,
+                height: image.brdf_height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let probe_vectors = lighting
+            .baked
+            .as_ref()
+            .map(|b| b.vectors.as_slice())
+            .unwrap_or(&[[0.0; 4]]);
+        let mut probe_bytes = Vec::with_capacity(probe_vectors.len() * 16);
+        for vector in probe_vectors {
+            for value in vector {
+                probe_bytes.extend_from_slice(&value.to_ne_bytes());
+            }
         }
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let shadow_view = self
-            .shadow_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let probes = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("baked-irradiance-probes"),
+            size: probe_bytes.len().max(16) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&probes, 0, &probe_bytes);
+        let captures = lighting
+            .baked
+            .as_ref()
+            .map(|b| b.reflections.as_slice())
+            .unwrap_or(&[]);
+        let first = captures.first().unwrap_or(image);
+        let count = captures.len().max(2) as u32;
+        let local = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("room-reflection-ggx"),
+            size: wgpu::Extent3d {
+                width: first.width,
+                height: first.height,
+                depth_or_array_layers: count,
+            },
+            mip_level_count: first.mip_bytes.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for layer in 0..count {
+            let capture = captures.get(layer as usize).unwrap_or(first);
+            for (level, bytes) in capture.mip_bytes.iter().enumerate() {
+                let width = (capture.width >> level).max(1);
+                let height = (capture.height >> level).max(1);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &local,
+                        mip_level: level as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width * 8),
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        let view = texture.create_view(&Default::default());
+        let background_view = background.create_view(&Default::default());
+        let brdf_view = brdf.create_view(&Default::default());
+        let local_view = local.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let shadow_view = self.shadow_texture.create_view(&Default::default());
+        let per_light_shadow_view =
+            self.per_light_shadows
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
+        let lut_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("brdf-clamp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("anica-motionloom-world-lighting-bind-group"),
+            label: Some("world-lighting"),
             layout: &self.lighting_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -5203,11 +7076,48 @@ impl GpuWorldRenderer {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&brdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&lut_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&background_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: probes.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&local_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::Sampler(&self.environment_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&per_light_shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.per_light_shadows.params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: self.hybrid_buffer.as_entire_binding(),
+                },
             ],
         });
         self.environment_resource = Some(GpuWorldEnvironmentResource {
-            signature: image.signature,
-            _texture: texture,
+            signature,
+            _textures: vec![texture, background, brdf, local],
+            _probes: probes,
             bind_group,
         });
     }
@@ -5261,6 +7171,7 @@ impl GpuWorldRenderer {
         let resource = Arc::new(GpuWorldVertexResource {
             chunks,
             rigid_bounds: rigid_vertex_bounds(vertices),
+            closed_mesh: OnceLock::new(),
         });
         self.vertex_resource_cache
             .insert(signature, Arc::clone(&resource));
@@ -5377,16 +7288,43 @@ impl GpuWorldRenderer {
 }
 
 struct GpuWorldDrawResources {
+    instance_key: GpuWorldInstanceKey,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     index_count: u32,
     instance_count: u32,
     camera_visible: bool,
+    snapshot_region: [u32; 4],
+    screen_bounds: transport_tiles::ScreenBounds,
+    geometry_reflection_required: bool,
     phase: GpuWorldDrawPhase,
+    solid_transmission: bool,
+    planar_slab_runs: Option<Vec<planar::CertifiedSlabRun>>,
     depth_write: bool,
     sort_priority: i32,
     camera_depth: f32,
+}
+
+/// Keep each GPU command bounded while amortizing native fence maintenance.
+#[derive(Default)]
+struct TransportSubmissions {
+    pending: Vec<wgpu::CommandBuffer>,
+    command_buffers: usize,
+    queue_submissions: usize,
+    queue_submit_ms: f64,
+    draws: [u64; 2],
+    passes: [u64; 2],
+}
+
+impl TransportSubmissions {
+    fn flush(&mut self, queue: &wgpu::Queue) {
+        if self.pending.is_empty() { return; }
+        let started = ProfileClock::now();
+        queue.submit(self.pending.drain(..));
+        self.queue_submissions += 1;
+        self.queue_submit_ms += started.elapsed().as_secs_f64() * 1000.0;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5449,6 +7387,7 @@ fn rigid_vertex_bounds(vertices: &[GpuWorldVertex]) -> Option<([f32; 3], [f32; 3
     (!vertices.is_empty()).then_some((min, max))
 }
 
+#[cfg(test)]
 // Reject only rigid bounds outside a side plane in front of the near plane.
 // Deformation, near-plane intersections and shadow casters are left untouched.
 fn rigid_draw_visible(bounds: Option<([f32; 3], [f32; 3])>, p: GpuWorldParams) -> bool {
@@ -5499,6 +7438,7 @@ fn rigid_draw_visible(bounds: Option<([f32; 3], [f32; 3])>, p: GpuWorldParams) -
 struct GpuWorldVertexResource {
     chunks: Vec<GpuWorldGeometryChunk>,
     rigid_bounds: Option<([f32; 3], [f32; 3])>,
+    closed_mesh: OnceLock<bool>,
 }
 
 struct GpuWorldGeometryChunk {
@@ -5539,6 +7479,8 @@ struct GpuWorldInstanceResource {
     last_params: Vec<u8>,
     last_bones: Vec<u8>,
     bind_group: wgpu::BindGroup,
+    planar_uniform: wgpu::Buffer,
+    planar_resource_signature: Option<(String, u32, u32)>,
 }
 
 const GPU_WORLD_VERTEX_STRIDE_BYTES: usize = 116;
@@ -6432,12 +8374,21 @@ fn perspective_camera_view(
     // Orthographic scale is the full vertical field in world units.
     let orthographic = world.camera.projection == WorldCameraProjection::Orthographic;
     let focal_px = if orthographic {
-        let scale = eval_number(world.camera.orthographic_scale.as_deref().unwrap_or("4"), 4.0, time)?;
+        let scale = eval_number(
+            world.camera.orthographic_scale.as_deref().unwrap_or("4"),
+            4.0,
+            time,
+        )?;
         if !scale.is_finite() || scale <= 0.0 {
-            return Err(WorldRenderError::Expression { expr: "orthographicScale".into(), message: "Scale must be finite and positive".into() });
+            return Err(WorldRenderError::Expression {
+                expr: "orthographicScale".into(),
+                message: "Scale must be finite and positive".into(),
+            });
         }
         height_f / scale
-    } else { (height_f * 0.5) / (fov * 0.5).tan().max(0.001) };
+    } else {
+        (height_f * 0.5) / (fov * 0.5).tan().max(0.001)
+    };
     let far = distance.max(1.0) + width_f.max(height_f) / height_f * 24.0;
     let optics = world
         .camera
@@ -6625,11 +8576,20 @@ fn build_actor_gpu_draws(
     // both sampled skeletons at the same frame.
     let mut model_keys = HashMap::<String, PathBuf>::new();
     for actor in world.actor_slice() {
-        let mut lod_actor = actor.clone();
-        if let Some(vegetation) = lod_actor.vegetation.as_mut()
-            && vegetation.lod == crate::dsl::VegetationLod::Auto
+        // Most actors contain immutable geometry; clone only the vegetation
+        // whose camera-dependent LOD needs a frame-local adjustment.
+        let mut lod_actor = std::borrow::Cow::Borrowed(actor);
+        if actor
+            .vegetation
+            .as_ref()
+            .is_some_and(|vegetation| vegetation.lod == crate::dsl::VegetationLod::Auto)
         {
             let pose = actor_frame_pose(actor, time)?;
+            let vegetation = lod_actor
+                .to_mut()
+                .vegetation
+                .as_mut()
+                .expect("auto-LOD vegetation was checked above");
             vegetation.lod = vegetation_auto_lod(
                 vegetation.height * pose.scale.abs(),
                 pose.position,
@@ -6680,21 +8640,25 @@ fn build_actor_gpu_draws(
         &poses,
         time,
     )?;
-    let mut render_actors = world.actor_slice().to_vec();
-    apply_world_attachments(
-        graph,
-        &mut render_actors,
-        &model_keys,
-        mesh_cache,
-        &sampled_by_actor,
-        &mut constraint_overrides,
-        &mut poses,
-        time,
-    )?;
+    // Attachments may rewrite actor transforms. Without them, retain the
+    // borrowed actors instead of copying every mesh control cage again.
+    let mut render_actors = std::borrow::Cow::Borrowed(world.actor_slice());
+    if !graph.attachments.is_empty() {
+        apply_world_attachments(
+            graph,
+            render_actors.to_mut(),
+            &model_keys,
+            mesh_cache,
+            &sampled_by_actor,
+            &mut constraint_overrides,
+            &mut poses,
+            time,
+        )?;
+    }
     let constraints_ms = constraints_started.elapsed().as_secs_f64() * 1000.0;
 
     let draw_started = ProfileClock::now();
-    for actor in &render_actors {
+    for actor in render_actors.iter() {
         let model_key = model_keys
             .get(&actor.id)
             .expect("actor model key prepared before rendering");
@@ -6969,8 +8933,10 @@ fn project_actor_editor_joints(
             if depth <= camera.near || !depth.is_finite() {
                 continue;
             }
-            let x = width as f32 * 0.5 + dot3(relative, camera.right) * camera.focal_px / camera.projection_divisor(depth);
-            let y = height as f32 * 0.5 - dot3(relative, camera.up) * camera.focal_px / camera.projection_divisor(depth);
+            let x = width as f32 * 0.5
+                + dot3(relative, camera.right) * camera.focal_px / camera.projection_divisor(depth);
+            let y = height as f32 * 0.5
+                - dot3(relative, camera.up) * camera.focal_px / camera.projection_divisor(depth);
             if x.is_finite() && y.is_finite() {
                 joints.push(Scene3DEditorJointProjection {
                     actor: actor.id.clone(),
@@ -7069,8 +9035,10 @@ fn project_actor_editor_joints(
         if depth <= camera.near || !depth.is_finite() {
             continue;
         }
-        let x = width as f32 * 0.5 + dot3(relative, camera.right) * camera.focal_px / camera.projection_divisor(depth);
-        let y = height as f32 * 0.5 - dot3(relative, camera.up) * camera.focal_px / camera.projection_divisor(depth);
+        let x = width as f32 * 0.5
+            + dot3(relative, camera.right) * camera.focal_px / camera.projection_divisor(depth);
+        let y = height as f32 * 0.5
+            - dot3(relative, camera.up) * camera.focal_px / camera.projection_divisor(depth);
         if x.is_finite() && y.is_finite() {
             if let Some(bone_report) = report.as_mut().and_then(|report| {
                 report
@@ -11282,11 +13250,19 @@ pub(crate) struct GpuWorldTexture {
     height: u32,
     rgba: Arc<Vec<u8>>,
     signature: u64,
+    channel_bounds: [[u8; 2]; 4],
 }
 
 /// Linear floating-point equirectangular environment with a CPU-built mip chain.
 #[derive(Debug)]
 struct WorldEnvironmentImage {
+    background_width: u32,
+    background_height: u32,
+    background_mip_bytes: Vec<Vec<u8>>,
+    diffuse_sh: [[f32; 4]; 9],
+    brdf_width: u32,
+    brdf_height: u32,
+    brdf_bytes: Vec<u8>,
     width: u32,
     height: u32,
     mip_bytes: Vec<Vec<u8>>,
@@ -11302,6 +13278,14 @@ struct GpuWorldLighting {
     frame_index: u32,
     temporal_jitter: bool,
     froxel: Option<GpuFroxelSettings>,
+    baked: Option<Arc<baked::GpuBakedLightingData>>,
+    planar_reflections: Vec<crate::world::model::WorldPlanarReflection>,
+    planar_capture_budget: u32,
+    planar_resolution_limit: u32,
+    transmission_layer_budget: u32,
+    shadow_lights: Vec<WorldLight>,
+    per_light_shadows: bool,
+    model_shadow_flags: HashMap<String, [bool; 2]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -11347,7 +13331,11 @@ struct GpuWorldLightingParams {
     shadow1: [f32; 4],
     shadow2: [f32; 4],
     shadow3: [f32; 4],
+    environment_sh: [[f32; 4]; 9],
+    baked0: [f32; 4],
+    baked1: [f32; 4],
     lights: [[f32; 16]; 8],
+    reflection0: [f32; 4],
 }
 
 type GpuWorldActorBounds = (([f32; 3], [f32; 3]), GpuWorldParams);
@@ -11361,11 +13349,19 @@ impl GpuWorldTexture {
         width.hash(&mut hasher);
         height.hash(&mut hasher);
         rgba.hash(&mut hasher);
+        let mut channel_bounds = [[u8::MAX, u8::MIN]; 4];
+        for pixel in rgba.chunks_exact(4) {
+            for channel in 0..4 {
+                channel_bounds[channel][0] = channel_bounds[channel][0].min(pixel[channel]);
+                channel_bounds[channel][1] = channel_bounds[channel][1].max(pixel[channel]);
+            }
+        }
         Self {
             width,
             height,
             rgba,
             signature: hasher.finish(),
+            channel_bounds,
         }
     }
 }
@@ -11419,7 +13415,6 @@ struct GpuWorldStaticDraw {
     emissive_texture: Arc<GpuWorldTexture>,
     occlusion_texture: Arc<GpuWorldTexture>,
     mesh_node: Option<usize>,
-    bounds: ([f32; 3], [f32; 3]),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -11442,6 +13437,10 @@ struct GpuWorldParams {
     material6: [f32; 4],
     material7: [f32; 4],
     material8: [f32; 4],
+    material9: [f32; 4],
+    material10: [f32; 4],
+    /// Solid-volume mode and the retained geometry-tracing object identifier.
+    material11: [f32; 4],
     cel_material0: [f32; 4],
     cel_material1: [f32; 4],
     vegetation: [f32; 4],
@@ -11531,7 +13530,9 @@ struct PerspectiveCameraView {
 }
 
 impl PerspectiveCameraView {
-    fn projection_divisor(self, depth: f32) -> f32 { if self.orthographic { 1.0 } else { depth } }
+    fn projection_divisor(self, depth: f32) -> f32 {
+        if self.orthographic { 1.0 } else { depth }
+    }
 }
 
 fn update_gpu_world_draw_camera(draw: &mut GpuWorldDraw, camera: PerspectiveCameraView) {
@@ -11543,7 +13544,12 @@ fn update_gpu_world_draw_camera(draw: &mut GpuWorldDraw, camera: PerspectiveCame
         camera.near,
     ];
     draw.params.camera2 = [camera.up[0], camera.up[1], camera.up[2], camera.far];
-    draw.params.camera3 = [camera.forward[0], camera.forward[1], camera.forward[2], camera.orthographic as u8 as f32];
+    draw.params.camera3 = [
+        camera.forward[0],
+        camera.forward[1],
+        camera.forward[2],
+        camera.orthographic as u8 as f32,
+    ];
     let actor = [
         draw.params.actor[0],
         draw.params.actor[1],
@@ -11721,6 +13727,9 @@ fn build_actor_mesh_gpu_draws(
         // material8: x receives caustics, y is double-sided, z packs texture channels.
         // 18 encodes the glTF defaults B=metallic, G=roughness, R=occlusion.
         material8: [1.0, 0.0, 18.0, 0.0],
+        material9: [0.0, 0.0, 0.0, 0.5],
+        material10: [0.0, 0.1, 1.0, 1.0],
+        material11: [0.0; 4],
         cel_material0: [-1.0, 0.0, 0.0, 0.0],
         cel_material1: [0.0; 4],
         // Vegetation wind is gated per actor; all existing asset paths retain zero deformation.
@@ -11767,20 +13776,8 @@ fn build_actor_mesh_gpu_draws(
         if static_draw.vertices.is_empty() {
             continue;
         }
-        if actor.terrain.is_some()
-            && !terrain_chunk_visible(
-                static_draw.bounds,
-                [model_center_x, model_origin_y, model_center_z],
-                world_scale,
-                actor_quaternion,
-                [actor_x, actor_y, actor_z],
-                camera_view,
-                width_f,
-                height_f,
-            )
-        {
-            continue;
-        }
+        // Retain offscreen terrain in the transport scene. Raster visibility
+        // is decided after draw assembly, independently of ray visibility.
         let bone_matrices =
             if let Some(matrices) = bone_matrices_by_node.get(&static_draw.mesh_node) {
                 matrices.clone()
@@ -11889,6 +13886,10 @@ fn build_actor_mesh_gpu_draws(
                 material.thickness_factor.max(0.0),
                 material.attenuation_distance.max(0.0001),
             ];
+            draw_params.material11[0] = matches!(
+                material.refraction_mode,
+                crate::dsl::MaterialRefractionMode::Solid
+            ) as u8 as f32;
             draw_params.material7 = [
                 material.attenuation_color[0].clamp(0.0001, 1.0),
                 material.attenuation_color[1].clamp(0.0001, 1.0),
@@ -11911,6 +13912,8 @@ fn build_actor_mesh_gpu_draws(
                 draw_params.material2[3] = 1.0;
             }
         }
+        (draw_params.material9, draw_params.material10) =
+            materials::material_layer_params(material);
         let texture_override = material.and_then(|material| {
             let material_name = material.name.as_deref()?;
             material_overrides.iter().find(|binding| {
@@ -11977,6 +13980,12 @@ fn build_actor_mesh_gpu_draws(
             || cel_binding.is_some_and(|b| b.cel.control_map.is_some())
         {
             resource_key.binding_actor = Some(actor.id.clone());
+        }
+        // An absent normal map must use the geometric normal exactly. The
+        // neutral RGBA8 fallback cannot encode 0.5 exactly; applying its tiny
+        // tangent-space tilt would also reject certified planar reflections.
+        if material.is_none_or(|value| value.normal_texture.is_none()) {
+            draw_params.material0[2] = 0.0;
         }
         let phase = gpu_world_material_phase(material);
         let depth_write = gpu_world_material_depth_write(material, phase);
@@ -12251,7 +14260,6 @@ fn build_actor_mesh_gpu_static_draws(
         let (indexed_vertices, indexed_indices) = index_gpu_world_vertices(&chunk.vertices);
         let vertices = Arc::new(indexed_vertices);
         let indices = Arc::new(indexed_indices);
-        let bounds = gpu_world_vertices_bounds(vertices.as_ref());
         let vertex_signature = gpu_world_geometry_signature(vertices.as_ref(), indices.as_ref());
         draws.push(GpuWorldStaticDraw {
             resource_key,
@@ -12300,7 +14308,6 @@ fn build_actor_mesh_gpu_static_draws(
                     .map_or(1.0, |m| m.occlusion_strength),
             )),
             mesh_node: chunk.mesh_node,
-            bounds,
         });
     }
     draws
@@ -12321,55 +14328,6 @@ fn gpu_occlusion_texture(
     texture.signature ^= u64::from(strength.to_bits()).rotate_left(17);
     texture.rgba = Arc::new(pixels);
     texture
-}
-
-fn gpu_world_vertices_bounds(vertices: &[GpuWorldVertex]) -> ([f32; 3], [f32; 3]) {
-    let mut minimum = [f32::INFINITY; 3];
-    let mut maximum = [f32::NEG_INFINITY; 3];
-    for vertex in vertices {
-        for axis in 0..3 {
-            minimum[axis] = minimum[axis].min(vertex.position[axis]);
-            maximum[axis] = maximum[axis].max(vertex.position[axis]);
-        }
-    }
-    if vertices.is_empty() {
-        ([0.0; 3], [0.0; 3])
-    } else {
-        (minimum, maximum)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn terrain_chunk_visible(
-    bounds: ([f32; 3], [f32; 3]),
-    model_origin: [f32; 3],
-    scale: f32,
-    rotation: [f32; 4],
-    actor_position: [f32; 3],
-    camera: PerspectiveCameraView,
-    viewport_width: f32,
-    viewport_height: f32,
-) -> bool {
-    let (minimum, maximum) = bounds;
-    let local_center = std::array::from_fn(|axis| {
-        ((minimum[axis] + maximum[axis]) * 0.5 - model_origin[axis]) * scale
-    });
-    let rotated_center = quat_rotate_vec3(rotation, local_center);
-    let center: [f32; 3] = std::array::from_fn(|axis| actor_position[axis] + rotated_center[axis]);
-    let half_extent = std::array::from_fn::<_, 3, _>(|axis| {
-        (maximum[axis] - minimum[axis]).abs() * 0.5 * scale.abs()
-    });
-    let radius = dot3(half_extent, half_extent).sqrt();
-    let relative = std::array::from_fn::<_, 3, _>(|axis| center[axis] - camera.eye[axis]);
-    let depth = dot3(relative, camera.forward);
-    if depth + radius < camera.near || depth - radius > camera.far {
-        return false;
-    }
-    let visible_depth = camera.projection_divisor(depth.max(camera.near));
-    let half_width = visible_depth * viewport_width * 0.5 / camera.focal_px.max(1.0);
-    let half_height = visible_depth * viewport_height * 0.5 / camera.focal_px.max(1.0);
-    dot3(relative, camera.right).abs() <= half_width + radius
-        && dot3(relative, camera.up).abs() <= half_height + radius
 }
 
 fn effective_mesh_bounds(mesh: &GlbMeshData) -> ([f32; 3], [f32; 3]) {

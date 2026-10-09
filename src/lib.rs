@@ -104,6 +104,7 @@
 
 mod asset;
 mod authoring;
+pub mod character_authoring;
 mod common;
 mod compat;
 mod dsl;
@@ -112,7 +113,9 @@ mod error;
 mod export;
 mod formatter;
 mod geometry_ops;
-pub mod character_authoring;
+pub mod lighting_bake;
+pub mod lighting_ibl;
+pub(crate) mod material_layers;
 pub mod mesh_authoring;
 pub mod mesh_reference;
 pub mod preview;
@@ -185,16 +188,17 @@ pub use dsl::{
     EarNode, EyeNode, EyebrowNode, EyelinerNode, FaceLayoutNode, FaceTextureNode, FacialCageNode,
     GeometryAssetNode, GeometryUvNode, GraphAssetKind, GraphAssetNode, GraphAssetSource,
     GraphScript, HairGuideNode, HairPointNode, HeadDomeNode, HeadFeatureNode, HeadMorphNode,
-    HeadSectionNode, HeadShapeNode, HeadSwapAssetNode, ImageNode, IrisNode, MaterialAssetNode, MaterialTextureChannel,
-    ModelProfileBoneAxisMapNode, ModelProfileBoneAxisNode, ModelProfileNode,
-    ModelProfileRetargetMapNode, ModelProfileRetargetNode, MouthNode, NativeSkinBindingNode,
-    NativeSkinMode, NativeWeightRegionNode, NoseNode, PrimitiveAssetNode, PrimitiveAxis,
-    PrimitiveGeometry, PrimitiveLodNode, PrimitiveLoftSectionNode, PrimitiveMeshBuildNode,
-    PrimitiveModifierNode, PrimitiveRibbonPointNode, ProcessDefinitionNode, SkeletonBoneNode,
-    SkeletonConstraintNode, SkeletonControlNode, SkeletonGuideNode, SkeletonLandmarkNode,
-    SkeletonMeasureNode, SkeletonNode, SkeletonRatioNode, SkeletonRegionNode, SvgNode,
-    SweepProfilePointNode, TerrainAssetNode, VegetationAssetNode, VegetationKind, VegetationLod,
-    is_graph_script, parse_action_library_document, parse_graph_script,
+    HeadSectionNode, HeadShapeNode, HeadSwapAssetNode, ImageNode, IrisNode, MaterialAssetNode,
+    MaterialRefractionMode, MaterialTextureChannel, ModelProfileBoneAxisMapNode,
+    ModelProfileBoneAxisNode, ModelProfileNode, ModelProfileRetargetMapNode,
+    ModelProfileRetargetNode, MouthNode, NativeSkinBindingNode, NativeSkinMode,
+    NativeWeightRegionNode, NoseNode, PrimitiveAssetNode, PrimitiveAxis, PrimitiveGeometry,
+    PrimitiveLodNode, PrimitiveLoftSectionNode, PrimitiveMeshBuildNode, PrimitiveModifierNode,
+    PrimitiveRibbonPointNode, ProcessDefinitionNode, SkeletonBoneNode, SkeletonConstraintNode,
+    SkeletonControlNode, SkeletonGuideNode, SkeletonLandmarkNode, SkeletonMeasureNode,
+    SkeletonNode, SkeletonRatioNode, SkeletonRegionNode, SvgNode, SweepProfilePointNode,
+    TerrainAssetNode, VegetationAssetNode, VegetationKind, VegetationLod, is_graph_script,
+    parse_action_library_document, parse_graph_script,
 };
 pub use error::{GraphParseError, MotionLoomError, RootGraphError, RuntimeCompileError};
 #[cfg(not(target_arch = "wasm32"))]
@@ -291,9 +295,10 @@ pub use scene::render::{
     GpuFrameTexture, MotionLoomSceneRenderError, SceneGpuTexture, ScenePlatformPreviewSurface,
     ScenePreviewBackend, ScenePreviewPixelFormat, ScenePreviewSurface, ScenePreviewSurfaceOptions,
     SceneRenderError, SceneRenderProfile, SceneRenderProgress, SceneRenderer,
-    clear_scene_asset_roots, export_scene_head_swap_glb, export_scene_head_swap_glb_with_resolver, next_scene_output_path, next_scene_output_path_for_profile,
-    render_scene_graph_frame, render_scene_graph_frame_with_cpu_inputs,
-    render_scene_graph_frame_with_resolver, render_scene_graph_to_png_sequence_with_progress,
+    clear_scene_asset_roots, export_scene_head_swap_glb, export_scene_head_swap_glb_with_resolver,
+    next_scene_output_path, next_scene_output_path_for_profile, render_scene_graph_frame,
+    render_scene_graph_frame_with_cpu_inputs, render_scene_graph_frame_with_resolver,
+    render_scene_graph_to_png_sequence_with_progress,
     render_scene_graph_to_png_sequence_with_progress_and_cancel, render_scene_graph_to_video,
     render_scene_graph_to_video_with_progress,
     render_scene_graph_to_video_with_progress_and_cancel, set_scene_asset_roots,
@@ -327,19 +332,20 @@ pub use world::{
     PoseDiagnosticError, RestPoseProposal, Scene3DFrameProfile, SemanticAxisProposal,
     VolumetricQuality, VolumetricScatteringPlan, WaterCausticsPlan, WorldAction, WorldActionBone,
     WorldActionIk, WorldActionPose, WorldActor, WorldApplyAction, WorldBackground,
-    WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap, WorldCamera, WorldCameraControl,
-    WorldCameraMode, WorldCameraProjection, WorldFrameRenderer, WorldGpuDiagnostics, WorldGraph,
-    WorldLighting, WorldMaterial, WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle,
-    WorldPlay, WorldPresent, WorldProfileRetarget, WorldRenderError, WorldRenderProgress,
-    WorldRetarget, WorldRetargetMap, WorldSpritePlayback, WorldTime,
-    compare_glb_head_to_head_asset_json, compare_glb_head_to_head_asset_path,
-    diagnose_world_actor_pose, diagnose_world_glb_gpu_plan, diagnose_world_graph_actor_gpu_frame,
-    evaluate_world_actor_rig, inspect_glb_environment_bytes, inspect_glb_environment_json,
-    inspect_glb_environment_path, inspect_glb_head_path, inspect_glb_humanoid_profile_bytes,
-    inspect_glb_humanoid_profile_json, inspect_glb_skeleton_bytes, inspect_glb_skeleton_json,
-    inspect_glb_skeleton_path, inspect_humanoid_action_compatibility, is_world_graph_script,
-    load_glb_mesh_data, load_glb_metadata, parse_glb_mesh_data, parse_glb_metadata,
-    parse_world_graph_script, render_world_frame, render_world_graph_to_png_sequence_with_progress,
+    WorldBackgroundFit, WorldBakedLighting, WorldBoneAxis, WorldBoneAxisMap, WorldCamera,
+    WorldCameraControl, WorldCameraMode, WorldCameraProjection, WorldFrameRenderer,
+    WorldGpuDiagnostics, WorldGraph, WorldLighting, WorldMaterial, WorldMaterialStyle,
+    WorldModelProfile, WorldNode, WorldPathStyle, WorldPlanarReflection, WorldPlay, WorldPresent,
+    WorldProfileRetarget, WorldRenderError, WorldRenderProgress, WorldRetarget, WorldRetargetMap,
+    WorldSpritePlayback, WorldTime, compare_glb_head_to_head_asset_json,
+    compare_glb_head_to_head_asset_path, diagnose_world_actor_pose, diagnose_world_glb_gpu_plan,
+    diagnose_world_graph_actor_gpu_frame, evaluate_world_actor_rig, inspect_glb_environment_bytes,
+    inspect_glb_environment_json, inspect_glb_environment_path, inspect_glb_head_path,
+    inspect_glb_humanoid_profile_bytes, inspect_glb_humanoid_profile_json,
+    inspect_glb_skeleton_bytes, inspect_glb_skeleton_json, inspect_glb_skeleton_path,
+    inspect_humanoid_action_compatibility, is_world_graph_script, load_glb_mesh_data,
+    load_glb_metadata, parse_glb_mesh_data, parse_glb_metadata, parse_world_graph_script,
+    render_world_frame, render_world_graph_to_png_sequence_with_progress,
     render_world_graph_to_png_sequence_with_progress_and_cancel,
     render_world_graph_to_video_with_progress,
 };

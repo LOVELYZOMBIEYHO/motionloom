@@ -154,9 +154,13 @@ before the display transform and Screen/Lens work runs in display-linear space
 after it. It rejects 2D below or between 3D islands until ordered per-island
 textures are available, rather than exporting a frame with incorrect order.
 
-Transmission remains strict by default. `--transmission-stopgap` is an explicit
-opaque/alpha PBR fallback for documents that need migration time; it is not
-physical glass or refraction. Composite jobs additionally emit `coverage.exr`
+Transmission uses physical glass by default. `MaterialAsset refractionMode="slab"`
+(the omitted default) models paired parallel interfaces with authored thickness,
+including Fresnel internal reflection and absorption. `refractionMode="solid"`
+traces real entry and exit boundaries of a closed consistently oriented mesh;
+its optical distance is measured from the actual geometry. `--transmission-stopgap`
+remains an explicit opaque/alpha PBR fallback for migration, and disables this
+physical transport when supplied. Composite jobs additionally emit `coverage.exr`
 and `motion.exr`. Coverage is populated; sequence motion contains camera motion
 in output-pixel units. Object/deformation motion is not yet represented.
 
@@ -187,6 +191,13 @@ Weaver-specific and is not numerically interchangeable with another renderer's
 threshold. Zero threshold disables adaptive stopping. A pixel that reaches its
 sample cap without convergence is reported as `sample_limit_reached`.
 
+Offline sampling completes at most eight tiles and four samples per pixel per
+GPU submission, then reads and checkpoints that group before submitting more.
+Requested sample totals, path depths and per-pixel RNG sequences are unchanged.
+Requested batches above four are split across rounds. This bounds queue waits
+on dense high-resolution scenes and supports exact resume from partially
+completed rounds. Preview sessions have a separate interactive schedule.
+
 ## Implemented path
 
 - Evaluated MotionLoom model transforms, camera keyframes, embedded GLB materials.
@@ -201,7 +212,12 @@ sample cap without convergence is reported as `sample_limit_reached`.
 - GPU a-trous denoiser (WGSL) driven by the accumulated albedo/normal/depth/
   variance film planes; final frames also write `denoised/` by default.
 - Bilinear linearized base-color textures; data normal/metallic/roughness maps.
-- Diffuse and GGX reflection; alpha mask/blend; emissive surfaces.
+- Diffuse and GGX reflection/transmission with exact dielectric Fresnel and TIR;
+  alpha mask/blend and emissive surfaces.
+- Actual solid entry/exit paths, Beer-Lambert absorption and a bounded eight-medium
+  nested dielectric stack. A slab sums parallel-interface internal round trips.
+- Clearcoat GGX and Charlie/Neubelt sheen, using the shared directional-albedo
+  energy table to attenuate the base and retain separate coat/base roughness.
 - Directional disks and point lights; emissive-triangle area sampling with MIS.
 - Float HDR/EXR environments and sRGB PNG/JPEG environments; solid-angle CDF/MIS.
 - Thin-lens DoF and polygonal aperture sampling.
@@ -220,8 +236,8 @@ above one or more camera-compatible 3D islands. Multiple compatible islands are
 currently merged into one physical trace; distinct island textures, 2D below or
 between islands, and depth-aware cross-island interleaving are rejected until
 the layered executor is complete. Partial group opacity, cel/ink surface
-presets, bloom, outlines, orthographic projection, spot lights, and physical
-transmission BSDFs are not implemented. Several are rejected with typed errors.
+presets, bloom, outlines, orthographic projection and spot lights are not
+implemented. Several are rejected with typed errors.
 The geometry snapshot API still rejects terrain/vegetation; the Weaver offline
 path accepts them. Non-neutral white balance is applied at the display stage.
 
@@ -251,9 +267,30 @@ blur is not implemented.
 Shutter motion blur, object/deformation motion vectors, heterogeneous volumes,
 caustic-specific sampling and hardware BVH traversal remain future milestones.
 Animated sequences retain the parsed graph, refit the SAH BVH, update resident
-GPU buffers and can opt into conservative temporal denoising. `transmission` is
-reserved in the budget contract; materials using it are rejected unless the
-job explicitly enables the documented non-refractive stopgap.
+GPU buffers and can opt into conservative temporal denoising. `LightPaths.transmission`
+is the actual refraction-event budget, separate from glossy and alpha-coverage
+budgets. Native `LightingStyle reflectionBounces` bounds the immediate hybrid
+renderer; Weaver keeps its existing total/glossy/transmission job budgets.
+
+Solid glass requires each resolved transmissive mesh to be a closed consistently
+oriented two-manifold after positional seam welding; open surfaces, winding errors
+and non-manifold edges produce a typed scene error. A multi-material object split
+into independently open mesh chunks must first be joined or use slab mode. The
+nested medium stack supports eight simultaneous material/mesh identities, and
+paths stop at the existing bounce or stack budget. Camera initialization supports
+air and a camera inside one solid; a camera initially inside multiple nested
+media is not automatically classified. Nested overlapping volumes should be
+properly contained and coherently oriented.
+
+Slab transmission assumes matched parallel interfaces: it shifts the ray laterally
+using authored thickness, while its emergent direction is parallel to the incident
+ray. Its GGX roughness affects reflection; independent rough entry/exit refraction
+blur requires solid geometry. Absorption includes additional internal round trips.
+Colored glass shadow visibility uses straight connectors and actual solid segment
+lengths; it does not bend next-event shadow rays to solve refractive caustics. Solid
+transmission is sampled by the BSDF; its environment/emitter hits use full weight
+because there is no competing bent-connector sampling strategy. Caustics can
+therefore converge slowly, especially with small lights.
 
 The built-in a-trous denoiser runs on the selected GPU. An optional OIDN path
 uses a CPU device and whole-frame buffers and requires a compatible host-provided
@@ -302,7 +339,7 @@ Run the native sequence entry point with:
 ```sh
 cargo run --release -p motionloom --features weaver --example weaver_sequence -- \
   scene.motionloom --size 1920x1080 --samples 32 \
-  --out .render-output/weaver --transmission-stopgap
+  --out .render-output/weaver
 ```
 
 Omitting `--frames` exports the complete authored timeline. Use an explicit

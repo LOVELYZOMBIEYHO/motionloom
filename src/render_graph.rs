@@ -412,6 +412,8 @@ impl<'a> DagBuilder<'a> {
                         "EnvironmentLight",
                     )?,
                     Scene3DNode::Camera(_)
+                    | Scene3DNode::BakedLighting(_)
+                    | Scene3DNode::PlanarReflection(_)
                     | Scene3DNode::AtmosphereFog(_)
                     | Scene3DNode::DirectionalLight(_)
                     | Scene3DNode::PointLight(_)

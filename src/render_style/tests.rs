@@ -7,6 +7,66 @@
 use super::*;
 
 #[test]
+fn reflection_bounces_are_default_one_optional_and_strict() {
+    let source = r#"<Graph fps="30" duration="1s" size={[64,64]}>
+<RenderStyle id="style">
+<LightingStyle reflectionBounces="2" />
+</RenderStyle>
+<Scene id="styled" renderStyle="style">
+</Scene>
+<Scene id="unstyled">
+</Scene>
+<Present from="styled" />
+</Graph>"#;
+    let graph = crate::parse_graph_script(source).unwrap();
+    let style = resolve_scene_render_style(&graph, "styled").unwrap();
+    assert_eq!(style.reflection_bounces, 2);
+    assert_eq!(
+        resolve_scene_render_style(&graph, "unstyled")
+            .unwrap()
+            .reflection_bounces,
+        1
+    );
+    let default_source = source.replace(" reflectionBounces=\"2\"", "");
+    assert_eq!(
+        resolve_scene_render_style(
+            &crate::parse_graph_script(&default_source).unwrap(),
+            "styled"
+        )
+        .unwrap()
+        .reflection_bounces,
+        1
+    );
+    let mut old = serde_json::to_value(&style).unwrap();
+    old.as_object_mut().unwrap().remove("reflectionBounces");
+    assert_eq!(
+        serde_json::from_value::<ResolvedSceneRenderStyle>(old)
+            .unwrap()
+            .reflection_bounces,
+        1
+    );
+    for value in ["0", "3", "-1", "1.5", "NaN", "$time.norm", "curve(0:1,1:2)"] {
+        assert!(
+            crate::parse_graph_script(&source.replace(
+                "reflectionBounces=\"2\"",
+                &format!("reflectionBounces=\"{value}\"")
+            ))
+            .is_err(),
+            "{value}"
+        );
+    }
+    for mode in ["legacy", "hybrid"] {
+        assert!(
+            crate::parse_graph_script(&source.replace(
+                "reflectionBounces=\"2\"",
+                &format!("reflectionMode=\"{mode}\"")
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn default_cel_style_is_stable_across_module_boundary() {
     assert_eq!(ResolvedCelStyle::default().shadow_threshold, 0.5);
     assert_eq!(ResolvedCelStyle::default().outline_width, 0.0);

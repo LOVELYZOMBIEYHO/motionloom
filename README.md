@@ -23,12 +23,23 @@ Publish the selected showcase assets before adding their public media links. -->
 | Character authoring | Editable templates, semantic mesh edits, reference fitting and attachments |
 | Humanoid animation | 65-node skeleton generation, reviewed skin weights, reusable Actions and rig diagnostics |
 | Rendering | Native wgpu preview, browser WebGPU, image sequences and video export |
+| Indoor lighting | Optional two-state diffuse probe baking, local HDR reflections, thin glass and planar mirrors ([guide](docs/BAKED_LIGHTING.md)) |
+| Reflection and glass | Raster preview with screen/probe reflection and refraction; Weaver traces closed glass and physical optical distance ([guide](docs/HYBRID_REFLECTIONS.md)) |
 | Audio | Source trims, timed clips, gain and pan animation, and export mixing |
 
 MotionLoom can power editors, renderers and AI tools. Applications own their UI
 and authoring sessions; the engine provides parsing, typed operations,
 validation and rendering. [Anica](https://github.com/LOVELYZOMBIEYHO/anica)
 is one application built with MotionLoom.
+
+Immediate preview uses bounded screen-space reflection/refraction and probes,
+without implicit whole-scene geometry tracing. The same physical material DSL
+feeds Weaver's offline path integrator. `MaterialAsset refractionMode="solid"`
+requests geometry-derived exits in Weaver; Preview reports its screen-space
+approximation. `reflectionBounces="2"` remains accepted but does not force an
+expensive recursive Preview path. See the
+[portable review scene](examples/hybrid_reflections.motionloom) and
+[requirements and limits](docs/HYBRID_REFLECTIONS.md).
 
 ## See it in motion
 
@@ -162,6 +173,7 @@ provides task-based reading paths and the complete feature guides.
 | Build geometry or fit image references | [Geometry assets](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/GEOMETRY_ASSETS.md) · [Image fitting](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/IMAGE_TO_MESHASSET.md) |
 | Edit characters or bind humanoids | [Character authoring](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/CHARACTER_AUTHORING.md) · [Humanoid binding](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/HUMANOID_BINDING.md) |
 | Configure rendering | [Render style](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/RENDER_STYLE.md) · [Weaver](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/src/weaver/README.md) |
+| Author fabric, varnish and fixture shadows | [Material layers](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/MATERIAL_LAYERS.md) · [Per-light shadows](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/PER_LIGHT_SHADOWS.md) |
 | Edit audio or use native tools | [Audio](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/AUDIO.md) · [CLI](https://github.com/LOVELYZOMBIEYHO/motionloom/blob/main/docs/CLI.md) |
 
 ## Development

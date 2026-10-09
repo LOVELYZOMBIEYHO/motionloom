@@ -57,6 +57,10 @@ MotionLoom is headless and the DSL is the source of truth for playback.
 | Guide | When to read it |
 | --- | --- |
 | [Render style](RENDER_STYLE.md) | Scene styles, cel shading, outlines, material controls and anti-aliasing |
+| [Material layers](MATERIAL_LAYERS.md) | Fabric sheen, dielectric clearcoat, energy accounting and supported glTF factors |
+| [Per-light shadows](PER_LIGHT_SHADOWS.md) | Independent emitter visibility, source-size softness, cube faces, retained caches and profile budgets |
+| [Indoor lighting and reflections](BAKED_LIGHTING.md) | CPU irradiance baking, local HDR probes, planar mirrors and ordered glass |
+| [Reflections and closed glass](HYBRID_REFLECTIONS.md) | Raster Preview reflection/refraction, native geometry reference, Weaver optics and platform limits |
 | [Immediate preview](IMMEDIATE_PREVIEW.md) | Retained GPU preview, host quality profiles, capability reports and frame metrics |
 | [Procedural surface](PROCEDURAL_SURFACE.md) | GPU procedural surface effects and their parameter contract |
 | [Volumetrics](VOLUMETRICS.md) | Atmosphere media, froxel transport and volume controls |

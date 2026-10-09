@@ -135,6 +135,9 @@ impl ImmediatePreviewSettings {
         match self.profile {
             ImmediatePreviewProfile::Portable => ImmediatePreviewBudget {
                 shadow_map_size: 1024,
+                planar_capture_limit: 1,
+                planar_resolution_limit: 512,
+                transmission_layer_limit: 16,
                 texture_anisotropy: 2,
                 max_lights: 4,
                 dof_sample_limit: 32,
@@ -151,6 +154,9 @@ impl ImmediatePreviewSettings {
             },
             ImmediatePreviewProfile::Balanced => ImmediatePreviewBudget {
                 shadow_map_size: 1536,
+                planar_capture_limit: 1,
+                planar_resolution_limit: 768,
+                transmission_layer_limit: 24,
                 texture_anisotropy: 8,
                 max_lights: 8,
                 dof_sample_limit: 96,
@@ -167,6 +173,9 @@ impl ImmediatePreviewSettings {
             },
             ImmediatePreviewProfile::Cinematic => ImmediatePreviewBudget {
                 shadow_map_size: 2048,
+                planar_capture_limit: 2,
+                planar_resolution_limit: 1024,
+                transmission_layer_limit: 32,
                 texture_anisotropy: 16,
                 max_lights: 8,
                 dof_sample_limit: 192,
@@ -183,6 +192,9 @@ impl ImmediatePreviewSettings {
             },
             ImmediatePreviewProfile::Ultra => ImmediatePreviewBudget {
                 shadow_map_size: 4096,
+                planar_capture_limit: 2,
+                planar_resolution_limit: 1536,
+                transmission_layer_limit: 48,
                 texture_anisotropy: 16,
                 max_lights: 8,
                 dof_sample_limit: 256,
@@ -211,6 +223,9 @@ pub enum ImmediatePreviewAntialiasing {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ImmediatePreviewBudget {
     pub shadow_map_size: u32,
+    pub planar_capture_limit: u8,
+    pub planar_resolution_limit: u32,
+    pub transmission_layer_limit: u8,
     pub texture_anisotropy: u16,
     pub max_lights: u8,
     pub dof_sample_limit: u16,
@@ -245,6 +260,8 @@ pub struct ImmediatePreviewCapabilities {
     pub screen_space_global_illumination: bool,
     pub screen_space_transmission: bool,
     pub local_reflection_probes: bool,
+    pub baked_diffuse_lighting: bool,
+    pub planar_reflections: bool,
     pub browser_webgpu_tier: bool,
     pub max_screen_space_reflection_steps: u8,
     pub max_screen_space_gi_samples: u8,
@@ -267,8 +284,13 @@ pub struct ImmediatePreviewFrameMetrics {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ImmediatePreviewFrameMetrics {
+    /// Conservative workload estimate from independently completed scopes.
+    /// Their asynchronous frame tags can differ, so do not sum GPU intervals.
     pub fn estimated_frame_ms(self) -> f64 {
-        self.gpu_ms.unwrap_or(0.0).max(self.cpu_ms)
+        self.gpu_ms
+            .unwrap_or(0.0)
+            .max(self.scene_3d.gpu_ms.unwrap_or(0.0))
+            .max(self.cpu_ms)
     }
 
     pub fn meets_target(self) -> bool {
@@ -674,9 +696,9 @@ impl WgpuPreviewEngine {
             screen_space_reflections: gpu,
             screen_space_global_illumination: gpu,
             screen_space_transmission: gpu,
-            // Environment IBL is the off-screen fallback. Local capture probes
-            // are not implemented and must not be advertised to editor hosts.
-            local_reflection_probes: false,
+            local_reflection_probes: gpu,
+            baked_diffuse_lighting: gpu,
+            planar_reflections: gpu,
             browser_webgpu_tier: cfg!(target_arch = "wasm32"),
             max_screen_space_reflection_steps: if cfg!(target_arch = "wasm32") { 20 } else { 40 },
             max_screen_space_gi_samples: if cfg!(target_arch = "wasm32") { 4 } else { 8 },
@@ -1106,6 +1128,31 @@ mod tests {
         WgpuPreviewAdaptiveController, WgpuPreviewEngine, WgpuPreviewGraphCache,
         WgpuPreviewQuality, collect_sequence_activation_frames,
     };
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn frame_budget_includes_completed_world_gpu_work() {
+        let mut metrics = super::ImmediatePreviewFrameMetrics {
+            target_frame_ms: 1000.0 / 30.0,
+            gpu_ms: Some(2.0),
+            cpu_ms: 10.0,
+            scene_3d: crate::Scene3DFrameProfile {
+                gpu_ms: Some(1500.0),
+                gpu_frame_index: Some(7),
+                ..Default::default()
+            },
+        };
+        assert_eq!(metrics.estimated_frame_ms(), 1500.0);
+        assert!(!metrics.meets_target());
+
+        // A pending 3D readback retains the established compositor/CPU estimate.
+        metrics.scene_3d.gpu_ms = None;
+        assert_eq!(metrics.estimated_frame_ms(), 10.0);
+        assert!(metrics.meets_target());
+        metrics.gpu_ms = Some(40.0);
+        assert_eq!(metrics.estimated_frame_ms(), 40.0);
+        assert!(!metrics.meets_target());
+    }
 
     #[test]
     fn immediate_preview_profiles_have_bounded_real_gpu_budgets() {

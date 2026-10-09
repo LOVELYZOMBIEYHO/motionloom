@@ -76,9 +76,8 @@ fn bundled_motionloom_examples_parse() {
 
 #[test]
 fn filter_effect_test_example_renders_gpu_profile() {
-    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "tests/fixtures/scene/motion_graphics/filter_effect_test_level1.motionloom",
-    );
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/scene/motion_graphics/filter_effect_test_level1.motionloom");
     let script = std::fs::read_to_string(&file)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", file.display()));
     let graph = parse_graph_script(&script)

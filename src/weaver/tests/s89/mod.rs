@@ -32,7 +32,7 @@ fn every_pixel_receives_one_sample_batch() {
         }
     }))
     .unwrap();
-    let raw = std::fs::read(report.output.join("checkpoints/0-0.film")).unwrap();
+    let raw = std::fs::read(report.output.join("checkpoints/0-0.film-v2")).unwrap();
     let values = crate::weaver::output::floats(&raw);
     let counts: Vec<_> = values
         .chunks_exact(super::super::backend::wgpu::FILM_FLOATS_PER_PIXEL)
@@ -140,12 +140,12 @@ fn cancelled_job_resumes_without_changing_samples() {
     .unwrap();
     assert_eq!(first_samples, Some(4));
     assert_eq!(resumed.status, "sample_limit_reached");
-    let expected = std::fs::read(resumed.output.join("checkpoints/0-0.film")).unwrap();
+    let expected = std::fs::read(resumed.output.join("checkpoints/0-0.film-v2")).unwrap();
     job.output = temp.join("fresh");
     let fresh = pollster::block_on(render(&job, &CancellationToken::default(), |_| {})).unwrap();
     assert_eq!(
         expected,
-        std::fs::read(fresh.output.join("checkpoints/0-0.film")).unwrap()
+        std::fs::read(fresh.output.join("checkpoints/0-0.film-v2")).unwrap()
     );
     // Only this test's explicit temporary directory is removed.
     std::fs::remove_dir_all(temp).unwrap();

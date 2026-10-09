@@ -42,7 +42,7 @@ pub struct RenderJob {
     /// Off by default so existing renders keep base-level sampling.
     #[serde(default)]
     pub texture_mips: bool,
-    /// Explicit temporary fallback for transmissive materials until the BSDF lands.
+    /// Explicit migration fallback that disables physical glass transport.
     #[serde(default)]
     pub allow_transmission_stopgap: bool,
 }

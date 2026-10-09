@@ -579,10 +579,27 @@ pub fn primitive_material_cache_key(asset: &PrimitiveAssetNode) -> u64 {
         hash_bytes(&mut hash, &[material.double_sided as u8]);
         hash_bytes(&mut hash, material.alpha_mode.as_bytes());
         hash_bytes(&mut hash, material.depth_write.as_bytes());
+        if material.refraction_mode == crate::dsl::MaterialRefractionMode::Solid {
+            hash_bytes(&mut hash, b"solid-refraction-v1");
+        }
         hash_bytes(&mut hash, &material.sort_priority.to_le_bytes());
         hash_f32s(&mut hash, &material.texture_scale);
         hash_f32s(&mut hash, &material.texture_offset);
         hash_f32s(&mut hash, &material.variation_amount);
+        // Neutral layers preserve retained identities of existing scripts.
+        // Active layers change materials, never the shared geometry key.
+        if material.sheen > 0.0 {
+            hash_bytes(&mut hash, b"sheen-v1");
+            hash_f32s(&mut hash, &[material.sheen, material.sheen_roughness]);
+            hash_f32s(&mut hash, &material.sheen_color);
+        }
+        if material.clearcoat > 0.0 {
+            hash_bytes(&mut hash, b"clearcoat-v1");
+            hash_f32s(
+                &mut hash,
+                &[material.clearcoat, material.clearcoat_roughness],
+            );
+        }
         hash_bytes(
             &mut hash,
             &[
@@ -1668,6 +1685,17 @@ impl MeshBuilder {
                 metallic_factor: material_definition.map_or(0.0, |material| material.metallic),
                 roughness_factor: material_definition.map_or(0.82, |material| material.roughness),
                 specular_factor: material_definition.map_or(1.0, |material| material.specular),
+                sheen: material_definition.map_or(0.0, |material| material.sheen),
+                sheen_color: material_definition.map_or([1.0; 3], |material| {
+                    material
+                        .sheen_color
+                        .map(crate::material_layers::srgb_decode)
+                }),
+                sheen_roughness: material_definition
+                    .map_or(0.5, |material| material.sheen_roughness),
+                clearcoat: material_definition.map_or(0.0, |material| material.clearcoat),
+                clearcoat_roughness: material_definition
+                    .map_or(0.1, |material| material.clearcoat_roughness),
                 alpha_mode: match material_definition.map(|material| material.alpha_mode.as_str()) {
                     Some("mask") => GlbAlphaMode::Mask,
                     Some("blend") => GlbAlphaMode::Blend,
@@ -1676,6 +1704,10 @@ impl MeshBuilder {
                 alpha_cutoff: material_definition.map_or(0.5, |material| material.alpha_cutoff),
                 transmission_factor: material_definition
                     .map_or(0.0, |material| material.transmission),
+                refraction_mode: material_definition
+                    .map_or(crate::dsl::MaterialRefractionMode::Slab, |material| {
+                        material.refraction_mode
+                    }),
                 ior: material_definition.map_or(1.5, |material| material.ior),
                 thickness_factor: material_definition.map_or(0.0, |material| material.thickness),
                 attenuation_color: material_definition
@@ -1950,11 +1982,17 @@ mod tests {
             emissive: [0.0; 3],
             emissive_strength: 1.0,
             specular: 0.3,
+            sheen: 0.0,
+            sheen_color: [1.0; 3],
+            sheen_roughness: 0.5,
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.1,
             double_sided: false,
             receive_caustics: true,
             alpha_mode: "opaque".into(),
             alpha_cutoff: 0.5,
             transmission: 0.0,
+            refraction_mode: crate::dsl::MaterialRefractionMode::Slab,
             ior: 1.5,
             thickness: 0.0,
             attenuation_color: [1.0; 3],
@@ -1967,6 +2005,60 @@ mod tests {
             texture_rotation: 0.0,
             variation_amount: [0.34, 0.22],
         }
+    }
+
+    #[test]
+    fn material_layer_changes_invalidate_material_cache_without_geometry_changes() {
+        let original = seeded_box(1);
+        let mut changed = original.clone();
+        let material = changed.material_definition.as_mut().unwrap();
+        material.sheen_color = [0.1, 0.2, 0.3];
+        material.sheen_roughness = 0.8;
+        material.clearcoat_roughness = 0.9;
+        assert_eq!(
+            primitive_material_cache_key(&original),
+            primitive_material_cache_key(&changed)
+        );
+        changed.material_definition.as_mut().unwrap().sheen = 0.6;
+        assert_ne!(
+            primitive_material_cache_key(&original),
+            primitive_material_cache_key(&changed)
+        );
+        assert_eq!(
+            primitive_geometry_cache_key(&original),
+            primitive_geometry_cache_key(&changed)
+        );
+        changed.material_definition.as_mut().unwrap().sheen = 0.0;
+        changed.material_definition.as_mut().unwrap().clearcoat = 0.5;
+        assert_ne!(
+            primitive_material_cache_key(&original),
+            primitive_material_cache_key(&changed)
+        );
+        assert_eq!(
+            primitive_geometry_cache_key(&original),
+            primitive_geometry_cache_key(&changed)
+        );
+    }
+
+    #[test]
+    fn solid_refraction_propagates_and_invalidates_only_material_cache() {
+        let slab = seeded_box(1);
+        let mut solid = slab.clone();
+        solid.material_definition.as_mut().unwrap().refraction_mode =
+            crate::dsl::MaterialRefractionMode::Solid;
+        assert_eq!(
+            primitive_geometry_cache_key(&slab),
+            primitive_geometry_cache_key(&solid)
+        );
+        assert_ne!(
+            primitive_material_cache_key(&slab),
+            primitive_material_cache_key(&solid)
+        );
+        let mesh = generate_primitive_mesh(&solid);
+        assert_eq!(
+            mesh.materials[0].refraction_mode,
+            crate::dsl::MaterialRefractionMode::Solid
+        );
     }
 
     fn seeded_box(seed: u64) -> PrimitiveAssetNode {

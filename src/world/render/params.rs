@@ -7,7 +7,7 @@
 use super::{GpuGroundGridParams, GpuWorldLightingParams, GpuWorldParams};
 
 pub(super) fn pack_gpu_world_params(params: GpuWorldParams) -> Vec<u8> {
-    let mut out = Vec::with_capacity(544);
+    let mut out = Vec::with_capacity(592);
     for vector in [
         params.canvas,
         params.model,
@@ -27,6 +27,9 @@ pub(super) fn pack_gpu_world_params(params: GpuWorldParams) -> Vec<u8> {
         params.material6,
         params.material7,
         params.material8,
+        params.material9,
+        params.material10,
+        params.material11,
         params.cel_material0,
         params.cel_material1,
         params.vegetation,
@@ -52,7 +55,7 @@ pub(super) fn pack_gpu_world_params(params: GpuWorldParams) -> Vec<u8> {
 }
 
 pub(super) fn pack_gpu_world_lighting(params: GpuWorldLightingParams) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1168);
+    let mut out = Vec::with_capacity(1360);
     for vector in [
         params.environment0,
         params.environment1,
@@ -100,10 +103,22 @@ pub(super) fn pack_gpu_world_lighting(params: GpuWorldLightingParams) -> Vec<u8>
             out.extend_from_slice(&value.to_ne_bytes());
         }
     }
+    for vector in params
+        .environment_sh
+        .into_iter()
+        .chain([params.baked0, params.baked1])
+    {
+        for value in vector {
+            out.extend_from_slice(&value.to_ne_bytes());
+        }
+    }
     for light in params.lights {
         for value in light {
             out.extend_from_slice(&value.to_ne_bytes());
         }
+    }
+    for value in params.reflection0 {
+        out.extend_from_slice(&value.to_ne_bytes());
     }
     out
 }

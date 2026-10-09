@@ -24,12 +24,12 @@ pub use gltf_loader::{
 pub use model::{
     WorldAction, WorldActionBone, WorldActionIk, WorldActionPose, WorldActor, WorldApplyAction,
     WorldAttachment, WorldAttachmentSocket, WorldAttachmentTarget, WorldBackground,
-    WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap, WorldCamera, WorldCameraControl,
-    WorldCameraMode, WorldCameraProjection, WorldColorManagement, WorldDepthOfField,
-    WorldEnvironmentLighting, WorldGraph, WorldLight, WorldLightKind, WorldLighting, WorldMaterial,
-    WorldMaterialColorOverride, WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle,
-    WorldPlay, WorldPresent, WorldProfileRetarget, WorldRetarget, WorldRetargetMap,
-    WorldSpritePlayback, WorldTime,
+    WorldBackgroundFit, WorldBakedLighting, WorldBoneAxis, WorldBoneAxisMap, WorldCamera,
+    WorldCameraControl, WorldCameraMode, WorldCameraProjection, WorldColorManagement,
+    WorldDepthOfField, WorldEnvironmentLighting, WorldGraph, WorldLight, WorldLightKind,
+    WorldLighting, WorldMaterial, WorldMaterialColorOverride, WorldMaterialStyle,
+    WorldModelProfile, WorldNode, WorldPathStyle, WorldPlanarReflection, WorldPlay, WorldPresent,
+    WorldProfileRetarget, WorldRetarget, WorldRetargetMap, WorldSpritePlayback, WorldTime,
 };
 pub(crate) use model::{WorldAnimationAsset, WorldConstraint};
 pub use model_inspection::{

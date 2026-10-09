@@ -13,6 +13,22 @@ pub(super) fn create_world_surface_pipeline(
     fragment_entry: &str,
     depth_write_enabled: bool,
 ) -> wgpu::RenderPipeline {
+    let mut targets = vec![Some(wgpu::ColorTargetState {
+        format: wgpu::TextureFormat::Rgba16Float,
+        blend: if fragment_entry == "fs_depth_prepass" {
+            None
+        } else {
+            Some(wgpu::BlendState::ALPHA_BLENDING)
+        },
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    if fragment_entry.ends_with("_mrt") {
+        targets.push(Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }));
+    }
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -80,11 +96,7 @@ pub(super) fn create_world_surface_pipeline(
             module: shader,
             entry_point: Some(fragment_entry),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba16Float,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &targets,
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,

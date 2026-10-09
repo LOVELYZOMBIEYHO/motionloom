@@ -3376,6 +3376,38 @@ fn parse_composite_group_block(
             i = end_ix + 1;
             continue;
         }
+        if starts_open_tag(line, "BakedLighting") {
+            let (tag, end_ix) = collect_self_closing_block(lines, i)?;
+            if nodes_3d
+                .iter()
+                .any(|n| matches!(n, Scene3DNode::BakedLighting(_)))
+            {
+                return Err(GraphParseError {
+                    line: i + 1,
+                    message: "Only one BakedLighting is allowed per Composite3D".to_string(),
+                });
+            }
+            nodes_3d.push(Scene3DNode::BakedLighting(SceneBakedLightingNode {
+                id: scene_optional_attr(&tag, &["id"]),
+                src: strip_wrappers(&required_attr_value(&tag, "src", i + 1)?).to_string(),
+                blend: scene_attr_or_default(&tag, &["blend"], "0"),
+                intensity: scene_attr_or_default(&tag, &["intensity"], "1"),
+                specular_intensity: scene_attr_or_default(&tag, &["specularIntensity"], "1"),
+            }));
+            i = end_ix + 1;
+            continue;
+        }
+        if starts_open_tag(line, "PlanarReflection") {
+            let (tag, end_ix) = collect_self_closing_block(lines, i)?;
+            nodes_3d.push(Scene3DNode::PlanarReflection(ScenePlanarReflectionNode {
+                id: scene_optional_attr(&tag, &["id"]),
+                target: strip_wrappers(&required_attr_value(&tag, "target", i + 1)?).to_string(),
+                resolution_scale: scene_attr_or_default(&tag, &["resolutionScale"], "0.5"),
+                clip_bias: scene_attr_or_default(&tag, &["clipBias"], "0.01"),
+            }));
+            i = end_ix + 1;
+            continue;
+        }
         if starts_open_tag(line, "EnvironmentLight") {
             let (tag, end_ix) = collect_self_closing_block(lines, i)?;
             nodes_3d.push(Scene3DNode::EnvironmentLight(SceneEnvironmentLightNode {
@@ -3413,6 +3445,7 @@ fn parse_composite_group_block(
             let (tag, end_ix) = collect_self_closing_block(lines, i)?;
             nodes_3d.push(Scene3DNode::DirectionalLight(SceneDirectionalLightNode {
                 id: scene_optional_attr(&tag, &["id"]),
+                angular_diameter: scene_light_literal(&tag, "angularDiameter", 0.0, 90.0, i + 1)?,
                 direction: scene_attr_or_default(&tag, &["direction"], "[-0.4,-1,-0.35]"),
                 color: scene_attr_or_default(&tag, &["color"], "#FFFFFF"),
                 intensity: scene_attr_or_default(&tag, &["intensity"], "1"),
@@ -3430,6 +3463,7 @@ fn parse_composite_group_block(
             let (tag, end_ix) = collect_self_closing_block(lines, i)?;
             nodes_3d.push(Scene3DNode::PointLight(ScenePointLightNode {
                 id: scene_optional_attr(&tag, &["id"]),
+                source_radius: scene_light_literal(&tag, "sourceRadius", 0.0, 1000.0, i + 1)?,
                 position: scene_attr_or_default(&tag, &["position"], "[0,0,0]"),
                 color: scene_attr_or_default(&tag, &["color"], "#FFFFFF"),
                 intensity: scene_attr_or_default(&tag, &["intensity"], "1"),
@@ -3443,6 +3477,7 @@ fn parse_composite_group_block(
             let (tag, end_ix) = collect_self_closing_block(lines, i)?;
             nodes_3d.push(Scene3DNode::SpotLight(SceneSpotLightNode {
                 id: scene_optional_attr(&tag, &["id"]),
+                source_radius: scene_light_literal(&tag, "sourceRadius", 0.0, 1000.0, i + 1)?,
                 position: scene_attr_or_default(&tag, &["position"], "[0,0,0]"),
                 direction: scene_attr_or_default(&tag, &["direction"], "[0,-1,0]"),
                 color: scene_attr_or_default(&tag, &["color"], "#FFFFFF"),
@@ -3459,6 +3494,19 @@ fn parse_composite_group_block(
             let (tag, end_ix) = collect_self_closing_block(lines, i)?;
             nodes_3d.push(Scene3DNode::RectAreaLight(SceneRectAreaLightNode {
                 id: scene_optional_attr(&tag, &["id"]),
+                cast_shadow: match attr_value(&tag, "castShadow")
+                    .as_deref()
+                    .map(strip_wrappers)
+                {
+                    None | Some("false") => false,
+                    Some("true") => true,
+                    _ => {
+                        return Err(GraphParseError {
+                            line: i + 1,
+                            message: "RectAreaLight castShadow must be true or false".into(),
+                        });
+                    }
+                },
                 position: scene_attr_or_default(&tag, &["position"], "[0,0,0]"),
                 direction: scene_attr_or_default(&tag, &["direction"], "[0,-1,0]"),
                 color: scene_attr_or_default(&tag, &["color"], "#FFFFFF"),
@@ -4106,6 +4154,48 @@ fn parse_composite_group_block(
             message: "A CompositeGroup containing a 3D RigidBody requires one <Physics> declaration for deterministic gravity and stepping."
                 .to_string(),
         });
+    }
+
+    let mut mirror_targets = HashSet::new();
+    for node in &nodes_3d {
+        match node {
+            Scene3DNode::BakedLighting(binding) if binding.src.trim().is_empty() => {
+                return Err(GraphParseError {
+                    line: start + 1,
+                    message: "BakedLighting src must not be empty".into(),
+                });
+            }
+            Scene3DNode::PlanarReflection(reflection) => {
+                if !model_ids.contains(reflection.target.as_str())
+                    || !mirror_targets.insert(reflection.target.as_str())
+                {
+                    return Err(GraphParseError {
+                        line: start + 1,
+                        message: format!(
+                            "PlanarReflection requires a unique existing Model target '{}'.",
+                            reflection.target
+                        ),
+                    });
+                }
+                for (name, value, positive) in [
+                    ("resolutionScale", &reflection.resolution_scale, true),
+                    ("clipBias", &reflection.clip_bias, false),
+                ] {
+                    if let Ok(number) = value.parse::<f32>() {
+                        if !number.is_finite()
+                            || (positive && (number <= 0.0 || number > 1.0))
+                            || (!positive && number < 0.0)
+                        {
+                            return Err(GraphParseError {
+                                line: start + 1,
+                                message: format!("PlanarReflection invalid {name}: {value}"),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     let synthetic_group_tag = open_tag.replacen("<CompositeGroup", "<Group", 1);
@@ -5432,6 +5522,26 @@ fn validate_atmosphere_attributes(
 }
 
 /// Parse a boolean Scene attribute while preserving an explicit default.
+/// Physical emitter sizes are finite literal scene units, not animation channels.
+fn scene_light_literal(
+    block: &str,
+    name: &str,
+    min: f32,
+    max: f32,
+    line: usize,
+) -> Result<f32, GraphParseError> {
+    let Some(raw) = attr_value(block, name) else {
+        return Ok(0.0);
+    };
+    let parsed = strip_wrappers(&raw).trim().parse::<f32>().ok();
+    parsed
+        .filter(|v| v.is_finite() && *v >= min && *v <= max)
+        .ok_or_else(|| GraphParseError {
+            line,
+            message: format!("{name} must be a finite literal from {min} through {max}."),
+        })
+}
+
 fn scene_bool_attr(block: &str, names: &[&str], default_value: bool) -> bool {
     names
         .iter()

@@ -417,7 +417,8 @@ async fn render_internal<F: FnMut(RenderProgress)>(
     p[0] = [
         0.0,
         0.0,
-        job.sampling.batch_samples as f32,
+        // Bound individual GPU work without changing the sample target or RNG.
+        job.sampling.batch_samples.min(4) as f32,
         f32::from_bits(job.seed),
     ];
     p[1] = [
@@ -445,6 +446,7 @@ async fn render_internal<F: FnMut(RenderProgress)>(
         job.light_paths.glossy as f32,
         job.light_paths.roulette_start as f32,
     ];
+    p[7][3] = job.light_paths.transmission as f32;
     p[9][3] = job.light_paths.transparent as f32;
     p[14] = [
         f32::from_bits(packed.emitter_offset),
@@ -646,10 +648,15 @@ async fn render_internal<F: FnMut(RenderProgress)>(
             });
         }
     }
-    // Advance every active tile together. One GPU submit and one collective
-    // readback per sample round keeps Metal busy and removes per-tile stalls.
+    // A full 4K round can contain hundreds of tiles. Waiting only after that
+    // monolithic dispatch exceeds readback/device timeouts on dense scenes.
+    // Finish and checkpoint bounded groups before submitting any more work.
+    const TILES_PER_SUBMISSION: usize = 8;
+    report.diagnostics.push(
+        "Sampling completes at most 8 tiles and 4 samples per pixel per GPU submission; total samples and path depths are unchanged.".into(),
+    );
     let trace_started = Instant::now();
-    loop {
+    'sampling: loop {
         if cancel.is_cancelled() {
             report.status = "cancelled".into();
             break;
@@ -689,22 +696,37 @@ async fn render_internal<F: FnMut(RenderProgress)>(
         if active.is_empty() {
             break;
         }
-        let dispatches = active
-            .iter()
-            .map(|index| (&work[*index].tile, &work[*index].params))
-            .collect::<Vec<_>>();
-        gpu.dispatch_all(&dispatches)?;
-        let tiles = active
-            .iter()
-            .map(|index| &work[*index].tile)
-            .collect::<Vec<_>>();
-        let readbacks = gpu.read_all(&tiles)?;
-        for (index, raw) in active.into_iter().zip(readbacks) {
-            work[index].raw = raw;
-            // Rename only complete checkpoint writes; cancellation retains the last round.
-            let tmp = work[index].file.with_extension("tmp");
-            std::fs::write(&tmp, &work[index].raw)?;
-            std::fs::rename(tmp, &work[index].file)?;
+        for group in active.chunks(TILES_PER_SUBMISSION) {
+            if cancel.is_cancelled() {
+                report.status = "cancelled".into();
+                break 'sampling;
+            }
+            let dispatches = group
+                .iter()
+                .map(|index| (&work[*index].tile, &work[*index].params))
+                .collect::<Vec<_>>();
+            gpu.dispatch_all(&dispatches)?;
+            let tiles = group
+                .iter()
+                .map(|index| &work[*index].tile)
+                .collect::<Vec<_>>();
+            let readbacks = gpu.read_all(&tiles)?;
+            for (&index, raw) in group.iter().zip(readbacks) {
+                work[index].raw = raw;
+                // Mixed-round checkpoints are valid: each pixel carries its
+                // sample count and deterministic RNG state for exact resume.
+                let tmp = work[index].file.with_extension("tmp");
+                std::fs::write(&tmp, &work[index].raw)?;
+                std::fs::rename(tmp, &work[index].file)?;
+            }
+            // Hosts can cancel after a durable group rather than waiting for
+            // an entire high-resolution round. Global counts refresh next round.
+            progress(RenderProgress {
+                completed_tiles: tiles_x * tiles_y - active.len() as u32,
+                total_tiles: tiles_x * tiles_y,
+                tile_min_samples: global_minimum,
+                elapsed_seconds: started.elapsed().as_secs_f64(),
+            });
         }
     }
     if report.status != "cancelled" {
@@ -729,6 +751,9 @@ async fn render_internal<F: FnMut(RenderProgress)>(
             }
         }
     }
+    // The assembled CPU film is sufficient for output and denoising. Retaining
+    // every tile's film, staging buffer and raw checkpoint doubles 4K memory.
+    drop(work);
     timings.path_trace_seconds = trace_started.elapsed().as_secs_f64();
     if report.status != "cancelled" {
         let output_started = Instant::now();

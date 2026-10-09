@@ -20,8 +20,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::dsl::{
-    GraphAssetKind, GraphAssetSource, GraphScript, HeadSwapAssetNode, NativeSkinMode, PrimitiveAssetNode,
-    PrimitiveColliderShape, PrimitiveCollisionMode, PrimitiveGeometry, ProcessDefinitionNode,
+    GraphAssetKind, GraphAssetSource, GraphScript, HeadSwapAssetNode, NativeSkinMode,
+    PrimitiveAssetNode, PrimitiveColliderShape, PrimitiveCollisionMode, PrimitiveGeometry,
+    ProcessDefinitionNode,
 };
 use crate::process::model::{PassNode, PassParam};
 use crate::process::runtime::{
@@ -45,7 +46,6 @@ use crate::scene::backend::sizing::{
     fit_logical_canvas_to_output, graph_logical_render_size, graph_output_size,
     render_size_root_transform,
 };
-#[cfg(target_arch = "wasm32")]
 use crate::scene::compile::scene_nodes_contain_3d_island;
 use crate::scene::compile::{
     graph_has_rich_scene_tree, scene_nodes_contain_image_or_svg, scene_nodes_for_present,
@@ -101,8 +101,9 @@ use crate::scene::resource::{
     collect_graph_component_defs, collect_graph_filter_defs, collect_graph_font_defs,
     collect_graph_gradient_defs, collect_graph_mask_defs, collect_graph_material_defs,
     collect_graph_noise_defs, collect_graph_palette_defs, collect_graph_precompose_defs,
-    collect_graph_texture_defs, default_world_asset_root, load_extra_fonts, load_rgba_image_source,
-    load_binary_asset_source, load_svg_source, load_utf8_text_source, resolve_local_scene_asset_path,
+    collect_graph_texture_defs, default_world_asset_root, load_binary_asset_source,
+    load_extra_fonts, load_rgba_image_source, load_svg_source, load_utf8_text_source,
+    resolve_local_scene_asset_path,
 };
 
 fn scene_track_composite_order(track: &SceneTrackNode) -> i32 {
@@ -219,7 +220,7 @@ use crate::scene::spatial::{
 };
 use crate::scene::text::TextNode;
 
-fn apply_animation_targets_at_frame(
+pub(crate) fn apply_animation_targets_at_frame(
     graph: &GraphScript,
     frame: u32,
 ) -> Result<Option<GraphScript>, MotionLoomSceneRenderError> {
@@ -1261,6 +1262,21 @@ fn apply_animation_property_to_3d_nodes(
                     }
                 }
             }
+            Scene3DNode::BakedLighting(light) if light.id.as_deref() == Some(node_id) => {
+                match property {
+                    "blend" => light.blend = value.to_string(),
+                    "intensity" => light.intensity = value.to_string(),
+                    "specularIntensity" => light.specular_intensity = value.to_string(),
+                    _ => {}
+                }
+            }
+            Scene3DNode::PlanarReflection(node) if node.id.as_deref() == Some(node_id) => {
+                match property {
+                    "resolutionScale" => node.resolution_scale = value.to_string(),
+                    "clipBias" => node.clip_bias = value.to_string(),
+                    _ => {}
+                }
+            }
             Scene3DNode::EnvironmentLight(light) if light.id.as_deref() == Some(node_id) => {
                 match property {
                     "intensity" => light.intensity = value.to_string(),
@@ -1548,11 +1564,12 @@ use crate::world::render::Scene3DRenderer;
 use crate::world::{
     AtmosphereMediumPlan, VolumetricQuality, VolumetricScatteringPlan, WaterCausticsPlan,
     WorldAction, WorldActionBone, WorldActionIk, WorldActionPose, WorldActor, WorldAnimationAsset,
-    WorldApplyAction, WorldBackground, WorldBackgroundFit, WorldBoneAxis, WorldBoneAxisMap,
-    WorldCamera, WorldCameraControl, WorldColorManagement, WorldConstraint,
+    WorldApplyAction, WorldBackground, WorldBackgroundFit, WorldBakedLighting, WorldBoneAxis,
+    WorldBoneAxisMap, WorldCamera, WorldCameraControl, WorldColorManagement, WorldConstraint,
     WorldDepthOfField, WorldEnvironmentLighting, WorldGraph, WorldLight, WorldLightKind,
     WorldLighting, WorldMaterial, WorldMaterialStyle, WorldModelProfile, WorldNode, WorldPathStyle,
-    WorldPlay, WorldPresent, WorldProfileRetarget, WorldRetargetMap, parse_world_graph_script,
+    WorldPlanarReflection, WorldPlay, WorldPresent, WorldProfileRetarget, WorldRetargetMap,
+    parse_world_graph_script,
 };
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use image::{Rgba, RgbaImage, imageops::FilterType};
@@ -1703,7 +1720,7 @@ fn scatter_terrain_slope_degrees(
 }
 
 /// Evaluate authored Scene lighting once before crossing the internal 3D bridge.
-fn scene_world_lighting(
+pub(crate) fn scene_world_lighting(
     composite: &CompositeGroupConfig,
     image_assets: &HashMap<String, String>,
     time_norm: f32,
@@ -1721,10 +1738,16 @@ fn scene_world_lighting(
         )
     });
     let light_color = |value: &str| -> Result<[f32; 3], MotionLoomSceneRenderError> {
-        if !filmic {
+        if !filmic
+            && !composite
+                .render_style
+                .as_ref()
+                .is_some_and(|style| style.per_light_shadows)
+        {
             return scene_light_color(value);
         }
-        // Filmic authored colors use RGB and the exact sRGB transfer.
+        // Filmic and per-light authored colors use canonical RGB and the exact
+        // sRGB transfer. Only the legacy path retains its historical BGRA swap.
         let rgba = parse_color(value)?;
         Ok([rgba[0], rgba[1], rgba[2]].map(|byte| {
             let c = byte as f32 / 255.0;
@@ -1861,6 +1884,54 @@ fn scene_world_lighting(
                         .transpose()?,
                 });
             }
+            Scene3DNode::BakedLighting(node) => {
+                let resolved = resolve_local_scene_asset_path(&node.src);
+                lighting.baked_lighting = Some(WorldBakedLighting {
+                    expected_authoring_fingerprint: String::new(),
+                    src: std::fs::canonicalize(&resolved)
+                        .unwrap_or(resolved)
+                        .to_string_lossy()
+                        .into_owned(),
+                    blend: eval_scene_number(&node.blend, time_norm, time_sec)?.clamp(0.0, 1.0),
+                    intensity: eval_scene_number(&node.intensity, time_norm, time_sec)?.max(0.0),
+                    specular_intensity: eval_scene_number(
+                        &node.specular_intensity,
+                        time_norm,
+                        time_sec,
+                    )?
+                    .max(0.0),
+                });
+            }
+            Scene3DNode::PlanarReflection(node) => {
+                let scale = eval_scene_number(&node.resolution_scale, time_norm, time_sec)?;
+                let bias = eval_scene_number(&node.clip_bias, time_norm, time_sec)?;
+                if !scale.is_finite()
+                    || scale <= 0.0
+                    || scale > 1.0
+                    || !bias.is_finite()
+                    || bias < 0.0
+                {
+                    return Err(MotionLoomSceneRenderError::InvalidLighting { id: node.id.clone().unwrap_or_else(|| node.target.clone()), message: "PlanarReflection requires resolutionScale in (0,1] and finite clipBias >= 0".to_string() });
+                }
+                if !composite.nodes_3d.iter().any(
+                    |n| matches!(n, Scene3DNode::Model(m) if m.id.as_deref() == Some(&node.target)),
+                ) || lighting
+                    .planar_reflections
+                    .iter()
+                    .any(|p| p.target == node.target)
+                {
+                    return Err(MotionLoomSceneRenderError::InvalidLighting {
+                        id: node.target.clone(),
+                        message: "PlanarReflection must target a unique Model in this Composite3D"
+                            .to_string(),
+                    });
+                }
+                lighting.planar_reflections.push(WorldPlanarReflection {
+                    target: node.target.clone(),
+                    resolution_scale: scale,
+                    clip_bias: bias,
+                });
+            }
             Scene3DNode::EnvironmentLight(node) => {
                 let authored_src = image_assets
                     .get(&node.asset)
@@ -1906,8 +1977,17 @@ fn scene_world_lighting(
                     .max(0.0),
                 });
             }
+            Scene3DNode::Model(node) => {
+                if let Some(id) = &node.id {
+                    lighting
+                        .model_shadow_flags
+                        .insert(id.clone(), [node.cast_shadow, node.receive_shadow]);
+                }
+            }
             Scene3DNode::DirectionalLight(node) => lighting.lights.push(WorldLight {
                 id: node.id.clone(),
+                angular_diameter: node.angular_diameter,
+                source_radius: 0.0,
                 kind: WorldLightKind::Directional,
                 position: [0.0; 3],
                 direction: eval_scene_vec3(
@@ -1929,6 +2009,8 @@ fn scene_world_lighting(
             }),
             Scene3DNode::PointLight(node) => lighting.lights.push(WorldLight {
                 id: node.id.clone(),
+                angular_diameter: 0.0,
+                source_radius: node.source_radius,
                 kind: WorldLightKind::Point,
                 position: eval_scene_vec3(&node.position, time_norm, time_sec, [0.0; 3])?,
                 direction: [0.0, -1.0, 0.0],
@@ -1944,6 +2026,8 @@ fn scene_world_lighting(
             }),
             Scene3DNode::SpotLight(node) => lighting.lights.push(WorldLight {
                 id: node.id.clone(),
+                angular_diameter: 0.0,
+                source_radius: node.source_radius,
                 kind: WorldLightKind::Spot,
                 position: eval_scene_vec3(&node.position, time_norm, time_sec, [0.0; 3])?,
                 direction: eval_scene_vec3(&node.direction, time_norm, time_sec, [0.0, -1.0, 0.0])?,
@@ -1961,6 +2045,8 @@ fn scene_world_lighting(
             }),
             Scene3DNode::RectAreaLight(node) => lighting.lights.push(WorldLight {
                 id: node.id.clone(),
+                angular_diameter: 0.0,
+                source_radius: 0.0,
                 kind: WorldLightKind::RectArea,
                 position: eval_scene_vec3(&node.position, time_norm, time_sec, [0.0; 3])?,
                 direction: eval_scene_vec3(&node.direction, time_norm, time_sec, [0.0, -1.0, 0.0])?,
@@ -1971,8 +2057,8 @@ fn scene_world_lighting(
                 outer_cone_degrees: 0.0,
                 width: eval_scene_number(&node.width, time_norm, time_sec)?.max(0.001),
                 height: eval_scene_number(&node.height, time_norm, time_sec)?.max(0.001),
-                cast_shadow: false,
-                shadow_strength: 0.0,
+                cast_shadow: node.cast_shadow,
+                shadow_strength: 1.0,
             }),
             Scene3DNode::AmbientOcclusion(node) => {
                 lighting.ao_intensity =
@@ -2021,6 +2107,8 @@ fn scene_world_lighting(
             };
             lighting.lights.push(WorldLight {
                 id: Some("__ml_style_key".into()),
+                angular_diameter: 0.0,
+                source_radius: 0.0,
                 kind: WorldLightKind::Directional,
                 position: [0.0; 3],
                 direction,
@@ -2084,7 +2172,10 @@ fn scene_world_lighting(
     {
         lighting.lights.swap(3, index);
     }
-    lighting.lights.truncate(4);
+    // The GPU uniform supports eight lights. Preview profiles apply their own
+    // smaller budgets after lowering, so retain room fixtures for baking and
+    // the Balanced/Cinematic/Ultra paths here.
+    lighting.lights.truncate(8);
     Ok(lighting)
 }
 
@@ -3381,7 +3472,7 @@ struct SceneFrameRenderer {
     /// cameras/lights. Large environment scatters otherwise regenerate and
     /// allocate thousands of Model nodes on every preview frame.
     expanded_scene_scatter_cache: HashMap<u64, Arc<Vec<Scene3DNode>>>,
-    /// Fully lowered static scatter worlds are retained independently from
+    /// Fully lowered native islands are retained independently from
     /// animated cameras and lighting.
     retained_scene_3d_world_cache: HashMap<u64, Arc<WorldGraph>>,
     rigid_body_timeline_cache:
@@ -3392,6 +3483,7 @@ struct SceneFrameRenderer {
     action_library_source_signature: u64,
     compiled_action_library_graph: Option<Arc<GraphScript>>,
     prepared_graph_signature: u64,
+    prepared_lighting_authoring_fingerprint: String,
     prepared_graph_fps: f32,
     prepared_graph_duration_ms: u64,
     prepared_scene_model_profiles: Vec<crate::scene::dsl::ModelProfileNode>,
@@ -7087,6 +7179,100 @@ fn scene_camera_to_world_camera(
     })
 }
 
+/// Retain large native islands by evaluated actor state, independently of the
+/// active camera and light intensity. Transform curves still change the key
+/// while moving, and settled endpoints reuse the same immutable world/draws.
+fn scene_retained_world_key(
+    graph_signature: u64,
+    composite: &CompositeGroupConfig,
+    canvas_size: (u32, u32),
+    has_no_actor_runtime_dependencies: bool,
+    assets: &HashMap<String, GraphAssetSource>,
+    time_norm: f32,
+    time_sec: f32,
+) -> Result<Option<u64>, MotionLoomSceneRenderError> {
+    if !has_no_actor_runtime_dependencies || composite.physics.is_some() {
+        return Ok(None);
+    }
+    let large_scatter = composite.nodes_3d.iter().any(|node|
+        matches!(node, Scene3DNode::Scatter(scatter) if scatter.count >= 256));
+    if large_scatter {
+        return Ok(scene_static_scatter_world_key(graph_signature, composite, canvas_size,
+            has_no_actor_runtime_dependencies));
+    }
+    let model_count = composite.nodes_3d.iter().filter(|node|
+        matches!(node, Scene3DNode::Model(_))).count();
+    // Small existing islands do not pay for another frame-wide signature.
+    if !large_scatter && model_count < 64 {
+        return Ok(None);
+    }
+    let mut hasher = DefaultHasher::new();
+    graph_signature.hash(&mut hasher);
+    canvas_size.hash(&mut hasher);
+    format!("{:?}", composite.render_style).hash(&mut hasher);
+    for node in &composite.nodes_3d {
+        match node {
+            // Mixed surface scatters can depend on camera LOD, wind or a
+            // sampled surface. Only the established large-scatter path above
+            // owns their retention proof.
+            Scene3DNode::Scatter(_) => return Ok(None),
+            Scene3DNode::Model(model) => {
+                if model.play.is_some() || !model.plays.is_empty()
+                    || !model.bone_overrides.is_empty()
+                    || model.rig.is_some() || model.retarget.is_some()
+                    || model.material_bindings.iter().any(|binding|
+                        binding.texture.as_deref().is_some_and(|texture|
+                            texture.starts_with("@scene:") || texture.starts_with("scene:")))
+                    || model.position.trim_start().starts_with('@')
+                    || model.ground.is_some()
+                    || model.gravity.as_deref().is_some_and(|v| v != "none") {
+                    return Ok(None);
+                }
+                // Native geometry has an authoring revision. External meshes,
+                // rigs and camera-dependent/wind vegetation keep their resolver
+                // and animation path rather than acquiring a stale cache entry.
+                let native = model.primitive.is_some() || match assets.get(&model.asset) {
+                    Some(GraphAssetSource::Primitive(_)) => true,
+                    Some(GraphAssetSource::Compound(compound)) => compound.rig.is_none()
+                        && compound.instances.iter().all(|instance|
+                            matches!(assets.get(&instance.asset), Some(GraphAssetSource::Primitive(_)))),
+                    _ => false,
+                };
+                if !native { return Ok(None); }
+                format!("{model:?}").hash(&mut hasher);
+                let mut position = eval_scene_vec3(&model.position, time_norm, time_sec, [0.0; 3])?;
+                let mut rotation = eval_scene_vec3(&model.rotation, time_norm, time_sec, [0.0; 3])?;
+                for (axis, value) in [&model.position_x, &model.position_y, &model.position_z].into_iter().enumerate() {
+                    if let Some(value) = value { position[axis] = eval_scene_number(value, time_norm, time_sec)?; }
+                }
+                for (axis, value) in [&model.rotation_x, &model.rotation_y, &model.rotation_z].into_iter().enumerate() {
+                    if let Some(value) = value { rotation[axis] = eval_scene_number(value, time_norm, time_sec)?; }
+                }
+                let scale = eval_scene_number(&model.scale, time_norm, time_sec)?;
+                let units = eval_scene_number(&model.unit_scale, time_norm, time_sec)?;
+                let exposure = eval_scene_number(&model.exposure, time_norm, time_sec)?;
+                for value in position.into_iter().chain(rotation).chain([scale, units, exposure]) {
+                    if !value.is_finite() { return Ok(None); }
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+            Scene3DNode::Camera(camera) => {
+                if !camera.hidden_bones.is_empty()
+                    || camera.position.trim_start().starts_with('@')
+                    || camera.target.trim_start().starts_with('@')
+                    || camera.depth_of_field.as_ref().and_then(|optics| optics.focus_target.as_deref())
+                        .is_some_and(|target| target.trim_start().starts_with('@')) {
+                    return Ok(None);
+                }
+            }
+            Scene3DNode::VolumeRepeat(_) | Scene3DNode::RigidBody(_)
+            | Scene3DNode::Anchor(_) | Scene3DNode::Debug(_) => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(Some(hasher.finish()))
+}
+
 fn scene_static_scatter_world_key(
     graph_signature: u64,
     composite: &CompositeGroupConfig,
@@ -7135,6 +7321,8 @@ fn scene_static_scatter_world_key(
             | Scene3DNode::Anchor(_)
             | Scene3DNode::Debug(_) => return None,
             Scene3DNode::AtmosphereFog(_)
+            | Scene3DNode::BakedLighting(_)
+            | Scene3DNode::PlanarReflection(_)
             | Scene3DNode::EnvironmentLight(_)
             | Scene3DNode::DirectionalLight(_)
             | Scene3DNode::PointLight(_)
@@ -7352,9 +7540,11 @@ impl SceneFrameRenderer {
         let mut font_system = FontSystem::new();
         load_extra_fonts(&mut font_system);
         let generated_assets = Arc::new(crate::asset::MemoryAssetResolver::new());
-        let asset_resolver: Arc<dyn AssetResolver> = Arc::new(crate::scene::head_swap::GeneratedAssetResolver {
-            generated: Arc::clone(&generated_assets), parent: asset_resolver,
-        });
+        let asset_resolver: Arc<dyn AssetResolver> =
+            Arc::new(crate::scene::head_swap::GeneratedAssetResolver {
+                generated: Arc::clone(&generated_assets),
+                parent: asset_resolver,
+            });
         let world_asset_resolver = asset_resolver.clone();
         Self {
             profile,
@@ -7383,6 +7573,7 @@ impl SceneFrameRenderer {
             action_library_source_signature: 0,
             compiled_action_library_graph: None,
             prepared_graph_signature: 0,
+            prepared_lighting_authoring_fingerprint: String::new(),
             prepared_graph_fps: 30.0,
             prepared_graph_duration_ms: 1_000,
             prepared_scene_model_profiles: Vec::new(),
@@ -7550,9 +7741,11 @@ impl SceneFrameRenderer {
         let mut font_system = FontSystem::new();
         load_extra_fonts(&mut font_system);
         let generated_assets = Arc::new(crate::asset::MemoryAssetResolver::new());
-        let asset_resolver: Arc<dyn AssetResolver> = Arc::new(crate::scene::head_swap::GeneratedAssetResolver {
-            generated: Arc::clone(&generated_assets), parent: asset_resolver,
-        });
+        let asset_resolver: Arc<dyn AssetResolver> =
+            Arc::new(crate::scene::head_swap::GeneratedAssetResolver {
+                generated: Arc::clone(&generated_assets),
+                parent: asset_resolver,
+            });
         let world_asset_resolver = asset_resolver.clone();
         Self {
             profile,
@@ -7581,6 +7774,7 @@ impl SceneFrameRenderer {
             action_library_source_signature: 0,
             compiled_action_library_graph: None,
             prepared_graph_signature: 0,
+            prepared_lighting_authoring_fingerprint: String::new(),
             prepared_graph_fps: 30.0,
             prepared_graph_duration_ms: 1_000,
             prepared_scene_model_profiles: Vec::new(),
@@ -8315,6 +8509,16 @@ impl SceneFrameRenderer {
             // frame-local animated Graph clone carries the same raw source and
             // only mutates evaluated node values, so cloning the full action
             // pool and profile registry on every frame is unnecessary.
+            self.prepared_lighting_authoring_fingerprint = if graph
+                .raw_script
+                .as_deref()
+                .is_none_or(|s| s.contains("<BakedLighting"))
+            {
+                crate::lighting_bake::scene_lighting_authoring_fingerprint(graph)
+                    .unwrap_or_else(|e| format!("invalid:{e}"))
+            } else {
+                String::new()
+            };
             self.prepared_scene_model_profiles = graph.model_profiles.clone();
             self.prepared_scene_skeletons = graph.skeletons.clone();
             self.prepared_scene_actions = graph.actions.clone();
@@ -10455,7 +10659,9 @@ impl SceneFrameRenderer {
         time_sec: f32,
         canvas_size: (u32, u32),
     ) -> Result<Option<Arc<Vec<GpuScenePrimitive>>>, MotionLoomSceneRenderError> {
-        if (inherited_opacity - 1.0).abs() > 0.0001 {
+        // A 3D island renders during collection and cannot become retained
+        // vector primitives. Reject before that side effect, not afterward.
+        if scene_nodes_contain_3d_island(nodes) || (inherited_opacity - 1.0).abs() > 0.0001 {
             return Ok(None);
         }
         let key = RetainedGpuShapeSceneKey::new(
@@ -10828,6 +11034,9 @@ impl SceneFrameRenderer {
         canvas_size: (u32, u32),
         scope: u64,
     ) -> Result<Option<RetainedGpuTransformFrame>, MotionLoomSceneRenderError> {
+        if scene_nodes_contain_3d_island(nodes) {
+            return Ok(None);
+        }
         let key = RetainedGpuShapeSceneKey::new_scoped(
             self.prepared_graph_signature,
             scope,
@@ -11588,7 +11797,7 @@ impl SceneFrameRenderer {
         MotionLoomSceneRenderError,
     > {
         self.last_rig_contact_evaluations.clear();
-        let retained_world_key = scene_static_scatter_world_key(
+        let retained_world_key = scene_retained_world_key(
             self.prepared_graph_signature,
             composite,
             canvas_size,
@@ -11596,7 +11805,10 @@ impl SceneFrameRenderer {
                 && self.prepared_scene_apply_actions.is_empty()
                 && self.prepared_scene_constraints.is_empty()
                 && self.prepared_scene_attachments.is_empty(),
-        );
+            &self.model_asset_sources,
+            time_norm,
+            time_sec,
+        )?;
         if let Some((cache_key, cached)) = retained_world_key.and_then(|key| {
             self.retained_scene_3d_world_cache
                 .get(&key)
@@ -11610,7 +11822,11 @@ impl SceneFrameRenderer {
             world_graph.render_size = Some(canvas_size);
             world_graph.lighting =
                 scene_world_lighting(composite, &self.image_asset_sources, time_norm, time_sec)?;
-            let active_camera = composite.nodes_3d.iter().find_map(|node| {
+            if let Some(baked) = world_graph.lighting.baked_lighting.as_mut() {
+                baked.expected_authoring_fingerprint =
+                    self.prepared_lighting_authoring_fingerprint.clone();
+            }
+            let active_camera = composite.nodes_3d.iter().rev().find_map(|node| {
                 let Scene3DNode::Camera(camera) = node else {
                     return None;
                 };
@@ -12402,8 +12618,12 @@ impl SceneFrameRenderer {
             }
         }
 
-        let world_lighting =
+        let mut world_lighting =
             scene_world_lighting(composite, &self.image_asset_sources, time_norm, time_sec)?;
+        if let Some(baked) = world_lighting.baked_lighting.as_mut() {
+            baked.expected_authoring_fingerprint =
+                self.prepared_lighting_authoring_fingerprint.clone();
+        }
 
         for node in &composite.nodes_3d {
             match node {
@@ -12417,7 +12637,9 @@ impl SceneFrameRenderer {
                     }
                     active_scene_camera = Some(node.clone());
                 }
-                Scene3DNode::EnvironmentLight(_)
+                Scene3DNode::BakedLighting(_)
+                | Scene3DNode::PlanarReflection(_)
+                | Scene3DNode::EnvironmentLight(_)
                 | Scene3DNode::AtmosphereFog(_)
                 | Scene3DNode::DirectionalLight(_)
                 | Scene3DNode::PointLight(_)
@@ -12433,6 +12655,9 @@ impl SceneFrameRenderer {
                         .id
                         .clone()
                         .unwrap_or_else(|| format!("model_{}", actors.len()));
+                    world_lighting
+                        .model_shadow_flags
+                        .insert(actor_id.clone(), [node.cast_shadow, node.receive_shadow]);
                     let authored_source = self.model_asset_sources.get(&node.asset);
                     let compound = if node.primitive.is_none() {
                         authored_source.and_then(|source| match source {
@@ -14404,6 +14629,10 @@ impl SceneFrameRenderer {
         {
             world.retained_actors = Some(Arc::new(std::mem::take(&mut world.actors)));
             world.retained_actor_revision = Some(cache_key);
+            // Bound settled-transform variants across camera cuts and seeks.
+            if self.retained_scene_3d_world_cache.len() >= 4 {
+                self.retained_scene_3d_world_cache.clear();
+            }
             self.retained_scene_3d_world_cache
                 .insert(cache_key, Arc::new(world_graph.clone()));
         }
@@ -23476,6 +23705,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
+        GraphScript, CompositeGroupConfig, scene_retained_world_key,
         CompoundRigTransform, EnvironmentTriangleSpatialIndex, HumanoidColliderProfile,
         HumanoidContactSample, KinematicControllerConfig, MotionLoomSceneRenderError,
         ResolvedSceneGround, ResolvedSceneSurface, SceneFrameRenderer, ScenePlatformPreviewSurface,
@@ -25168,6 +25398,91 @@ mod tests {
         assert!(graph_requires_scene_resource(&graph, "main"));
     }
 
+    fn native_visibility_fixture(count: usize) -> (GraphScript, CompositeGroupConfig) {
+        let models = (0..count).map(|i| format!(
+            r#"<Model id="m{i}" asset="box" position={{[{i},0,0]}} positionY={{curve("0:0,1:1,2:1")}} />"#
+        )).collect::<String>();
+        let source = format!(r##"<Graph fps={{24}} duration="3s" size={{[64,64]}}>
+<Assets><MaterialAsset id="paint" baseColor="#FFFFFF" /><GeometryAsset id="g"><Primitive shape="box" size={{[1,1,1]}} /></GeometryAsset><MeshAsset id="box" material="paint" geometry="g" /></Assets>
+<Scene id="stage"><Timeline><Track><Sequence duration="3s"><CompositeGroup space="3d" depth="true">
+<Camera3D id="first" position={{[0,0,5]}} /><Camera3D id="last" position={{[0,0,6]}} />
+{models}</CompositeGroup></Sequence></Track></Timeline></Scene><Present from="stage" /></Graph>"##);
+        let graph = parse_graph_script(&source).unwrap();
+        let SceneNode::Timeline(t) = &graph.scenes[0].children[0] else { panic!("timeline") };
+        let SceneNode::Track(t) = &t.children[0] else { panic!("track") };
+        let SceneNode::Sequence(t) = &t.children[0] else { panic!("sequence") };
+        let SceneNode::Group(g) = &t.children[0] else { panic!("group") };
+        let composite = g.composite.clone().unwrap();
+        (graph, composite)
+    }
+
+    #[test]
+    fn retained_native_island_tracks_moving_and_settled_transforms() {
+        let (graph, mut composite) = native_visibility_fixture(64);
+        let mut renderer = pollster::block_on(SceneFrameRenderer::new());
+        renderer.prepare_frame_caches(&graph);
+        let key = |c: &CompositeGroupConfig, t: f32| scene_retained_world_key(
+            1, c, (64,64), true, &renderer.model_asset_sources, t/3.0, t).unwrap();
+        assert_ne!(key(&composite, 0.0), key(&composite, 0.5));
+        assert_eq!(key(&composite, 1.1), key(&composite, 2.1));
+        let before = key(&composite, 2.1);
+        composite.active_camera = Some("first".into());
+        assert_eq!(before, key(&composite, 2.1), "camera selection must not rebuild actors");
+        assert!(before.is_some());
+        assert!(scene_retained_world_key(1, &composite, (64,64), false,
+            &renderer.model_asset_sources, 0.0, 0.0).unwrap().is_none());
+        if let Scene3DNode::Model(model) = &mut composite.nodes_3d[2] {
+            model.position = "@anchor".into();
+        }
+        assert!(key(&composite, 2.1).is_none(), "anchor dependencies retain their original evaluation");
+        if let Scene3DNode::Model(model) = &mut composite.nodes_3d[2] {
+            model.position = "[0,0,0]".into();
+            model.rig = Some("animated".into());
+        }
+        assert!(key(&composite, 2.1).is_none(), "explicit rigs retain the animation path");
+        if let Scene3DNode::Model(model) = &mut composite.nodes_3d[2] {
+            model.rig = None;
+            let mut binding: crate::scene::model::SceneMaterialBindingNode = serde_json::from_value(
+                serde_json::json!({"material":"paint","texture":"@scene:live"})).unwrap();
+            model.material_bindings.push(binding.clone());
+            assert!(key(&composite, 2.1).is_none(), "Scene textures need their per-frame overrides");
+            binding.texture = Some("scene:live".into());
+            if let Scene3DNode::Model(model) = &mut composite.nodes_3d[2] {
+                model.material_bindings[0] = binding;
+            }
+        }
+        assert!(key(&composite, 2.1).is_none());
+    }
+
+    #[test]
+    fn retained_native_world_reuses_geometry_and_last_camera_without_freezing_motion() {
+        let (graph, composite) = native_visibility_fixture(64);
+        let mut renderer = pollster::block_on(SceneFrameRenderer::new());
+        renderer.prepare_frame_caches(&graph);
+        let first = renderer.prepare_scene_3d_composite(&composite, 30, 24.0, 3000,
+            (64,64), 1.25/3.0, 1.25).unwrap().0;
+        let second = renderer.prepare_scene_3d_composite(&composite, 50, 24.0, 3000,
+            (64,64), 2.1/3.0, 2.1).unwrap().0;
+        assert_eq!(first.worlds[0].retained_actor_identity(), second.worlds[0].retained_actor_identity());
+        assert!(first.worlds[0].retained_actor_identity().is_some());
+        assert_eq!(second.worlds[0].actor_slice()[0].y, "1");
+        assert_eq!(first.worlds[0].camera, second.worlds[0].camera,
+            "a cache hit must select the same last default camera as cold lowering");
+        let moving = renderer.prepare_scene_3d_composite(&composite, 12, 24.0, 3000,
+            (64,64), 0.5/3.0, 0.5).unwrap().0;
+        assert_eq!(moving.worlds[0].actor_slice()[0].y, "0.5");
+        assert_ne!(first.worlds[0].retained_actor_identity(), moving.worlds[0].retained_actor_identity());
+    }
+
+    #[test]
+    fn small_native_islands_keep_existing_preparation() {
+        let (graph, composite) = native_visibility_fixture(27);
+        let mut renderer = pollster::block_on(SceneFrameRenderer::new());
+        renderer.prepare_frame_caches(&graph);
+        assert!(scene_retained_world_key(1, &composite, (64,64), true,
+            &renderer.model_asset_sources, 0.0, 0.0).unwrap().is_none());
+    }
+
     #[test]
     fn static_material_scene_has_a_stable_texture_cache_key() {
         let graph = parse_graph_script(
@@ -26170,6 +26485,77 @@ mod tests {
     fn scene_fog_color_preserves_canonical_rgb_order() {
         let color = super::scene_fog_color("#668FA8", 0.0, 0.0).unwrap();
         assert!(color[0] < color[1] && color[1] < color[2], "got {color:?}");
+    }
+
+    #[test]
+    fn per_light_and_filmic_light_colors_are_exact_srgb_while_legacy_is_preserved() {
+        let resolve = |shading: &str, shadow_mode: &str, color: &str| {
+            let source = format!(
+                r##"<Graph fps="24" duration="1s" size={{[64,64]}}>
+<RenderStyle id="style"><SurfaceStyle shading="{shading}" />
+<LightingStyle shadowMode="{shadow_mode}" /></RenderStyle>
+<Scene id="room" renderStyle="style"><Timeline><Track><Sequence duration="1s"><Rect width="1" height="1" /></Sequence></Track></Timeline></Scene>
+<Present from="room" /></Graph>"##
+            );
+            let graph = parse_graph_script(&source).unwrap();
+            let style = crate::api::resolve_scene_render_style(&graph, "room").unwrap();
+            let composite = crate::scene::model::CompositeGroupConfig {
+                render_style: Some(style),
+                space: "3d".into(),
+                composite_order: None,
+                depth: true,
+                format: "rgba16f".into(),
+                active_camera: None,
+                physics: None,
+                nodes_3d: [
+                    "directionalLight",
+                    "pointLight",
+                    "spotLight",
+                    "rectAreaLight",
+                ]
+                .into_iter()
+                .map(|kind| {
+                    serde_json::from_value(serde_json::json!({
+                        "kind": kind, "id": kind, "color": color
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+            };
+            super::scene_world_lighting(&composite, &HashMap::new(), 0.0, 0.0)
+                .unwrap()
+                .lights
+                .into_iter()
+                .map(|light| light.color)
+                .collect::<Vec<_>>()
+        };
+        for (shading, mode) in [
+            ("physical", "perLight"),
+            ("filmic_physical_v1", "legacy"),
+            ("pbr_npr_soft_v1", "legacy"),
+        ] {
+            assert_eq!(resolve(shading, mode, "#FF0000"), vec![[1.0, 0.0, 0.0]; 4]);
+            let colors = resolve(shading, mode, "#801020");
+            let expected = [0.2158605, 0.0051815167, 0.014443845];
+            for color in colors {
+                for axis in 0..3 {
+                    assert!(
+                        (color[axis] - expected[axis]).abs() < 1e-6,
+                        "{shading}/{mode}: {color:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            resolve("physical", "legacy", "#FF0000"),
+            vec![[0.0, 0.0, 1.0]; 4]
+        );
+        let old_mixed = [
+            (32.0_f32 / 255.0).powf(2.2),
+            (16.0_f32 / 255.0).powf(2.2),
+            (128.0_f32 / 255.0).powf(2.2),
+        ];
+        assert_eq!(resolve("physical", "legacy", "#801020"), vec![old_mixed; 4]);
     }
 
     #[test]

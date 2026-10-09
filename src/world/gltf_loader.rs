@@ -124,9 +124,16 @@ pub struct GlbMaterialData {
     pub roughness_factor: f32,
     pub specular_factor: f32,
     pub specular_color_factor: [f32; 3],
+    pub sheen: f32,
+    /// Linear RGB, unlike authored MaterialAsset.sheenColor.
+    pub sheen_color: [f32; 3],
+    pub sheen_roughness: f32,
+    pub clearcoat: f32,
+    pub clearcoat_roughness: f32,
     pub alpha_mode: GlbAlphaMode,
     pub alpha_cutoff: f32,
     pub transmission_factor: f32,
+    pub refraction_mode: crate::dsl::MaterialRefractionMode,
     pub ior: f32,
     pub thickness_factor: f32,
     pub attenuation_color: [f32; 3],
@@ -163,9 +170,15 @@ impl Default for GlbMaterialData {
             roughness_factor: 1.0,
             specular_factor: 1.0,
             specular_color_factor: [1.0, 1.0, 1.0],
+            sheen: 0.0,
+            sheen_color: [1.0; 3],
+            sheen_roughness: 0.5,
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.1,
             alpha_mode: GlbAlphaMode::Opaque,
             alpha_cutoff: 0.5,
             transmission_factor: 0.0,
+            refraction_mode: crate::dsl::MaterialRefractionMode::Slab,
             ior: 1.5,
             thickness_factor: 0.0,
             attenuation_color: [1.0; 3],
@@ -397,6 +410,7 @@ fn parse_glb_data(
             })
         })
         .transpose()?;
+    validate_material_layers(&chunks, path)?;
     let textures = read_textures(&chunks, path)?;
     let materials = read_materials(&chunks);
     let nodes = read_nodes(&chunks);
@@ -1011,6 +1025,95 @@ fn parse_glb_chunks(path: &Path, bytes: &[u8]) -> Result<GlbChunks, GlbLoadError
     })
 }
 
+fn validate_material_layers(chunks: &GlbChunks, path: &Path) -> Result<(), GlbLoadError> {
+    for (index, material) in chunks
+        .json
+        .get("materials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(mode) = material
+            .get("extras")
+            .and_then(|extras| extras.get("motionloom"))
+            .and_then(|extras| extras.get("refractionMode"))
+        {
+            if !matches!(mode.as_str(), Some("slab" | "solid")) {
+                return invalid(
+                    path,
+                    &format!(
+                        "Material {index} extras.motionloom.refractionMode must be slab or solid"
+                    ),
+                );
+            }
+        }
+        for (name, scalars, maps) in [
+            (
+                "KHR_materials_sheen",
+                &["sheenRoughnessFactor"][..],
+                &["sheenColorTexture", "sheenRoughnessTexture"][..],
+            ),
+            (
+                "KHR_materials_clearcoat",
+                &["clearcoatFactor", "clearcoatRoughnessFactor"][..],
+                &[
+                    "clearcoatTexture",
+                    "clearcoatRoughnessTexture",
+                    "clearcoatNormalTexture",
+                ][..],
+            ),
+        ] {
+            let Some(extension) = material.get("extensions").and_then(|e| e.get(name)) else {
+                continue;
+            };
+            if !extension.is_object() {
+                return invalid(path, &format!("material {index} {name} must be an object"));
+            }
+            for &map in maps {
+                if extension.get(map).is_some() {
+                    return invalid(
+                        path,
+                        &format!(
+                            "material {index} {name}.{map} is unsupported; use scalar/color factors"
+                        ),
+                    );
+                }
+            }
+            for &scalar in scalars {
+                if let Some(value) = extension.get(scalar) {
+                    if value
+                        .as_f64()
+                        .is_none_or(|v| !v.is_finite() || !(0.0..=1.0).contains(&v))
+                    {
+                        return invalid(
+                            path,
+                            &format!("material {index} {name}.{scalar} must be finite in 0..1"),
+                        );
+                    }
+                }
+            }
+            if let Some(color) = extension.get("sheenColorFactor") {
+                if color.as_array().is_none_or(|rgb| {
+                    rgb.len() != 3
+                        || rgb.iter().any(|v| {
+                            v.as_f64()
+                                .is_none_or(|v| !v.is_finite() || !(0.0..=1.0).contains(&v))
+                        })
+                }) {
+                    return invalid(
+                        path,
+                        &format!(
+                            "material {index} {name}.sheenColorFactor must be linear RGB in 0..1"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn read_textures(
     chunks: &GlbChunks,
     path: &Path,
@@ -1206,6 +1309,54 @@ fn read_materials(chunks: &GlbChunks) -> Vec<GlbMaterialData> {
                             .and_then(Value::as_f64)
                             .unwrap_or(0.0)
                             as f32;
+                    }
+                    out.refraction_mode = if material
+                        .get("extras")
+                        .and_then(|extras| extras.get("motionloom"))
+                        .and_then(|extras| extras.get("refractionMode"))
+                        .and_then(Value::as_str)
+                        == Some("solid")
+                    {
+                        crate::dsl::MaterialRefractionMode::Solid
+                    } else {
+                        crate::dsl::MaterialRefractionMode::Slab
+                    };
+                    if let Some(sheen) = material
+                        .get("extensions")
+                        .and_then(|extensions| extensions.get("KHR_materials_sheen"))
+                    {
+                        out.sheen_color = std::array::from_fn(|axis| {
+                            sheen
+                                .get("sheenColorFactor")
+                                .and_then(Value::as_array)
+                                .and_then(|color| color.get(axis))
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0) as f32
+                        });
+                        out.sheen = if out.sheen_color.iter().any(|value| *value > 0.0) {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        out.sheen_roughness = sheen
+                            .get("sheenRoughnessFactor")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0)
+                            .clamp(0.04, 1.0) as f32;
+                    }
+                    if let Some(coat) = material
+                        .get("extensions")
+                        .and_then(|extensions| extensions.get("KHR_materials_clearcoat"))
+                    {
+                        out.clearcoat = coat
+                            .get("clearcoatFactor")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0) as f32;
+                        out.clearcoat_roughness =
+                            coat.get("clearcoatRoughnessFactor")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0)
+                                .clamp(0.04, 1.0) as f32;
                     }
                     out.ior = material
                         .get("extensions")
@@ -2000,6 +2151,82 @@ fn invalid_err(path: &Path, message: &str) -> GlbLoadError {
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
+    #[test]
+    fn refraction_mode_extras_are_strict_and_default_to_slab() {
+        let mut chunks = super::GlbChunks {
+            version: 2,
+            json_len: 0,
+            bin_len: 0,
+            bin: Vec::new(),
+            json: serde_json::json!({"materials":[{}]}),
+        };
+        let path = std::path::Path::new("glass.gltf");
+        assert_eq!(
+            super::read_materials(&chunks)[0].refraction_mode,
+            crate::dsl::MaterialRefractionMode::Slab
+        );
+        for (mode, expected) in [
+            ("slab", crate::dsl::MaterialRefractionMode::Slab),
+            ("solid", crate::dsl::MaterialRefractionMode::Solid),
+        ] {
+            chunks.json["materials"][0]["extras"]["motionloom"]["refractionMode"] =
+                serde_json::json!(mode);
+            super::validate_material_layers(&chunks, path).unwrap();
+            assert_eq!(super::read_materials(&chunks)[0].refraction_mode, expected);
+        }
+        chunks.json["materials"][0]["extras"]["motionloom"]["refractionMode"] =
+            serde_json::json!("thick");
+        assert!(
+            super::validate_material_layers(&chunks, path)
+                .unwrap_err()
+                .to_string()
+                .contains("refractionMode")
+        );
+    }
+
+    #[test]
+    fn layer_extension_factors_are_linear_and_textured_layers_fail_explicitly() {
+        let mut chunks = super::GlbChunks {
+            version: 2,
+            json_len: 0,
+            bin_len: 0,
+            bin: Vec::new(),
+            json: serde_json::json!({"materials":[{"extensions":{
+                "KHR_materials_sheen":{"sheenColorFactor":[0.1,0.3,0.8],"sheenRoughnessFactor":0.7},
+                "KHR_materials_clearcoat":{"clearcoatFactor":0.6,"clearcoatRoughnessFactor":0.12}
+            }}]}),
+        };
+        super::validate_material_layers(&chunks, std::path::Path::new("layers.gltf")).unwrap();
+        let m = &super::read_materials(&chunks)[0];
+        assert_eq!(m.sheen, 1.0);
+        assert_eq!(m.sheen_color, [0.1, 0.3, 0.8]);
+        assert_eq!(m.sheen_roughness, 0.7);
+        assert_eq!(m.clearcoat, 0.6);
+        assert_eq!(m.clearcoat_roughness, 0.12);
+        for (extension, texture) in [
+            ("KHR_materials_sheen", "sheenColorTexture"),
+            ("KHR_materials_sheen", "sheenRoughnessTexture"),
+            ("KHR_materials_clearcoat", "clearcoatTexture"),
+            ("KHR_materials_clearcoat", "clearcoatRoughnessTexture"),
+            ("KHR_materials_clearcoat", "clearcoatNormalTexture"),
+        ] {
+            chunks.json["materials"][0]["extensions"][extension][texture] =
+                serde_json::json!({"index":0});
+            let err = super::validate_material_layers(&chunks, std::path::Path::new("layers.gltf"))
+                .unwrap_err();
+            assert!(err.to_string().contains(texture));
+            chunks.json["materials"][0]["extensions"][extension]
+                .as_object_mut()
+                .unwrap()
+                .remove(texture);
+        }
+        chunks.json["materials"][0]["extensions"]["KHR_materials_clearcoat"]["clearcoatFactor"] =
+            serde_json::json!(2);
+        assert!(
+            super::validate_material_layers(&chunks, std::path::Path::new("layers.gltf")).is_err()
+        );
+    }
+
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use serde_json::json;
 
@@ -2074,8 +2301,9 @@ mod tests {
 
     #[test]
     fn loads_example_glb_metadata_when_present() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../anica/examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../anica/examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb",
+        );
         if !path.exists() {
             return;
         }
@@ -2087,8 +2315,9 @@ mod tests {
 
     #[test]
     fn loads_example_glb_mesh_data_when_present() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../anica/examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../anica/examples/motionloom/sample_assets/glb/mammuthus_primigenius_blumbach.glb",
+        );
         if !path.exists() {
             return;
         }

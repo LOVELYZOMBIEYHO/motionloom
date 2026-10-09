@@ -17,6 +17,9 @@ UV generation belongs only to `GeometryAsset/UV`. Material texture scale,
 offset, and rotation are sampling controls. Model and material IDs provide
 stable targets for scene animation references.
 
+Optional [material sheen and clearcoat](MATERIAL_LAYERS.md) add fabric and varnish
+lobes without changing geometry or the existing texture mapping contracts.
+
 ## Canonical structure
 
 ```xml

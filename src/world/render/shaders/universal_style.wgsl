@@ -197,18 +197,19 @@ fn preview_screen_space_reflection(radiance: vec4<f32>, uv: vec2<f32>) -> vec4<f
     let center_depth = textureLoad(scene_depth, pixel, 0);
     if (center_depth <= 0.000001) { return radiance; }
     let material = textureLoad(preview_material, pixel, 0);
+    let indirect_specular = textureLoad(preview_reflection, pixel, 0);
+    if (indirect_specular.a < 0.0) { return radiance; }
     let roughness = material.r;
-    let metallic = material.g;
-    if (roughness > 0.92) { return radiance; }
+    // Broad lobes retain stable filtered probes rather than spending a long
+    // screen query on a low-confidence, single-ray approximation.
+    if (roughness >= 0.75 || indirect_specular.a <= 0.00001) { return radiance; }
 
     let world = preview_world_position(uv, center_depth);
     var normal = preview_decode_normal(textureLoad(preview_gbuffer, pixel, 0).xy);
-    let incident = normalize(world - lighting.camera0.xyz);
+    let incident = select(normalize(world - lighting.camera0.xyz),
+        lighting.camera3.xyz, lighting.camera3.w < 0.0);
     if (dot(normal, incident) > 0.0) { normal = -normal; }
     let reflected = normalize(reflect(incident, normal));
-    let grazing = 1.0 - clamp(abs(dot(normal, -incident)), 0.0, 1.0);
-    if (grazing < 0.08) { return radiance; }
-
     let center_distance = view_distance(center_depth);
     let stride = max(center_distance * 0.025, 0.018);
     let max_steps = u32(clamp(lighting.preview2.y, 1.0, 40.0));
@@ -222,9 +223,10 @@ fn preview_screen_space_reflection(radiance: vec4<f32>, uv: vec2<f32>) -> vec4<f
         let relative = ray_world - lighting.camera0.xyz;
         let ray_z = dot(relative, lighting.camera3.xyz);
         if (ray_z <= lighting.camera1.w) { continue; }
+        let projection_distance = select(ray_z, 1.0, lighting.camera3.w < 0.0);
         let ray_uv = vec2<f32>(
-            0.5 + dot(relative, lighting.camera1.xyz) * lighting.camera0.w / (ray_z * dimensions.x),
-            0.5 - dot(relative, lighting.camera2.xyz) * lighting.camera0.w / (ray_z * dimensions.y)
+            0.5 + dot(relative, lighting.camera1.xyz) * lighting.camera0.w / (projection_distance * dimensions.x),
+            0.5 - dot(relative, lighting.camera2.xyz) * lighting.camera0.w / (projection_distance * dimensions.y)
         ) + lighting.preview1.xy / dimensions;
         if (any(ray_uv <= vec2<f32>(0.002)) || any(ray_uv >= vec2<f32>(0.998))) { break; }
         let ray_pixel = vec2<i32>(ray_uv * dimensions);
@@ -243,9 +245,10 @@ fn preview_screen_space_reflection(radiance: vec4<f32>, uv: vec2<f32>) -> vec4<f
                     let middle_world = world + reflected * middle;
                     let middle_relative = middle_world - lighting.camera0.xyz;
                     let middle_z = dot(middle_relative, lighting.camera3.xyz);
+                    let middle_projection_distance = select(middle_z, 1.0, lighting.camera3.w < 0.0);
                     refined_uv = vec2<f32>(
-                        0.5 + dot(middle_relative, lighting.camera1.xyz) * lighting.camera0.w / (middle_z * dimensions.x),
-                        0.5 - dot(middle_relative, lighting.camera2.xyz) * lighting.camera0.w / (middle_z * dimensions.y)
+                        0.5 + dot(middle_relative, lighting.camera1.xyz) * lighting.camera0.w / (middle_projection_distance * dimensions.x),
+                        0.5 - dot(middle_relative, lighting.camera2.xyz) * lighting.camera0.w / (middle_projection_distance * dimensions.y)
                     ) + lighting.preview1.xy / dimensions;
                     let refined_pixel = vec2<i32>(clamp(refined_uv * dimensions,
                         vec2<f32>(0.0), dimensions - 1.0));
@@ -259,6 +262,17 @@ fn preview_screen_space_reflection(radiance: vec4<f32>, uv: vec2<f32>) -> vec4<f
                 }
                 let hit_pixel = vec2<i32>(clamp(refined_uv * dimensions,
                     vec2<f32>(0.0), dimensions - 1.0));
+                let hit_depth = textureLoad(scene_depth, hit_pixel, 0);
+                let hit_distance = view_distance(hit_depth);
+                let refined_world = world + reflected * high;
+                let refined_z = dot(refined_world - lighting.camera0.xyz, lighting.camera3.xyz);
+                // A depth crossing beyond the surface's finite thickness is
+                // missing evidence, not a reflection of the foreground object.
+                if (length((refined_uv - uv) * dimensions) < 1.5) {
+                    previous_distance = ray_distance;
+                    continue;
+                }
+                if (hit_depth <= 0.000001 || abs(refined_z - hit_distance) > thickness * 1.5) { break; }
                 let hit_normal = preview_decode_normal(textureLoad(preview_gbuffer, hit_pixel, 0).xy);
                 if (dot(hit_normal, -reflected) <= 0.03) { break; }
                 let blur = (0.5 + roughness * 2.5) / dimensions;
@@ -274,9 +288,11 @@ fn preview_screen_space_reflection(radiance: vec4<f32>, uv: vec2<f32>) -> vec4<f
         }
         previous_distance = ray_distance;
     }
-    let surface_response = pow(1.0 - roughness, 2.0) * mix(0.10, 0.32, metallic);
-    let reflection_weight = confidence * grazing * surface_response;
-    return mix(radiance, hit, reflection_weight);
+    let reflection_weight = clamp(confidence * pow(1.0 - roughness, 2.0), 0.0, 1.0);
+    // Replace only the indirect specular lobe. Diffuse/direct illumination
+    // stays intact; offscreen rays leave the room/global fallback unchanged.
+    let result = radiance.rgb + (hit.rgb * indirect_specular.a - indirect_specular.rgb) * reflection_weight;
+    return vec4<f32>(max(result,vec3<f32>(0.0)),radiance.a);
 }
 
 fn preview_temporal_resolve(
@@ -303,12 +319,20 @@ fn preview_temporal_resolve(
     let speed_pixels = length(physical_velocity * dimensions);
     let dimensions_i = textureDimensions(preview_material);
     let pixel = vec2<i32>(clamp(sample_uv * vec2<f32>(dimensions_i), vec2<f32>(0.0), vec2<f32>(dimensions_i) - 1.0));
+    // Transparent layers have no matching motion/depth identity in the opaque
+    // G-buffer. Their dedicated marker prevents trusting the surface behind.
+    let path_marker = textureLoad(preview_reflection, pixel, 0).a;
+    if (abs(path_marker + 0.75) < 0.01) { return current; }
     let previous_surface_uv = previous_uv + lighting.preview1.zw / dimensions;
     let previous_pixel = vec2<i32>(clamp(
         previous_surface_uv * vec2<f32>(dimensions_i),
         vec2<f32>(0.0),
         vec2<f32>(dimensions_i) - 1.0
     ));
+    // A newly uncovered opaque surface can share the old underlay's depth and
+    // normal. Reject the previous glass marker before accepting its color.
+    let previous_path_marker = textureLoad(history_reflection, previous_pixel, 0).a;
+    if (abs(previous_path_marker + 0.75) < 0.01) { return current; }
 
     // Validate reprojected history against the actual previous surface. This
     // is the decisive rejection step at moving silhouettes and disocclusions.

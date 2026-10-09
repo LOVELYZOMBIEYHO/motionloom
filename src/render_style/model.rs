@@ -156,6 +156,14 @@ pub struct LightingStyleNode {
     pub ambient_intensity: Option<f32>,
     pub ambient_color: Option<String>,
     pub shadow_style: Option<String>,
+    /// Opt into independent visibility for each authored light.
+    pub shadow_mode: Option<String>,
+    /// Hybrid reflections are always active; this bounds recursive mirror paths.
+    pub reflection_bounces: Option<u32>,
+}
+
+pub(crate) const fn default_reflection_bounces() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -217,6 +225,10 @@ pub struct ResolvedSceneRenderStyle {
     pub ambient_intensity: f32,
     pub ambient_color: [f32; 3],
     pub hard_shadows: bool,
+    #[serde(default)]
+    pub per_light_shadows: bool,
+    #[serde(default = "default_reflection_bounces")]
+    pub reflection_bounces: u32,
     pub lighting_preset: Option<String>,
     pub post: PostStyleNode,
     /// Explicit nodes own their complete setting group, including defaults.

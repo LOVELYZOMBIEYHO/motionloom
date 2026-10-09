@@ -634,6 +634,15 @@ const fn default_occlusion_channel() -> MaterialTextureChannel {
     MaterialTextureChannel::R
 }
 
+/// Slabs use authored thickness; solids trace the actual closed geometry exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaterialRefractionMode {
+    #[default]
+    Slab,
+    Solid,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaterialAssetNode {
@@ -676,6 +685,17 @@ pub struct MaterialAssetNode {
     pub emissive: [f32; 3],
     pub emissive_strength: f32,
     pub specular: f32,
+    /// Optional fabric and varnish lobes. Colors are authored in sRGB.
+    #[serde(default)]
+    pub sheen: f32,
+    #[serde(default = "default_material_attenuation_color")]
+    pub sheen_color: [f32; 3],
+    #[serde(default = "default_material_sheen_roughness")]
+    pub sheen_roughness: f32,
+    #[serde(default)]
+    pub clearcoat: f32,
+    #[serde(default = "default_material_clearcoat_roughness")]
+    pub clearcoat_roughness: f32,
     pub double_sided: bool,
     #[serde(default = "default_material_receive_caustics")]
     pub receive_caustics: bool,
@@ -685,6 +705,8 @@ pub struct MaterialAssetNode {
     /// from alpha coverage used by decals, smoke, and fades.
     #[serde(default)]
     pub transmission: f32,
+    #[serde(default)]
+    pub refraction_mode: MaterialRefractionMode,
     #[serde(default = "default_material_ior")]
     pub ior: f32,
     #[serde(default)]
@@ -705,6 +727,14 @@ pub struct MaterialAssetNode {
 
 fn default_material_ior() -> f32 {
     1.5
+}
+
+fn default_material_sheen_roughness() -> f32 {
+    0.5
+}
+
+fn default_material_clearcoat_roughness() -> f32 {
+    0.1
 }
 
 fn default_material_receive_caustics() -> bool {
@@ -6199,11 +6229,17 @@ fn parse_material_asset(tag: &str, line: usize) -> Result<MaterialAssetNode, Gra
         "emissiveTexture",
         "emissiveStrength",
         "specular",
+        "sheen",
+        "sheenColor",
+        "sheenRoughness",
+        "clearcoat",
+        "clearcoatRoughness",
         "doubleSided",
         "receiveCaustics",
         "alphaMode",
         "alphaCutoff",
         "transmission",
+        "refractionMode",
         "ior",
         "thickness",
         "attenuationColor",
@@ -6295,6 +6331,10 @@ fn parse_material_asset(tag: &str, line: usize) -> Result<MaterialAssetNode, Gra
         .map(|value| parse_primitive_color(&value, &id, line))
         .transpose()?
         .unwrap_or([1.0; 4]);
+    let sheen_rgba = attr_value(tag, "sheenColor")
+        .map(|value| parse_primitive_color(&value, &id, line))
+        .transpose()?
+        .unwrap_or([1.0; 4]);
     if attr_value(tag, "mapping").is_some() {
         return Err(GraphParseError { line, message: "MaterialAsset.mapping has been removed. Declare UV on GeometryAsset; use mode=box for former box/triplanar projection.".into() });
     }
@@ -6312,6 +6352,22 @@ fn parse_material_asset(tag: &str, line: usize) -> Result<MaterialAssetNode, Gra
     let depth_write = attr_value(tag, "depthWrite")
         .map(|value| strip_wrappers(&value).to_ascii_lowercase())
         .unwrap_or_else(default_material_depth_write);
+    let refraction_mode = match attr_value(tag, "refractionMode")
+        .map(|value| strip_wrappers(&value).to_string())
+        .as_deref()
+        .unwrap_or("slab")
+    {
+        "slab" => MaterialRefractionMode::Slab,
+        "solid" => MaterialRefractionMode::Solid,
+        value => {
+            return Err(GraphParseError {
+                line,
+                message: format!(
+                    "MaterialAsset \"{id}\" refractionMode=\"{value}\" is invalid. Use slab or solid."
+                ),
+            });
+        }
+    };
     if !matches!(depth_write.as_str(), "auto" | "true" | "false") {
         return Err(GraphParseError {
             line,
@@ -6391,11 +6447,17 @@ fn parse_material_asset(tag: &str, line: usize) -> Result<MaterialAssetNode, Gra
         emissive: [emissive_rgba[0], emissive_rgba[1], emissive_rgba[2]],
         emissive_strength: scalar("emissiveStrength", 1.0, 0.0, 64.0)?,
         specular: scalar("specular", 1.0, 0.0, 2.0)?,
+        sheen: scalar("sheen", 0.0, 0.0, 1.0)?,
+        sheen_color: [sheen_rgba[0], sheen_rgba[1], sheen_rgba[2]],
+        sheen_roughness: scalar("sheenRoughness", 0.5, 0.04, 1.0)?,
+        clearcoat: scalar("clearcoat", 0.0, 0.0, 1.0)?,
+        clearcoat_roughness: scalar("clearcoatRoughness", 0.1, 0.04, 1.0)?,
         double_sided,
         receive_caustics,
         alpha_mode,
         alpha_cutoff: scalar("alphaCutoff", 0.5, 0.0, 1.0)?,
         transmission: scalar("transmission", 0.0, 0.0, 1.0)?,
+        refraction_mode,
         ior: scalar("ior", 1.5, 1.0, 3.0)?,
         thickness: scalar("thickness", 0.0, 0.0, 1000.0)?,
         attenuation_color: [
@@ -9853,6 +9915,86 @@ pub(crate) fn strip_wrappers(raw: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refraction_mode_is_typed_literal_and_defaults_to_slab() {
+        use super::MaterialRefractionMode::{Slab, Solid};
+        let slab =
+            super::parse_material_asset(r#"<MaterialAsset id="glass" transmission="0.9" />"#, 1)
+                .unwrap();
+        assert_eq!(slab.refraction_mode, Slab);
+        let solid = super::parse_material_asset(
+            r#"<MaterialAsset id="glass" transmission="0.9" refractionMode="solid" />"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(solid.refraction_mode, Solid);
+        let encoded = serde_json::to_value(&solid).unwrap();
+        assert_eq!(encoded["refractionMode"], "solid");
+        assert_eq!(
+            serde_json::from_value::<super::MaterialAssetNode>(encoded).unwrap(),
+            solid
+        );
+        let mut old = serde_json::to_value(&slab).unwrap();
+        old.as_object_mut().unwrap().remove("refractionMode");
+        assert_eq!(
+            serde_json::from_value::<super::MaterialAssetNode>(old)
+                .unwrap()
+                .refraction_mode,
+            Slab
+        );
+        for mode in ["thick", "Solid", "", "$time.norm", "curve(\"0:0,1:1\")"] {
+            let tag = format!("<MaterialAsset id=\"bad\" refractionMode=\"{mode}\" />");
+            assert!(super::parse_material_asset(&tag, 1).is_err(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn material_layers_are_opt_in_typed_and_strict() {
+        let default = super::parse_material_asset(r#"<MaterialAsset id="old" />"#, 1).unwrap();
+        assert_eq!(default.sheen, 0.0);
+        assert_eq!(default.sheen_color, [1.0; 3]);
+        assert_eq!(default.sheen_roughness, 0.5);
+        assert_eq!(default.clearcoat, 0.0);
+        assert_eq!(default.clearcoat_roughness, 0.1);
+        let parsed = super::parse_material_asset(r##"<MaterialAsset id="cloth" sheen="0.6" sheenColor="#804020" sheenRoughness="0.8" clearcoat="0.2" clearcoatRoughness="0.04" />"##, 1).unwrap();
+        assert_eq!(parsed.sheen, 0.6);
+        assert_eq!(
+            parsed.sheen_color,
+            [128.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0]
+        );
+        assert_eq!(parsed.sheen_roughness, 0.8);
+        assert_eq!(parsed.clearcoat, 0.2);
+        for attrs in [
+            "sheen=\"1.1\"",
+            "sheen=\"NaN\"",
+            "clearcoat=\"-0.1\"",
+            "sheenRoughness=\"0\"",
+            "clearcoatRoughness=\"0.03\"",
+            "sheenRoughness=\"inf\"",
+            "sheenColor=\"white\"",
+            "clearCoat=\"0.2\"",
+            "sheen=\"$time.norm\"",
+        ] {
+            assert!(
+                super::parse_material_asset(&format!("<MaterialAsset id=\"bad\" {attrs} />"), 1)
+                    .is_err(),
+                "{attrs}"
+            );
+        }
+        let mut old_json = serde_json::to_value(&default).unwrap();
+        for key in [
+            "sheen",
+            "sheenColor",
+            "sheenRoughness",
+            "clearcoat",
+            "clearcoatRoughness",
+        ] {
+            old_json.as_object_mut().unwrap().remove(key);
+        }
+        let restored: super::MaterialAssetNode = serde_json::from_value(old_json).unwrap();
+        assert_eq!(restored, default);
+    }
+
     use super::{
         ColorSpace, GraphApplyScope, GraphAssetKind, GraphAssetSource, GraphParseError, InputType,
         PassCache, PassKind, PassRole, PassTransitionClips, PassTransitionEasing,

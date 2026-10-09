@@ -63,10 +63,16 @@ path. No encoding or color-transform implementation is duplicated in the CLI.
 - `--f-stop`, `--focus`, `--focal-length`, `--dof` and `--no-dof` override only
   supplied camera fields. `--focus` uses scene units.
 - `--mips` enables Weaver texture mipmaps.
-- `--transmission-stopgap` explicitly enables the existing temporary transmission
-  fallback. It is not physical glass/refraction.
+- Physical dielectric reflection/refraction and material layers are enabled by
+  default. `refractionMode="slab"` uses authored sheet thickness; `"solid"` traces
+  actual closed-geometry entry/exit paths. See [hybrid/glass](HYBRID_REFLECTIONS.md).
+- `--transmission-stopgap` explicitly disables physical glass and selects an
+  opaque/alpha PBR migration fallback.
 - Samples must be `2..1000000`. `--samples N` sets both minimum and maximum to `N`;
   the Rust API's adaptive quality presets remain available to API callers.
+  Native rendering uses the Ultra path-depth preset. GPU work completes in
+  groups of at most eight tiles and four samples per pixel before readback;
+  this limits submission duration without lowering the requested sample count.
 - `--out` names an output root directory. Without it, the CLI searches upward
   from the current working directory for the existing workspace output location,
   falling back to `.render-output/weaver` in that working directory.
@@ -80,6 +86,11 @@ without needing `--frames` or `--size`.
 Progress goes to stderr and reports frame, tile, sample round and elapsed time.
 Sample changes are reported even when no whole tile has finished. Reports and
 actual output paths go to stdout.
+
+Reducing total samples changes the number of rounds, not the cost of the first
+round. High-resolution dense scenes therefore use bounded tile groups rather
+than placing a complete frame into a single long GPU command. Each group writes
+durable checkpoints; cancellation and resume can occur within a sample round.
 
 The first `Ctrl+C` requests cancellation using the existing API token. An
 in-flight GPU batch or audio-preparation/validation step may need to finish before

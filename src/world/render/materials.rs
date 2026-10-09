@@ -91,9 +91,49 @@ pub(super) fn build_mips(
     levels
 }
 
+pub(super) fn material_layer_params(
+    material: Option<&crate::world::gltf_loader::GlbMaterialData>,
+) -> ([f32; 4], [f32; 4]) {
+    material.map_or(([0.0, 0.0, 0.0, 0.5], [0.0, 0.1, 1.0, 1.0]), |m| {
+        (
+            [
+                m.sheen_color[0].clamp(0.0, 1.0) * m.sheen.clamp(0.0, 1.0),
+                m.sheen_color[1].clamp(0.0, 1.0) * m.sheen.clamp(0.0, 1.0),
+                m.sheen_color[2].clamp(0.0, 1.0) * m.sheen.clamp(0.0, 1.0),
+                m.sheen_roughness.clamp(0.04, 1.0),
+            ],
+            [
+                m.clearcoat.clamp(0.0, 1.0),
+                m.clearcoat_roughness.clamp(0.04, 1.0),
+                1.0,
+                1.0,
+            ],
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn material_layer_packing_keeps_linear_color_and_independent_roughness() {
+        let m = crate::world::gltf_loader::GlbMaterialData {
+            sheen: 0.5,
+            sheen_color: [0.2, 0.4, 0.8],
+            sheen_roughness: 0.7,
+            clearcoat: 0.8,
+            clearcoat_roughness: 0.12,
+            ..Default::default()
+        };
+        assert_eq!(
+            material_layer_params(Some(&m)),
+            ([0.1, 0.2, 0.4, 0.7], [0.8, 0.12, 1.0, 1.0])
+        );
+        assert_eq!(
+            material_layer_params(None),
+            material_layer_params(Some(&Default::default()))
+        );
+    }
     #[test]
     fn transparent_color_does_not_bleed_into_visible_mips() {
         let pixels = [255, 0, 0, 255, 0, 0, 255, 0];

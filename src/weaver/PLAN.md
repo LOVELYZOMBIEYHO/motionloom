@@ -134,8 +134,10 @@ sampling interfaces stabilize; do not create empty placeholder folders.
    Native 3840x2160/frame 240/16-spp execution completed in 902.06 seconds on M2,
    with raw and denoised images visually inspected. Nearly all pixels reached
    the sample cap; higher-sample convergence remains open.
-5. **Production closure:** transmission/absorption, complete light support,
-   normal/ray-footprint filtering, material energy tests and artifact reduction.
+5. **Production closure:** dielectric reflection/refraction, solid absorption
+   and clearcoat/Charlie sheen are implemented with analytic GPU fixtures.
+   Complete light support, bent-connector caustic sampling, broader material
+   energy/temporal acceptance and artifact reduction remain open.
 6. **Job robustness:** verify cancellation/resume and corruption handling,
    performance profiling, device-specific memory budgeting and frame caches.
 7. **Animation:** fixed eight-second S89 camera sequence; inspect temporal stability,

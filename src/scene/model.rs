@@ -973,6 +973,8 @@ pub enum Scene3DNode {
     Camera(SceneCamera3DNode),
     AtmosphereFog(SceneAtmosphereFogNode),
     EnvironmentLight(SceneEnvironmentLightNode),
+    BakedLighting(SceneBakedLightingNode),
+    PlanarReflection(ScenePlanarReflectionNode),
     DirectionalLight(SceneDirectionalLightNode),
     PointLight(ScenePointLightNode),
     SpotLight(SceneSpotLightNode),
@@ -986,6 +988,26 @@ pub enum Scene3DNode {
     RigidBody(crate::simulation::model::RigidBodyNode),
     Anchor(SceneAnchor3DNode),
     Debug(SceneEnvironmentDebugNode),
+}
+
+/// Camera-independent two-state irradiance and local reflection asset binding.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneBakedLightingNode {
+    pub id: Option<String>,
+    pub src: String,
+    pub blend: String,
+    pub intensity: String,
+    pub specular_intensity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenePlanarReflectionNode {
+    pub id: Option<String>,
+    pub target: String,
+    pub resolution_scale: String,
+    pub clip_bias: String,
 }
 
 /// Deterministic surface placement keeps large authored environments compact
@@ -1301,6 +1323,9 @@ pub struct SceneDirectionalLightNode {
     pub cast_shadow: bool,
     #[serde(default = "default_scene_shadow_strength")]
     pub shadow_strength: String,
+    /// Literal emitter diameter in degrees; zero retains a delta light.
+    #[serde(default)]
+    pub angular_diameter: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -1317,6 +1342,8 @@ pub struct ScenePointLightNode {
     pub range: String,
     #[serde(default)]
     pub cast_shadow: bool,
+    #[serde(default)]
+    pub source_radius: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -1339,6 +1366,8 @@ pub struct SceneSpotLightNode {
     pub outer_cone: String,
     #[serde(default)]
     pub cast_shadow: bool,
+    #[serde(default)]
+    pub source_radius: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -1357,6 +1386,8 @@ pub struct SceneRectAreaLightNode {
     pub width: String,
     #[serde(default = "default_scene_area_size")]
     pub height: String,
+    #[serde(default)]
+    pub cast_shadow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

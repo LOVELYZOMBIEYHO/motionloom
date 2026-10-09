@@ -128,6 +128,8 @@ pub fn resolve_scene_render_style(
             .transpose()?
             .unwrap_or([1.0; 3]),
         hard_shadows: l.shadow_style.as_deref() == Some("hard"),
+        per_light_shadows: l.shadow_mode.as_deref() == Some("perLight"),
+        reflection_bounces: l.reflection_bounces.unwrap_or(default_reflection_bounces()),
         lighting_preset: l.preset.clone(),
         post: style.and_then(|s| s.post.clone()).unwrap_or_default(),
         overrides: vec![],

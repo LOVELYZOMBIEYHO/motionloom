@@ -4,10 +4,17 @@
 
 //! Native renderer regression tests grouped outside the production module.
 
-mod params_layout;
-mod render_regression;
-mod shader_validation;
+mod glass_planar;
+mod glass_realtime_reflection;
+mod hybrid_glass;
 mod orthographic;
+mod params_layout;
+mod physical_realtime;
+mod planar_glass_cache;
+mod render_regression;
+mod rough_reflections;
+mod secondary_shadows;
+mod shader_validation;
 fn test_gpu_vertex(x: f32) -> super::GpuWorldVertex {
     super::GpuWorldVertex {
         outline_normal: [0.0, 0.0, 1.0],
@@ -175,7 +182,7 @@ fn fog_and_optics_pack_into_distinct_gpu_uniform_slots() {
     assert_eq!(params.fog3, [-4.0, 0.0, -8.0, 1.0]);
     assert_eq!(params.fog4, [4.0, 6.0, -1.0, 0.75]);
     assert_eq!(params.optics0, camera.optics);
-    assert_eq!(super::pack_gpu_world_lighting(params).len(), 1168);
+    assert_eq!(super::pack_gpu_world_lighting(params).len(), 1360);
 }
 
 #[test]
@@ -545,6 +552,61 @@ fn temporal_signature_changes_with_render_style_controls() {
     let mut changed = base;
     changed.universal_tone[1] = 1.25;
     assert_ne!(signature, super::preview_temporal_style_signature(&changed));
+    for axis in [0, 1, 3] {
+        let mut changed = base;
+        changed.reflection0[axis] += 1.0;
+        assert_ne!(signature, super::preview_temporal_style_signature(&changed));
+    }
+    let mut revised = base;
+    revised.reflection0[2] = 1.0;
+    assert_eq!(signature, super::preview_temporal_style_signature(&revised));
+}
+
+#[test]
+fn display_canvas_inverse_cancels_invertible_scene_grading() {
+    let camera = super::PerspectiveCameraView {
+        orthographic: false,
+        eye: [0.0, 1.0, -4.0],
+        right: [1.0, 0.0, 0.0],
+        up: [0.0, 1.0, 0.0],
+        forward: [0.0, 0.0, 1.0],
+        focal_px: 900.0,
+        near: 0.1,
+        far: 100.0,
+        aspect: 16.0 / 9.0,
+        optics: [0.0; 4],
+    };
+    let mut lighting = super::GpuWorldLightingParams::from_world(
+        &super::WorldLighting::default(), camera, false, 1,
+    );
+    for mode in [0.0, 1.0, 2.0] {
+        lighting.color0 = [1.6, 7800.0, 1.15, mode];
+        lighting.surface1[3] = 0.85;
+        let expected = [0.42_f32, 0.55, 0.67];
+        let inverse = super::inverse_scene_display(expected, &lighting);
+        // Apply the actual final-resolve transfer order to the inverse canvas.
+        // Nonsingular, unclipped grades must roundtrip for each scalar curve.
+        let temperature = ((lighting.color0[1] - 6500.0) / 6500.0).clamp(-0.75, 0.75);
+        let white_balance = [1.0 + temperature * 0.16, 1.0, 1.0 - temperature * 0.16];
+        let contrasted: [f32; 3] = std::array::from_fn(|i| {
+            (inverse[i].max(0.0) * lighting.color0[0] * white_balance[i] - 0.18)
+                * lighting.color0[2] + 0.18
+        });
+        let luma = contrasted[0] * 0.2126 + contrasted[1] * 0.7152 + contrasted[2] * 0.0722;
+        for i in 0..3 {
+            let graded = (luma * (1.0 - lighting.surface1[3])
+                + contrasted[i] * lighting.surface1[3]).max(0.0);
+            let mapped = if mode > 1.5 {
+                (graded * (2.51 * graded + 0.03)
+                    / (graded * (2.43 * graded + 0.59) + 0.14)).clamp(0.0, 1.0)
+            } else if mode > 0.5 {
+                graded / (1.0 + graded)
+            } else {
+                graded
+            };
+            assert!((mapped.powf(1.0 / 2.2) - expected[i]).abs() < 0.00001);
+        }
+    }
 }
 
 #[test]
@@ -640,6 +702,8 @@ fn unavailable_multisample_methods_report_a_spatial_fallback() {
         ambient_intensity: 1.0,
         ambient_color: [1.0; 3],
         hard_shadows: false,
+        per_light_shadows: false,
+        reflection_bounces: 1,
         lighting_preset: None,
         post: Default::default(),
         overrides: Vec::new(),
@@ -689,7 +753,9 @@ fn world_pbr_shader_preserves_clip_w_for_perspective_correct_uvs() {
         super::WGPU_WORLD_SHADER
             .contains("let clip_w = select(view_z, 1.0, params.camera3.w > 0.5);")
     );
-    assert!(super::WGPU_WORLD_SHADER.contains("out.pos = vec4<f32>(clip_x, clip_y, clip_z, clip_w);"));
+    assert!(
+        super::WGPU_WORLD_SHADER.contains("out.pos = vec4<f32>(clip_x, clip_y, clip_z, clip_w);")
+    );
     assert!(!super::WGPU_WORLD_SHADER.contains("out.pos = vec4<f32>(ndc_x, ndc_y, ndc_z, 1.0);"));
 }
 
@@ -1879,3 +1945,5 @@ fn material_binding_rejects_case_insensitive_duplicates() {
         .expect_err("one imported material cannot have duplicate bindings");
     assert!(error.to_string().contains("Duplicate MaterialBinding"));
 }
+
+mod baked_lighting_contract;

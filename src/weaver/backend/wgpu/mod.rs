@@ -287,6 +287,88 @@ impl Gpu {
         self.read(tile)
     }
 
+    /// Execute a deterministic optical probe against the same WGSL helpers as
+    /// the renderer. It verifies Fresnel/Snell/TIR without sampling variance.
+    #[cfg(test)]
+    pub(crate) fn optical_contract_probe(
+        &self,
+        params: &CameraParams,
+    ) -> Result<Vec<f32>, WeaverError> {
+        let source = format!(
+            "{}\n{}",
+            include_str!("shaders/path_trace.wgsl"),
+            r#"
+@compute @workgroup_size(1,1)
+fn optical_contract_probe() {
+    var s=surface(Hit(1.0,bitcast<u32>(p.v[1].x),vec2<f32>(0)),vec3<f32>(0,0,-1));
+    s.eta_i=1.0;s.eta_t=1.52;s.thickness=1.0;s.sigma=vec3<f32>(0);
+    let f=dielectric_fresnel(1.0,1.0,1.52);
+    let transparent=slab_reflection(s,1.0)+slab_transmission(s,1.0);
+    let incident=vec3<f32>(0.8660254038,0,-0.5);
+    let internal=refract(incident,vec3<f32>(0,0,1),1.0/1.52);
+    let emergent=refract(internal,vec3<f32>(0,0,1),1.52);
+    film[0].sum=vec4<f32>(f,dielectric_fresnel(0.2,1.52,1.0),transparent.x,internal.x);
+    s.sigma=vec3<f32>(0.69314718056,0,0);
+    let absorbing=slab_reflection(s,1.0)+slab_transmission(s,1.0);
+    film[1].sum=vec4<f32>(emergent.x,absorbing.x,slab_transmission(s,1.0).x,exp(-s.sigma.x*0.3));
+}
+"#
+        );
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Weaver optical contract"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Weaver optical probe"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("optical_contract_probe"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let tile = self.tile(2, &vec![0; 2 * FILM_BYTES_PER_PIXEL]);
+        self.queue.write_buffer(&tile.uniform, 0, &bytes(params));
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Weaver optical probe bindings"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: tile.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.scene.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.textures.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: tile.film.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        if let Some(error) = pollster::block_on(self.device.pop_error_scope()) {
+            return Err(WeaverError::Gpu(error.to_string()));
+        }
+        self.read(&tile).map(|raw| floats(&raw))
+    }
+
     /// Submit one sample batch without waiting for the GPU.
     ///
     /// Preview sessions chain several dispatches and read once, which amortizes

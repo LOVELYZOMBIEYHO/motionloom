@@ -20,6 +20,8 @@ struct Lighting {
     fog2: vec4<f32>,
     fog3: vec4<f32>,
     fog4: vec4<f32>,
+    caustics0: vec4<f32>,
+    caustics1: vec4<f32>,
     optics0: vec4<f32>,
     dof_style: vec4<f32>,
     render_compat: vec4<f32>,
@@ -49,7 +51,11 @@ struct Lighting {
     universal_tone: vec4<f32>,
     universal_shadow: vec4<f32>,
     universal_highlight: vec4<f32>,
+    environment_sh: array<vec4<f32>, 9>,
+    baked0: vec4<f32>,
+    baked1: vec4<f32>,
     lights: array<Light, 8>,
+    reflection0: vec4<f32>,
 };
 
 struct VertexOut {
@@ -66,6 +72,8 @@ struct VertexOut {
 @group(0) @binding(6) var preview_material: texture_2d<f32>;
 @group(0) @binding(7) var history_depth: texture_depth_2d;
 @group(0) @binding(8) var history_gbuffer: texture_2d<f32>;
+@group(0) @binding(9) var preview_reflection: texture_2d<f32>;
+@group(0) @binding(10) var history_reflection: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
@@ -82,7 +90,13 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 fn resolve_display(color: vec4<f32>) -> vec4<f32> {
     let alpha = clamp(color.a, 0.0, 1.0);
     if (alpha < 0.00001) { return vec4<f32>(0.0); }
-    let linear = max(color.rgb / alpha, vec3<f32>(0.0));
+    // Grade scene-linear radiance once, after reflection/transmission composition.
+    let temperature = clamp((lighting.color0.y - 6500.0) / 6500.0, -0.75, 0.75);
+    var linear = max(color.rgb / alpha, vec3<f32>(0.0)) * lighting.color0.x
+        * vec3<f32>(1.0 + temperature * 0.16, 1.0, 1.0 - temperature * 0.16);
+    linear = (linear - vec3<f32>(0.18)) * lighting.color0.z + vec3<f32>(0.18);
+    linear = max(mix(vec3<f32>(dot(linear, vec3<f32>(0.2126,0.7152,0.0722))),
+        linear, lighting.surface1.w), vec3<f32>(0.0));
     var mapped = linear;
     if (lighting.color0.w > 2.5) {
         // Filmic ACES transform; exposure is already applied upstream.

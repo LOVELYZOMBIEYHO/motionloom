@@ -74,7 +74,9 @@ cinematic preset's 43.2-pixel cap with camera maxBlur=2 percentHeight.
 
 `filmic_physical_v1` keeps glTF factors linear, converts authored light colors
 using RGB and exact sRGB, uses correlated Smith visibility and Lambert diffuse,
-and shadows only the selected shadow owner. Environment irradiance remains active
+and defaults to shadows from the selected shadow owner. Opt-in
+`LightingStyle shadowMode="perLight"` instead applies independent visibility to
+each direct emitter. Environment irradiance remains active
 at zero ambient fill. `filmic_aces_v1` uses filmic ACES input/output matrices,
 an RRT/ODT fit, a 1/0.6 scale and exact sRGB output.
 These opt-in modes preserve existing physical/aces/cinematic_bokeh_v1 behavior.
@@ -200,10 +202,30 @@ changes. All identifiers are case-sensitive.
 | --- | --- |
 | SurfaceStyle | shading: physical/stylized/toon/clay/cel/ink_wash_soft_v1/pbr_npr_soft_v1; shadingSteps: integer 2–16; diffuseWrap: 0–1; rimLight: 0–4; rimPower: 0.1–32; specular: 0–4; roughnessBias: −1–1; saturation: 0–3; outline: none; shadowThreshold: 0–1; shadowFeather: 0.001–0.5; shadowColor: #RRGGBB |
 | OutlineStyle | enabled: true/false; method: geometry; width: 0–12 output pixels; color: #RRGGBB; distanceMode: screen |
-| LightingStyle | preset: neutral/soft_sunlight/cinematic/overcast/night; ambientIntensity: 0–10; ambientColor: #RRGGBB; shadowStyle: hard/soft |
+| LightingStyle | preset: neutral/soft_sunlight/cinematic/overcast/night; ambientIntensity: 0–10; ambientColor: #RRGGBB; shadowStyle: hard/soft; shadowMode: legacy/perLight; reflectionBounces: integer 1–2 (default 1) |
 | PostStyle | toneMapping: none/reinhard/aces; exposure: 0–32 (existing linear multiplier, **not EV**); saturation: 0–3; contrast: 0–3; whiteBalance: 1000–40000 K; bloomThreshold: 0–32; bloomIntensity: 0–4 |
 
 ColorStyle and ToneStyle are documented above and share all shading modes.
+Immediate physical shading uses raster PBR and bounded screen/probe reflection,
+including scenes without LightingStyle. `reflectionBounces="2"` remains accepted
+as repeated-reflection intent; Preview reports its approximation instead of
+starting recursive whole-scene geometry queries. Solid glass is likewise a
+screen-space approximation in Preview and actual geometry transport in Weaver.
+There is no `fast` shading mode or `reflectionMode` selector. Offline path depth
+is controlled separately by the Weaver render job. See
+[reflections and closed glass](HYBRID_REFLECTIONS.md) for capabilities and the
+retained internal geometry reference implementation.
+`shadowMode` defaults to legacy behavior. Per-light shadows retain the primary
+directional map and add one spot view, six point cube faces, and six faces per
+area sample. Existing light tags accept static source-size controls:
+`DirectionalLight angularDiameter="0.5"` (finite 0–90 degrees) and
+`PointLight`/`SpotLight sourceRadius="0.025"` (finite 0–1000 scene units), all
+defaulting to zero. `RectAreaLight castShadow="true"` opts into area occlusion;
+its omitted default is false and its value must be a literal true/false.
+See [per-light shadows](PER_LIGHT_SHADOWS.md) for the full defaults, model flags,
+soft filtering, cache invalidation, limitations and host budgets. Material
+sheen and clearcoat use existing `MaterialAsset` attributes described in
+[material layers](MATERIAL_LAYERS.md); no additional tag is required.
 Unknown children, unknown attributes, invalid references, duplicate declarations,
 non-finite values and unsupported modes fail before GPU submission. Illustration,
 custom screen-space OutlineStyle methods, LUT assets, style inheritance and local style volumes
@@ -232,12 +254,11 @@ are **not V1 features** and are not accepted as no-op settings.
 
 ## Immediate renderer behavior
 
-Native WGPU and WASM WebGPU share the same WGSL and style resolver. The immediate
-renderer uses one fixed fast path: the Graph render size, a 1536 shadow map,
-existing analytic ambient occlusion, and no quality-driven anti-aliasing pass.
-Light count remains the existing four-light limit. The implementation does not
-add GI, ray tracing or SSAO. The CPU-only preview is not a reference
-implementation of these 3D shader modes.
+Native WGPU and WASM WebGPU share the WGSL and style resolver. The Graph owns
+output dimensions, while host [immediate preview profiles](IMMEDIATE_PREVIEW.md)
+bound light count, directional/local shadow maps, AA and screen-space lighting.
+Per-light visibility is opt-in; omitted settings preserve legacy ownership.
+The CPU-only preview is not a reference implementation of these 3D shader modes.
 
 Output dimensions belong to Graph `renderSize`, for example
 `<Graph ... size={[1280,720]} renderSize={[2560,1440]}>`. A future host render

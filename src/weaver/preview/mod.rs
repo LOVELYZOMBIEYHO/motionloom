@@ -123,6 +123,7 @@ async fn build_scene_gpu(job: &RenderJob) -> Result<SceneGpu, WeaverError> {
         preview_glossy as f32,
         job.light_paths.roulette_start.min(preview_total) as f32,
     ];
+    p[7][3] = job.light_paths.transmission.min(preview_total) as f32;
     p[9][3] = job.light_paths.transparent as f32;
     snap.diagnostics.push(format!(
         "Preview bounce budget: total {preview_total}, diffuse {preview_diffuse}, glossy {preview_glossy}; final render jobs keep the authored budget."
@@ -260,12 +261,14 @@ impl PreviewSession {
     ///
     /// Values above the job budget still apply. Changing the estimator resets
     /// accumulated samples because samples from different budgets must not mix.
+    /// Transmission uses the selected total budget when this explicit override applies.
     pub fn set_bounce_budget(&mut self, total: u32, diffuse: u32, glossy: u32) {
         let total = total.max(1);
         let diffuse = diffuse.min(total);
         let glossy = glossy.min(total);
         let roulette = (self.p[8][3] as u32).min(total);
         self.p[8] = [total as f32, diffuse as f32, glossy as f32, roulette as f32];
+        self.p[7][3] = total as f32;
         self.bounce_override = Some([total, diffuse, glossy]);
         self.reset_accumulation();
     }
@@ -317,6 +320,7 @@ impl PreviewSession {
         if let Some([total, diffuse, glossy]) = self.bounce_override {
             let roulette = (self.p[8][3] as u32).min(total);
             self.p[8] = [total as f32, diffuse as f32, glossy as f32, roulette as f32];
+            self.p[7][3] = total as f32;
         }
         self.lighting = scene.lighting;
         self.diagnostics = scene.diagnostics;

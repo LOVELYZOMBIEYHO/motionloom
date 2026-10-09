@@ -38,11 +38,18 @@ pub struct WorldGraph {
 /// Internal lighting payload shared by Scene3DRenderer and the retained GPU renderer.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct WorldLighting {
+    /// Existing Scene Model shadow flags, resolved per island.
+    #[serde(default)]
+    pub model_shadow_flags: std::collections::HashMap<String, [bool; 2]>,
     /// Resolved Scene art direction; None keeps the legacy WGSL path.
     #[serde(default)]
     pub render_style: Option<crate::render_style::ResolvedSceneRenderStyle>,
     #[serde(default)]
     pub environment: Option<WorldEnvironmentLighting>,
+    #[serde(default)]
+    pub baked_lighting: Option<WorldBakedLighting>,
+    #[serde(default)]
+    pub planar_reflections: Vec<WorldPlanarReflection>,
     #[serde(default)]
     pub lights: Vec<WorldLight>,
     #[serde(default = "default_world_ao_intensity")]
@@ -66,7 +73,10 @@ impl Default for WorldLighting {
     fn default() -> Self {
         Self {
             render_style: None,
+            model_shadow_flags: Default::default(),
             environment: None,
+            baked_lighting: None,
+            planar_reflections: Vec::new(),
             lights: Vec::new(),
             ao_intensity: default_world_ao_intensity(),
             ao_radius: default_world_ao_radius(),
@@ -90,6 +100,25 @@ pub struct WorldEnvironmentLighting {
     pub background_blur: f32,
     pub diffuse_intensity: f32,
     pub specular_intensity: f32,
+}
+
+/// Optional portable room-lighting asset binding. The data itself is cached by content.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct WorldBakedLighting {
+    pub src: String,
+    #[serde(default)]
+    pub expected_authoring_fingerprint: String,
+    pub blend: f32,
+    pub intensity: f32,
+    pub specular_intensity: f32,
+}
+
+/// A one-level reflected-camera capture on an opaque planar actor.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct WorldPlanarReflection {
+    pub target: String,
+    pub resolution_scale: f32,
+    pub clip_bias: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -116,6 +145,10 @@ pub struct WorldLight {
     pub height: f32,
     pub cast_shadow: bool,
     pub shadow_strength: f32,
+    #[serde(default)]
+    pub angular_diameter: f32,
+    #[serde(default)]
+    pub source_radius: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

@@ -330,6 +330,7 @@ pub static ANIMATION_PROPERTY_DESCRIPTORS: &[AnimationPropertyDescriptor] = &[
         "number",
         &[
             "EnvironmentLight",
+            "BakedLighting",
             "DirectionalLight",
             "PointLight",
             "SpotLight",
@@ -361,8 +362,11 @@ pub static ANIMATION_PROPERTY_DESCRIPTORS: &[AnimationPropertyDescriptor] = &[
         "specularIntensity",
         "ratio",
         "number",
-        &["EnvironmentLight"]
+        &["EnvironmentLight", "BakedLighting"]
     ),
+    number_property!("blend", "ratio", "slider", &["BakedLighting"]),
+    number_property!("resolutionScale", "ratio", "slider", &["PlanarReflection"]),
+    number_property!("clipBias", "world", "number", &["PlanarReflection"]),
     number_property!("range", "world", "number", &["PointLight", "SpotLight"]),
     number_property!("innerCone", "deg", "angle", &["SpotLight"]),
     number_property!("outerCone", "deg", "angle", &["SpotLight"]),
@@ -713,6 +717,14 @@ fn collect_scene_node_kinds(nodes: &[SceneNode], node_kinds: &mut HashMap<String
                                     );
                                 }
                             }
+                            Scene3DNode::BakedLighting(node) => {
+                                collect_optional_id(node_kinds, node.id.as_ref(), "BakedLighting")
+                            }
+                            Scene3DNode::PlanarReflection(node) => collect_optional_id(
+                                node_kinds,
+                                node.id.as_ref(),
+                                "PlanarReflection",
+                            ),
                             Scene3DNode::EnvironmentLight(node) => collect_optional_id(
                                 node_kinds,
                                 node.id.as_ref(),

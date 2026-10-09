@@ -1,0 +1,241 @@
+<!-- Self-contained hybrid-reflection review. The red panel is behind the camera. -->
+<Graph fps="24" duration="2s" size={[1280,720]}>
+  <RenderStyle id="physical_studio">
+    <SurfaceStyle shading="physical" />
+    <LightingStyle ambientIntensity="0.03" shadowMode="perLight" reflectionBounces="2" />
+    <PostStyle toneMapping="aces" exposure="1" />
+    <AntiAliasingStyle method="taa" quality="high" fallback="smaa" sharpness="0.1" />
+  </RenderStyle>
+  <Assets>
+    <MaterialAsset id="glass_slab" baseColor="#FFFFFF" roughness="0.055"
+      transmission="0.98" ior="1.52" thickness="0.10"
+      attenuationColor="#CCEAF0" attenuationDistance="1.5"
+      refractionMode="slab" doubleSided="true" />
+    <MaterialAsset id="glass_solid" baseColor="#FFFFFF" roughness="0.055"
+      transmission="0.98" ior="1.52"
+      attenuationColor="#CCEAF0" attenuationDistance="1.5"
+      refractionMode="solid" doubleSided="true" />
+    <MaterialAsset id="varnish" baseColor="#69452D" roughness="0.45"
+      clearcoat="0.70" clearcoatRoughness="0.06" />
+    <MaterialAsset id="metal" baseColor="#EFEFED" metallic="1" roughness="0.06" />
+    <MaterialAsset id="red_panel" baseColor="#000000" emissive="#FF2010" emissiveStrength="4" />
+    <MaterialAsset id="floor_light" baseColor="#CAC9C2" roughness="0.70" />
+    <MaterialAsset id="floor_dark" baseColor="#252E34" roughness="0.70" />
+    <MaterialAsset id="wall_light" baseColor="#FFFFFF" emissive="#FFFFFF" emissiveStrength="0.25" roughness="1" />
+    <MaterialAsset id="wall_dark" baseColor="#151D24" roughness="1" />
+    <GeometryAsset id="sphere_geometry">
+      <Primitive shape="sphere" radius="0.9" segments="48" rings="32" />
+    </GeometryAsset>
+    <MeshAsset id="slab_sphere" geometry="sphere_geometry" material="glass_slab" />
+    <MeshAsset id="solid_sphere" geometry="sphere_geometry" material="glass_solid" />
+    <MeshAsset id="varnished_sphere" geometry="sphere_geometry" material="varnish" />
+    <GeometryAsset id="mirror_geometry">
+      <Primitive shape="box" size={[1.8,1.8,0.04]} />
+    </GeometryAsset>
+    <MeshAsset id="metal_panel" geometry="mirror_geometry" material="metal" />
+    <GeometryAsset id="red_geometry">
+      <Primitive shape="box" size={[5,3,0.05]} />
+    </GeometryAsset>
+    <MeshAsset id="red_panel" geometry="red_geometry" material="red_panel" />
+    <GeometryAsset id="floor_tile_geometry">
+      <Primitive shape="box" size={[0.8,0.05,0.8]} />
+    </GeometryAsset>
+    <MeshAsset id="floor_light" geometry="floor_tile_geometry" material="floor_light" />
+    <MeshAsset id="floor_dark" geometry="floor_tile_geometry" material="floor_dark" />
+    <GeometryAsset id="wall_tile_geometry">
+      <Primitive shape="box" size={[0.55,0.55,0.05]} />
+    </GeometryAsset>
+    <MeshAsset id="wall_light" geometry="wall_tile_geometry" material="wall_light" />
+    <MeshAsset id="wall_dark" geometry="wall_tile_geometry" material="wall_dark" />
+  </Assets>
+  <Background color="#101820" />
+  <Scene id="hybrid_review" renderStyle="physical_studio">
+    <Timeline>
+      <Track id="stage" space="3d">
+        <Sequence duration="2s">
+          <CompositeGroup id="studio" space="3d" depth="true" format="rgba16f">
+            <Camera3D position={[0,2.2,8]} target={[0,1,0]} fov="48" />
+            <DirectionalLight direction={[-0.3,-1,-0.4]} intensity="0.5"
+              angularDiameter="1" castShadow="true" />
+            <RectAreaLight position={[-2,4,3]} direction={[0.3,-1,-0.5]}
+              intensity="6" width="3" height="2" castShadow="true" />
+            <!-- Left: thin-slab approximation. Center: actual closed exit. Right: coating. -->
+            <Model id="slab" asset="slab_sphere" position={[-2.2,0.92,0]} />
+            <Model id="solid" asset="solid_sphere" position={[0,0.92,0]} />
+            <Model id="coated" asset="varnished_sphere" position={[2.2,0.92,0]} />
+            <!-- No planar-capture tag: these objects use the default hybrid tracer. -->
+            <Model id="mirror_a" asset="metal_panel" position={[-3.5,1,-0.8]} rotation={[0,45,0]} />
+            <Model id="mirror_b" asset="metal_panel" position={[3.5,1,-0.8]} rotation={[0,-45,0]} />
+            <Model id="offscreen_red" asset="red_panel" position={[0,1.5,10]}
+              castShadow="false" />
+            <Model asset="floor_light" position={[-3.6,-0.04,-2.4]} />
+            <Model asset="floor_dark" position={[-2.8,-0.04,-2.4]} />
+            <Model asset="floor_light" position={[-2.0,-0.04,-2.4]} />
+            <Model asset="floor_dark" position={[-1.2,-0.04,-2.4]} />
+            <Model asset="floor_light" position={[-0.4,-0.04,-2.4]} />
+            <Model asset="floor_dark" position={[0.4,-0.04,-2.4]} />
+            <Model asset="floor_light" position={[1.2,-0.04,-2.4]} />
+            <Model asset="floor_dark" position={[2.0,-0.04,-2.4]} />
+            <Model asset="floor_light" position={[2.8,-0.04,-2.4]} />
+            <Model asset="floor_dark" position={[3.6,-0.04,-2.4]} />
+            <Model asset="floor_dark" position={[-3.6,-0.04,-1.6]} />
+            <Model asset="floor_light" position={[-2.8,-0.04,-1.6]} />
+            <Model asset="floor_dark" position={[-2.0,-0.04,-1.6]} />
+            <Model asset="floor_light" position={[-1.2,-0.04,-1.6]} />
+            <Model asset="floor_dark" position={[-0.4,-0.04,-1.6]} />
+            <Model asset="floor_light" position={[0.4,-0.04,-1.6]} />
+            <Model asset="floor_dark" position={[1.2,-0.04,-1.6]} />
+            <Model asset="floor_light" position={[2.0,-0.04,-1.6]} />
+            <Model asset="floor_dark" position={[2.8,-0.04,-1.6]} />
+            <Model asset="floor_light" position={[3.6,-0.04,-1.6]} />
+            <Model asset="floor_light" position={[-3.6,-0.04,-0.8]} />
+            <Model asset="floor_dark" position={[-2.8,-0.04,-0.8]} />
+            <Model asset="floor_light" position={[-2.0,-0.04,-0.8]} />
+            <Model asset="floor_dark" position={[-1.2,-0.04,-0.8]} />
+            <Model asset="floor_light" position={[-0.4,-0.04,-0.8]} />
+            <Model asset="floor_dark" position={[0.4,-0.04,-0.8]} />
+            <Model asset="floor_light" position={[1.2,-0.04,-0.8]} />
+            <Model asset="floor_dark" position={[2.0,-0.04,-0.8]} />
+            <Model asset="floor_light" position={[2.8,-0.04,-0.8]} />
+            <Model asset="floor_dark" position={[3.6,-0.04,-0.8]} />
+            <Model asset="floor_dark" position={[-3.6,-0.04,0.0]} />
+            <Model asset="floor_light" position={[-2.8,-0.04,0.0]} />
+            <Model asset="floor_dark" position={[-2.0,-0.04,0.0]} />
+            <Model asset="floor_light" position={[-1.2,-0.04,0.0]} />
+            <Model asset="floor_dark" position={[-0.4,-0.04,0.0]} />
+            <Model asset="floor_light" position={[0.4,-0.04,0.0]} />
+            <Model asset="floor_dark" position={[1.2,-0.04,0.0]} />
+            <Model asset="floor_light" position={[2.0,-0.04,0.0]} />
+            <Model asset="floor_dark" position={[2.8,-0.04,0.0]} />
+            <Model asset="floor_light" position={[3.6,-0.04,0.0]} />
+            <Model asset="floor_light" position={[-3.6,-0.04,0.8]} />
+            <Model asset="floor_dark" position={[-2.8,-0.04,0.8]} />
+            <Model asset="floor_light" position={[-2.0,-0.04,0.8]} />
+            <Model asset="floor_dark" position={[-1.2,-0.04,0.8]} />
+            <Model asset="floor_light" position={[-0.4,-0.04,0.8]} />
+            <Model asset="floor_dark" position={[0.4,-0.04,0.8]} />
+            <Model asset="floor_light" position={[1.2,-0.04,0.8]} />
+            <Model asset="floor_dark" position={[2.0,-0.04,0.8]} />
+            <Model asset="floor_light" position={[2.8,-0.04,0.8]} />
+            <Model asset="floor_dark" position={[3.6,-0.04,0.8]} />
+            <Model asset="floor_dark" position={[-3.6,-0.04,1.6]} />
+            <Model asset="floor_light" position={[-2.8,-0.04,1.6]} />
+            <Model asset="floor_dark" position={[-2.0,-0.04,1.6]} />
+            <Model asset="floor_light" position={[-1.2,-0.04,1.6]} />
+            <Model asset="floor_dark" position={[-0.4,-0.04,1.6]} />
+            <Model asset="floor_light" position={[0.4,-0.04,1.6]} />
+            <Model asset="floor_dark" position={[1.2,-0.04,1.6]} />
+            <Model asset="floor_light" position={[2.0,-0.04,1.6]} />
+            <Model asset="floor_dark" position={[2.8,-0.04,1.6]} />
+            <Model asset="floor_light" position={[3.6,-0.04,1.6]} />
+            <Model asset="floor_light" position={[-3.6,-0.04,2.4]} />
+            <Model asset="floor_dark" position={[-2.8,-0.04,2.4]} />
+            <Model asset="floor_light" position={[-2.0,-0.04,2.4]} />
+            <Model asset="floor_dark" position={[-1.2,-0.04,2.4]} />
+            <Model asset="floor_light" position={[-0.4,-0.04,2.4]} />
+            <Model asset="floor_dark" position={[0.4,-0.04,2.4]} />
+            <Model asset="floor_light" position={[1.2,-0.04,2.4]} />
+            <Model asset="floor_dark" position={[2.0,-0.04,2.4]} />
+            <Model asset="floor_light" position={[2.8,-0.04,2.4]} />
+            <Model asset="floor_dark" position={[3.6,-0.04,2.4]} />
+            <Model asset="floor_dark" position={[-3.6,-0.04,3.2]} />
+            <Model asset="floor_light" position={[-2.8,-0.04,3.2]} />
+            <Model asset="floor_dark" position={[-2.0,-0.04,3.2]} />
+            <Model asset="floor_light" position={[-1.2,-0.04,3.2]} />
+            <Model asset="floor_dark" position={[-0.4,-0.04,3.2]} />
+            <Model asset="floor_light" position={[0.4,-0.04,3.2]} />
+            <Model asset="floor_dark" position={[1.2,-0.04,3.2]} />
+            <Model asset="floor_light" position={[2.0,-0.04,3.2]} />
+            <Model asset="floor_dark" position={[2.8,-0.04,3.2]} />
+            <Model asset="floor_light" position={[3.6,-0.04,3.2]} />
+            <Model asset="wall_light" position={[-3.575,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[-3.025,0.20,-2.2]} />
+            <Model asset="wall_light" position={[-2.475,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[-1.925,0.20,-2.2]} />
+            <Model asset="wall_light" position={[-1.375,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[-0.825,0.20,-2.2]} />
+            <Model asset="wall_light" position={[-0.275,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[0.275,0.20,-2.2]} />
+            <Model asset="wall_light" position={[0.825,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[1.375,0.20,-2.2]} />
+            <Model asset="wall_light" position={[1.925,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[2.475,0.20,-2.2]} />
+            <Model asset="wall_light" position={[3.025,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[3.575,0.20,-2.2]} />
+            <Model asset="wall_dark" position={[-3.575,0.75,-2.2]} />
+            <Model asset="wall_light" position={[-3.025,0.75,-2.2]} />
+            <Model asset="wall_dark" position={[-2.475,0.75,-2.2]} />
+            <Model asset="wall_light" position={[-1.925,0.75,-2.2]} />
+            <Model asset="wall_dark" position={[-1.375,0.75,-2.2]} />
+            <Model asset="wall_light" position={[-0.825,0.75,-2.2]} />
+            <Model asset="wall_dark" position={[-0.275,0.75,-2.2]} />
+            <Model asset="wall_light" position={[0.275,0.75,-2.2]} />
+            <Model asset="wall_dark" position={[0.825,0.75,-2.2]} />
+            <Model asset="wall_light" position={[1.375,0.75,-2.2]} />
+            <Model asset="wall_dark" position={[1.925,0.75,-2.2]} />
+            <Model asset="wall_light" position={[2.475,0.75,-2.2]} />
+            <Model asset="wall_dark" position={[3.025,0.75,-2.2]} />
+            <Model asset="wall_light" position={[3.575,0.75,-2.2]} />
+            <Model asset="wall_light" position={[-3.575,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[-3.025,1.30,-2.2]} />
+            <Model asset="wall_light" position={[-2.475,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[-1.925,1.30,-2.2]} />
+            <Model asset="wall_light" position={[-1.375,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[-0.825,1.30,-2.2]} />
+            <Model asset="wall_light" position={[-0.275,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[0.275,1.30,-2.2]} />
+            <Model asset="wall_light" position={[0.825,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[1.375,1.30,-2.2]} />
+            <Model asset="wall_light" position={[1.925,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[2.475,1.30,-2.2]} />
+            <Model asset="wall_light" position={[3.025,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[3.575,1.30,-2.2]} />
+            <Model asset="wall_dark" position={[-3.575,1.85,-2.2]} />
+            <Model asset="wall_light" position={[-3.025,1.85,-2.2]} />
+            <Model asset="wall_dark" position={[-2.475,1.85,-2.2]} />
+            <Model asset="wall_light" position={[-1.925,1.85,-2.2]} />
+            <Model asset="wall_dark" position={[-1.375,1.85,-2.2]} />
+            <Model asset="wall_light" position={[-0.825,1.85,-2.2]} />
+            <Model asset="wall_dark" position={[-0.275,1.85,-2.2]} />
+            <Model asset="wall_light" position={[0.275,1.85,-2.2]} />
+            <Model asset="wall_dark" position={[0.825,1.85,-2.2]} />
+            <Model asset="wall_light" position={[1.375,1.85,-2.2]} />
+            <Model asset="wall_dark" position={[1.925,1.85,-2.2]} />
+            <Model asset="wall_light" position={[2.475,1.85,-2.2]} />
+            <Model asset="wall_dark" position={[3.025,1.85,-2.2]} />
+            <Model asset="wall_light" position={[3.575,1.85,-2.2]} />
+            <Model asset="wall_light" position={[-3.575,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[-3.025,2.40,-2.2]} />
+            <Model asset="wall_light" position={[-2.475,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[-1.925,2.40,-2.2]} />
+            <Model asset="wall_light" position={[-1.375,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[-0.825,2.40,-2.2]} />
+            <Model asset="wall_light" position={[-0.275,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[0.275,2.40,-2.2]} />
+            <Model asset="wall_light" position={[0.825,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[1.375,2.40,-2.2]} />
+            <Model asset="wall_light" position={[1.925,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[2.475,2.40,-2.2]} />
+            <Model asset="wall_light" position={[3.025,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[3.575,2.40,-2.2]} />
+            <Model asset="wall_dark" position={[-3.575,2.95,-2.2]} />
+            <Model asset="wall_light" position={[-3.025,2.95,-2.2]} />
+            <Model asset="wall_dark" position={[-2.475,2.95,-2.2]} />
+            <Model asset="wall_light" position={[-1.925,2.95,-2.2]} />
+            <Model asset="wall_dark" position={[-1.375,2.95,-2.2]} />
+            <Model asset="wall_light" position={[-0.825,2.95,-2.2]} />
+            <Model asset="wall_dark" position={[-0.275,2.95,-2.2]} />
+            <Model asset="wall_light" position={[0.275,2.95,-2.2]} />
+            <Model asset="wall_dark" position={[0.825,2.95,-2.2]} />
+            <Model asset="wall_light" position={[1.375,2.95,-2.2]} />
+            <Model asset="wall_dark" position={[1.925,2.95,-2.2]} />
+            <Model asset="wall_light" position={[2.475,2.95,-2.2]} />
+            <Model asset="wall_dark" position={[3.025,2.95,-2.2]} />
+            <Model asset="wall_light" position={[3.575,2.95,-2.2]} />
+          </CompositeGroup>
+        </Sequence>
+      </Track>
+    </Timeline>
+  </Scene>
+  <Present from="hybrid_review" />
+</Graph>

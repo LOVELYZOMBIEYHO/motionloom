@@ -6,6 +6,9 @@ use super::{WeaverError, scene::Snapshot};
 use crate::world::gltf_loader::GlbAlphaMode;
 use std::collections::HashMap;
 
+// Keep this stride synchronized with MATERIAL_STRIDE in path_trace.wgsl.
+const MATERIAL_STRIDE: usize = 15;
+
 #[derive(Clone)]
 pub(crate) struct PackedScene {
     pub data: Vec<[f32; 4]>,
@@ -292,12 +295,16 @@ fn pack_with_bvh(
     let mut source = 0u32;
     for (mi, mesh) in snapshot.meshes.iter().enumerate() {
         let m = &mesh.material;
-        if (m.transmission_factor > 0.0 && !allow_transmission_stopgap)
-            || m.unlit
-            || m.specular_glossiness
+        validate_material_layers(m)?;
+        if m.transmission_factor > 0.0
+            && !allow_transmission_stopgap
+            && matches!(m.refraction_mode, crate::dsl::MaterialRefractionMode::Solid)
         {
+            validate_solid_mesh(mesh)?;
+        }
+        if m.unlit || m.specular_glossiness {
             return Err(WeaverError::Unsupported(format!(
-                "material {:?}: transmission/unlit/specular-glossiness requires the next BSDF milestone",
+                "material {:?}: unlit/specular-glossiness is not represented by the physical BSDF",
                 m.name
             )));
         }
@@ -381,6 +388,36 @@ fn pack_with_bvh(
             f32::from(m.receive_caustics),
             0.0,
         ]);
+        // Physical material lobes are independent of alpha coverage. The explicit
+        // stopgap continues to request an opaque fallback, never silently enables it.
+        materials.push([
+            if allow_transmission_stopgap {
+                0.0
+            } else {
+                m.transmission_factor
+            },
+            m.thickness_factor,
+            f32::from(matches!(
+                m.refraction_mode,
+                crate::dsl::MaterialRefractionMode::Solid
+            )),
+            0.0,
+        ]);
+        materials.push([
+            m.attenuation_color[0],
+            m.attenuation_color[1],
+            m.attenuation_color[2],
+            m.attenuation_distance,
+        ]);
+        materials.push([m.clearcoat, m.clearcoat_roughness, m.sheen, 0.0]);
+        materials.push([
+            m.sheen_color[0],
+            m.sheen_color[1],
+            m.sheen_color[2],
+            m.sheen_roughness,
+        ]);
+        // x is patched to the shared Charlie directional-albedo table below.
+        materials.push([0.0; 4]);
         if mesh.indices.len() % 3 != 0 {
             return Err(WeaverError::Scene("incomplete triangle indices".into()));
         }
@@ -470,6 +507,26 @@ fn pack_with_bvh(
     }
     let material_offset = data.len() as u32;
     data.extend(materials);
+    // Reuse the preview/bake Charlie energy contract rather than normalize a
+    // cloth lobe with a GGX lookup table. This table is shared by every material.
+    let sheen_albedo_offset = data.len() as u32;
+    for y in 0..64 {
+        for x in 0..64 {
+            data.push([
+                crate::material_layers::directional_albedo(
+                    (x as f32 + 0.5) / 64.0,
+                    (y as f32 + 0.5) / 64.0,
+                ),
+                0.0,
+                0.0,
+                0.0,
+            ]);
+        }
+    }
+    for material in 0..snapshot.meshes.len() {
+        data[material_offset as usize + material * MATERIAL_STRIDE + 14][0] =
+            f32::from_bits(sheen_albedo_offset);
+    }
     let light_offset = data.len() as u32;
     for l in &snapshot.lighting.lights {
         use crate::world::WorldLightKind;
@@ -492,7 +549,7 @@ fn pack_with_bvh(
     let emitter_offset = data.len() as u32;
     let mut emitter_area = 0.0f32;
     for (i, t) in tris.iter().enumerate() {
-        let m = material_offset as usize + t.data[15][0] as usize * 10;
+        let m = material_offset as usize + t.data[15][0] as usize * MATERIAL_STRIDE;
         if data[m + 1][..3].iter().any(|v| *v > 0.0) && data[m + 1][3] > 0.0 {
             let a = t.data[0];
             let b = t.data[5];
@@ -541,9 +598,137 @@ fn pack_with_bvh(
     ))
 }
 
+fn validate_material_layers(
+    m: &crate::world::gltf_loader::GlbMaterialData,
+) -> Result<(), WeaverError> {
+    let values = [
+        m.sheen,
+        m.sheen_roughness,
+        m.clearcoat,
+        m.clearcoat_roughness,
+        m.transmission_factor,
+        m.ior,
+        m.thickness_factor,
+        m.attenuation_distance,
+    ];
+    if values.iter().any(|value| !value.is_finite())
+        || m.sheen_color
+            .iter()
+            .chain(m.attenuation_color.iter())
+            .any(|v| !v.is_finite())
+        || m.ior < 1.0
+        || m.ior > 3.0
+        || m.thickness_factor < 0.0
+        || m.attenuation_distance <= 0.0
+        || [m.sheen, m.clearcoat, m.transmission_factor]
+            .iter()
+            .any(|v| !(0.0..=1.0).contains(v))
+        || m.attenuation_color.iter().any(|v| !(0.0..=1.0).contains(v))
+    {
+        return Err(WeaverError::Scene(format!(
+            "material {:?}: invalid physical optical/layer parameters",
+            m.name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_solid_mesh(
+    mesh: &crate::experimental::geometry::ResolvedMesh,
+) -> Result<(), WeaverError> {
+    // Positional welding accepts ordinary UV/normal seams. A closed oriented
+    // two-manifold needs exactly one directed edge in each direction.
+    let mut bounds = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for p in &mesh.positions {
+        for a in 0..3 {
+            bounds.0[a] = bounds.0[a].min(p[a]);
+            bounds.1[a] = bounds.1[a].max(p[a]);
+        }
+    }
+    let extent = (0..3)
+        .map(|a| bounds.1[a] - bounds.0[a])
+        .fold(0.0_f32, f32::max);
+    let tolerance = (extent * 1e-6).max(1e-7);
+    let mut welded = HashMap::<[i64; 3], usize>::new();
+    let mut ids = Vec::with_capacity(mesh.positions.len());
+    for p in &mesh.positions {
+        if p.iter().any(|v| !v.is_finite()) {
+            return Err(WeaverError::Scene(format!(
+                "solid glass mesh {:?}: non-finite position",
+                mesh.name
+            )));
+        }
+        let key = std::array::from_fn(|a| ((p[a] - bounds.0[a]) / tolerance).round() as i64);
+        let next = welded.len();
+        ids.push(*welded.entry(key).or_insert(next));
+    }
+    let mut edges = HashMap::<(usize, usize), (u32, i32)>::new();
+    let mut signed_volume = 0.0_f64;
+    for tri in mesh.indices.chunks_exact(3) {
+        let Some(a) = ids.get(tri[0] as usize).copied() else {
+            return Err(WeaverError::Scene("solid glass invalid index".into()));
+        };
+        let Some(b) = ids.get(tri[1] as usize).copied() else {
+            return Err(WeaverError::Scene("solid glass invalid index".into()));
+        };
+        let Some(c) = ids.get(tri[2] as usize).copied() else {
+            return Err(WeaverError::Scene("solid glass invalid index".into()));
+        };
+        // Collapsed pole triangles contribute no optical boundary.
+        if a == b || b == c || c == a {
+            continue;
+        }
+        let points =
+            [tri[0], tri[1], tri[2]].map(|index| mesh.positions[index as usize].map(f64::from));
+        let origin = bounds.0.map(f64::from);
+        let [p, q, r] =
+            points.map(|p| std::array::from_fn::<_, 3, _>(|axis| p[axis] - origin[axis]));
+        signed_volume += (p[0] * (q[1] * r[2] - q[2] * r[1])
+            + p[1] * (q[2] * r[0] - q[0] * r[2])
+            + p[2] * (q[0] * r[1] - q[1] * r[0]))
+            / 6.0;
+        for (a, b) in [(a, b), (b, c), (c, a)] {
+            let edge = edges.entry((a.min(b), a.max(b))).or_default();
+            edge.0 += 1;
+            edge.1 += if a < b { 1 } else { -1 };
+        }
+    }
+    let invalid = edges
+        .values()
+        .filter(|(count, winding)| *count != 2 || *winding != 0)
+        .count();
+    if edges.is_empty() || invalid != 0 || signed_volume <= 0.0 {
+        return Err(WeaverError::Scene(format!(
+            "solid glass mesh {:?}: requires a closed consistently oriented outward two-manifold; {invalid} boundary/non-manifold/winding edges after positional welding",
+            mesh.name
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn physical_layers_and_transmission_are_accepted_and_bad_optics_fail() {
+        for (sheen, coat) in [(0.5, 0.0), (0.0, 0.5), (0.8, 0.6)] {
+            let material = crate::world::gltf_loader::GlbMaterialData {
+                sheen,
+                clearcoat: coat,
+                transmission_factor: 0.96,
+                ..Default::default()
+            };
+            validate_material_layers(&material).unwrap();
+        }
+        validate_material_layers(&Default::default()).unwrap();
+        for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
+            let material = crate::world::gltf_loader::GlbMaterialData {
+                attenuation_distance: bad,
+                ..Default::default()
+            };
+            assert!(validate_material_layers(&material).is_err());
+        }
+    }
 
     #[test]
     fn bvh_cache_rejects_independent_shard_motion() {

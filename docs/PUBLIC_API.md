@@ -250,7 +250,9 @@ Use this when the caller already knows the graph is scene/composition content.
 The public Scene DSL owns 3D lighting; hosts do not need to construct or expose
 legacy World implementation types. A `CompositeGroup space="3d"` accepts:
 
-- `EnvironmentLight` for equirectangular HDR/EXR/LDR backgrounds and IBL
+- `EnvironmentLight` for equirectangular HDR/EXR/LDR backgrounds and SH9/GGX IBL
+- `BakedLighting` for two-state room irradiance and local HDR reflection probes
+- `PlanarReflection` for a one-level reflected-camera capture on an opaque Model
 - `DirectionalLight`, `PointLight`, `SpotLight`, and `RectAreaLight`
 - `AmbientOcclusion` and `ContactShadow`
 - `ColorManagement` with `aces`, `reinhard`, or `none` tone mapping
@@ -268,6 +270,16 @@ contract is used by `SceneRenderer`, GPU-texture rendering, native export, and
 WASM WebGPU rendering. Existing scenes with no authored light retain the
 legacy studio-light fallback. Existing cameras without `depthOfField="true"`
 skip the depth-aware post pass and retain their previous output path.
+
+`motionloom::api::lighting_bake` exposes `LightingBakeOptions`,
+`BakeVolumeOptions`, `bake_scene_lighting`, `bake_scene_lighting_with_progress`,
+`scene_lighting_bake_fingerprint`, `scene_lighting_authoring_fingerprint`,
+`validate_lighting_bake_fingerprint`, and native `save_lighting_bake`.
+Baking returns an in-memory typed asset and HDR images; only the explicit save
+helper writes files. `motionloom::api::lighting_ibl` provides reusable HDR
+sampling, SH irradiance, GGX mip filtering, and split-sum BRDF integration.
+See [Indoor lighting and reflections](BAKED_LIGHTING.md) for the schema,
+quality limits, regeneration workflow, and supported approximations.
 
 Weaver jobs created with `RenderJob::new` follow the same evaluated camera
 optics (`LensSource::AuthoredCamera`), including DOF disabled when omitted.
@@ -459,6 +471,13 @@ texture decode time/count, decoded bytes, cache hits, retained GPU texture
 resources, asset resolution, geometry preparation, and submission timings.
 Hosts should use these counters to distinguish Cargo compilation, cold asset
 preparation, and steady-state frame cost.
+
+Normal native Preview and WASM use the bounded raster policy described in
+[Immediate preview](IMMEDIATE_PREVIEW.md). `geometry_transport_enabled` is
+false and the hybrid scene counters are zero. The profile also exposes
+`solid_refraction_approximated`, `recursive_reflection_approximated`, and
+`baked_lighting_fallback`, so browser and native hosts can report the renderer's
+capabilities without changing the authored material DSL.
 
 ### Preview host protocol
 

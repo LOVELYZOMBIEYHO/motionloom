@@ -8,6 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MotionLoomSceneRenderError {
+    #[error("Invalid lighting '{id}': {message}")]
+    InvalidLighting { id: String, message: String },
     #[error("failed to compose HeadSwapAsset '{asset}': {message}")]
     HeadSwap { asset: String, message: String },
     #[error(

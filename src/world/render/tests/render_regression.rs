@@ -33,6 +33,8 @@ fn every_render_style_keeps_its_shader_selector() {
                 ambient_intensity: 1.0,
                 ambient_color: [1.0; 3],
                 hard_shadows: false,
+        per_light_shadows: false,
+                reflection_bounces: 1,
                 lighting_preset: None,
                 post: Default::default(),
                 overrides: Vec::new(),
@@ -42,7 +44,7 @@ fn every_render_style_keeps_its_shader_selector() {
         let params = super::super::GpuWorldLightingParams::from_world(
             &lighting,
             super::super::PerspectiveCameraView {
-        orthographic: false,
+                orthographic: false,
                 eye: [0.0; 3],
                 right: [1.0, 0.0, 0.0],
                 up: [0.0, 1.0, 0.0],

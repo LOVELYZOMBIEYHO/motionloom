@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Retain evaluated native actor geometry in large Scene islands, preserving
+  moving curves and camera/light updates. Gate current-frame depth/coverage
+  filtering on complex physical lighting, skip off-frustum resource assembly
+  only after complete shadow-cache validity checks, and bound ordered glass
+  snapshots by conservative slab footprints. Small islands keep their existing
+  pass path. Add main-camera batch/culling/copy diagnostics and ignore unusable
+  all-zero encoder timing results. See [immediate preview](docs/IMMEDIATE_PREVIEW.md).
+
+- Restore bounded raster PBR for native Preview and WASM: use screen-space and
+  probe/environment reflection, without full-scene BVH preparation, recursive
+  reflection/clearcoat queries or geometry-reflection history. Keep authored
+  materials, HDR, style and AA unchanged. Existing reflection/solid-glass intent
+  remains parseable and reports immediate approximation; Weaver retains physical
+  optics and independent offline bounce settings. Stale lighting bakes are
+  omitted with a Preview warning while missing/malformed assets remain errors.
+  Retain the geometry renderer only as an internal native regression reference.
+  Add bounded RGB glass SSR using its actual interface, cache closed-mesh
+  topology, batch adjacent transparent draws between underlay snapshots, and
+  read only the active baked-lighting endpoint during day/night plateaus.
+  Keep shader discard/gradient flow valid in browser WebGPU and skip unused
+  geometry-evidence pipelines; reference capability checks use attachment cost,
+  rather than texture storage size.
+  See [reflection capabilities](docs/HYBRID_REFLECTIONS.md).
+
+- Bound Weaver offline sampling to eight tiles and four samples per pixel per
+  GPU submission, completing readback and durable checkpoints before the next
+  group. Dense 4K frames no longer queue an entire sampling round before the
+  readback deadline; sample targets, path depths and deterministic resume remain
+  unchanged. Cancellation is checked between groups.
+
 - Preserve authored alpha when generating GPU color texels for textureless GLB
   materials. Opaque characters no longer reveal their rear surfaces through
   the CPU preview fallback alpha; transparent materials retain their coverage.

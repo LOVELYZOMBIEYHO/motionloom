@@ -488,10 +488,7 @@ pub(crate) fn scene_asset_relative_suffixes(path: &Path) -> Vec<PathBuf> {
             // while legacy host roots may expose its contents directly.
             // Keep the existing stripped lookup first to preserve precedence.
             if marker == "sample_assets" {
-                push_unique_path(
-                    &mut suffixes,
-                    pathbuf_from_components(&components[index..]),
-                );
+                push_unique_path(&mut suffixes, pathbuf_from_components(&components[index..]));
             }
         }
     }

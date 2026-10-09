@@ -34,6 +34,7 @@ is the sole skill entry point for the crate.
 | Semantic head parameter fitting | [Head reference fitting](../../docs/HEAD_REFERENCE_FITTING.md) and [Facial cages](../../docs/FACIAL_CAGES.md); use `api::head_fitting` for supported Head parameters |
 | General geometry construction, edits, UV inspection or GLB export | [Geometry assets](../../docs/GEOMETRY_ASSETS.md), [Mesh authoring](../../docs/MESH_AUTHORING.md), and [Geometry tooling](../../docs/GEOMETRY_TOOLING.md) as needed |
 | Cel/material style, previews or offline rendering | [Render style](../../docs/RENDER_STYLE.md), [Immediate preview](../../docs/IMMEDIATE_PREVIEW.md), or [Weaver](../../src/weaver/README.md) for the requested rendering path |
+| Offscreen reflections, closed glass or layered transmission | [Hybrid reflections](../../docs/HYBRID_REFLECTIONS.md) for defaults, reflection budgets, geometry requirements and native/offline limits |
 | Audio timing or mixing | [Audio](../../docs/AUDIO.md) |
 
 A supplied image does not by itself select MeshAsset fitting. Choose the

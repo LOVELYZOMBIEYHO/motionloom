@@ -170,6 +170,18 @@ pub(crate) fn validate(graph: &GraphScript) -> Result<(), GraphParseError> {
                 "lighting preset",
             )?;
             one_of(l.shadow_style.as_deref(), &["hard", "soft"], "shadowStyle")?;
+            one_of(
+                l.shadow_mode.as_deref(),
+                &["legacy", "perLight"],
+                "shadowMode",
+            )?;
+            if l.reflection_bounces
+                .is_some_and(|value| !(1..=2).contains(&value))
+            {
+                return Err(error(
+                    "LightingStyle.reflectionBounces must be an integer from 1 through 2",
+                ));
+            }
             range(l.ambient_intensity, 0.0, 10.0, "ambientIntensity")?;
             if let Some(v) = &l.ambient_color {
                 color(v)?;

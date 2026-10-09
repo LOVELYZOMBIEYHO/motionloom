@@ -8,21 +8,48 @@ use super::*;
 
 impl GpuWorldLighting {
     pub(super) fn fallback(camera: PerspectiveCameraView) -> Self {
-        let mut mip = Vec::with_capacity(8);
-        for value in [0.18, 0.19, 0.22, 1.0] {
-            mip.extend_from_slice(&f16::from_f32(value).to_bits().to_ne_bytes());
-        }
+        static STUDIO: std::sync::LazyLock<Arc<WorldEnvironmentImage>> =
+            std::sync::LazyLock::new(|| {
+                let source =
+                    crate::lighting_ibl::LinearEnvironment::new(1, 1, vec![[0.18, 0.19, 0.22]])
+                        .expect("finite constant studio");
+                let ibl = crate::lighting_ibl::preprocess_environment(
+                    &source,
+                    crate::lighting_ibl::IblPreprocessOptions::default(),
+                )
+                .expect("bounded studio IBL");
+                let bytes = source.rgba16f_bytes();
+                Arc::new(WorldEnvironmentImage {
+                    width: 1,
+                    height: 1,
+                    mip_bytes: vec![bytes.clone()],
+                    background_width: 1,
+                    background_height: 1,
+                    background_mip_bytes: vec![bytes],
+                    diffuse_sh: ibl.diffuse_sh,
+                    brdf_width: ibl.brdf_lut.size,
+                    brdf_height: ibl.brdf_lut.size,
+                    brdf_bytes: ibl.brdf_lut.rgba16f_bytes(),
+                    signature: 0,
+                })
+            });
+        let mut params =
+            GpuWorldLightingParams::from_world(&WorldLighting::default(), camera, false, 1);
+        params.environment_sh = STUDIO.diffuse_sh;
         Self {
-            params: GpuWorldLightingParams::from_world(&WorldLighting::default(), camera, false, 1),
-            environment: Arc::new(WorldEnvironmentImage {
-                width: 1,
-                height: 1,
-                mip_bytes: vec![mip],
-                signature: 0,
-            }),
+            params,
+            environment: Arc::clone(&STUDIO),
             frame_index: 0,
             temporal_jitter: false,
             froxel: None,
+            baked: None,
+            planar_reflections: Vec::new(),
+            planar_capture_budget: 1,
+            planar_resolution_limit: 768,
+            transmission_layer_budget: 24,
+            shadow_lights: Vec::new(),
+            per_light_shadows: false,
+            model_shadow_flags: Default::default(),
         }
     }
 }
@@ -84,6 +111,19 @@ impl GpuWorldLightingParams {
                     .lights
                     .iter()
                     .find(|light| light.id.as_deref() == Some(light_ref) && light.cast_shadow)
+            })
+            .or_else(|| {
+                if lighting
+                    .render_style
+                    .as_ref()
+                    .is_some_and(|s| s.per_light_shadows)
+                {
+                    lighting.lights.iter().find(|light| {
+                        light.cast_shadow && light.kind == WorldLightKind::Directional
+                    })
+                } else {
+                    None
+                }
             })
             .or_else(|| lighting.lights.iter().find(|light| light.cast_shadow));
         let (shadow0, shadow1, shadow2, shadow3, shadow_strength) =
@@ -398,6 +438,18 @@ impl GpuWorldLightingParams {
             shadow1,
             shadow2,
             shadow3,
+            environment_sh: [[0.0; 4]; 9],
+            baked0: [0.0; 4],
+            baked1: [0.0; 4],
+            reflection0: [
+                lighting
+                    .render_style
+                    .as_ref()
+                    .map_or(1, |style| style.reflection_bounces) as f32,
+                1.0,
+                0.0,
+                1.0,
+            ],
             lights,
         }
     }

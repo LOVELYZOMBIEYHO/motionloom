@@ -18,6 +18,8 @@ struct Film {
 @group(0) @binding(3) var<storage, read_write> film: array<Film>;
 const PI: f32 = 3.14159265359;
 const INF: f32 = 1e30;
+const MATERIAL_STRIDE: u32 = 15u;
+const MEDIUM_LIMIT: u32 = 8u;
 var<private> rng: u32;
 fn random() -> f32 {
     rng = rng * 747796405u + 2891336453u;
@@ -98,7 +100,7 @@ fn intersect(o:vec3<f32>, d:vec3<f32>, limit:f32, primary_camera_ray:bool) -> Hi
         if count==0u { stack[size]=u32(scene[n].w); stack[size+1u]=u32(scene[n+1u].w); size+=2u; continue; }
         for(var j=0u;j<count;j++) {
             let t=bitcast<u32>(p.v[1].x)+(start+j)*16u;
-            let material=bitcast<u32>(p.v[1].y)+u32(scene[t+15u].x)*10u;
+            let material=bitcast<u32>(p.v[1].y)+u32(scene[t+15u].x)*MATERIAL_STRIDE;
             if primary_camera_ray && scene[material+9u].y<0.5 { continue; }
             let a=scene[t].xyz; let e1=scene[t+5u].xyz-a; let e2=scene[t+10u].xyz-a;
             let h=cross(d,e2); let det=dot(e1,h); if abs(det)<1e-9 { continue; }
@@ -111,9 +113,15 @@ fn intersect(o:vec3<f32>, d:vec3<f32>, limit:f32, primary_camera_ray:bool) -> Hi
     return hit;
 }
 fn interp(t:u32, field:u32, uv:vec2<f32>) -> vec4<f32> { return scene[t+field]*(1.0-uv.x-uv.y)+scene[t+5u+field]*uv.x+scene[t+10u+field]*uv.y; }
-struct Surface { n:vec3<f32>, gn:vec3<f32>, base:vec3<f32>, alpha:f32, metal:f32, rough:f32, f0:vec3<f32>, ao:f32, emission:vec3<f32>, receive_caustics:f32 }
+struct Surface {
+    n:vec3<f32>, gn:vec3<f32>, cn:vec3<f32>, base:vec3<f32>, alpha:f32,
+    metal:f32, rough:f32, f0:vec3<f32>, ao:f32, emission:vec3<f32>, receive_caustics:f32,
+    transmission:f32, ior:f32, thickness:f32, solid:bool, sigma:vec3<f32>,
+    coat:f32, coat_rough:f32, sheen:vec3<f32>, sheen_rough:f32, sheen_table:u32,
+    material:u32, front:bool, eta_i:f32, eta_t:f32,
+}
 fn surface(hit:Hit, d:vec3<f32>) -> Surface {
-    let m=bitcast<u32>(p.v[1].y)+u32(scene[hit.tri+15u].x)*10u;
+    let m=bitcast<u32>(p.v[1].y)+u32(scene[hit.tri+15u].x)*MATERIAL_STRIDE;
     let uv=interp(hit.tri,3u,hit.uv).xy;
     // Screen-space UV footprint: world size per pixel divided by world size per
     // UV unit, both taken from this triangle. Single-level textures ignore it.
@@ -129,7 +137,9 @@ fn surface(hit:Hit, d:vec3<f32>) -> Surface {
     let remapped=material_channels(mr,scene[m+9u].x);
     var gn=unit(cross(scene[hit.tri+5u].xyz-scene[hit.tri].xyz,scene[hit.tri+10u].xyz-scene[hit.tri].xyz),-d);
     var n=unit(interp(hit.tri,1u,hit.uv).xyz,gn);
-    if dot(gn,d)>0.0 { gn=-gn; n=-n; }
+    let front=dot(gn,d)<0.0;
+    if !front { gn=-gn; n=-n; }
+    let cn=n;
     let tangent=interp(hit.tri,2u,hit.uv); let t=unit(tangent.xyz-n*dot(n,tangent.xyz),vec3<f32>(0));
     if dot(t,t)>0.5 {
         var map=texture_auto(scene[m+5u],uv,false,lod_bias).xyz*2.0-1.0; map=vec3<f32>(map.xy*scene[m].z,map.z);
@@ -147,7 +157,13 @@ fn surface(hit:Hit, d:vec3<f32>) -> Surface {
     let authored_ior=clamp(scene[m+3u].y,1.0,3.0);
     let ior_ratio=(authored_ior-1.0)/(authored_ior+1.0);
     let dielectric_f0=ior_ratio*ior_ratio*scene[m+2u].rgb*scene[m+2u].w;
-    return Surface(n,gn,color.rgb,alpha,metal,rough,mix(dielectric_f0,color.rgb,metal),ao,scene[m+1u].rgb*scene[m+1u].w*texture_auto(scene[m+7u],uv,true,lod_bias).rgb,scene[m+9u].z);
+    let optical=scene[m+10u]; let attenuation=scene[m+11u]; let layers=scene[m+12u]; let cloth=scene[m+13u];
+    let sigma=-log(clamp(attenuation.rgb,vec3<f32>(1e-6),vec3<f32>(1.0)))/max(attenuation.w,1e-6);
+    return Surface(n,gn,cn,color.rgb,alpha,metal,rough,mix(dielectric_f0,color.rgb,metal),ao,
+        scene[m+1u].rgb*scene[m+1u].w*texture_auto(scene[m+7u],uv,true,lod_bias).rgb,scene[m+9u].z,
+        clamp(optical.x*(1.0-metal),0.0,1.0),authored_ior,max(optical.y,0.0),optical.z>0.5,sigma,
+        clamp(layers.x,0.0,1.0),clamp(layers.y,0.03,1.0),clamp(cloth.rgb*layers.z,vec3<f32>(0),vec3<f32>(1)),
+        clamp(cloth.w,0.04,1.0),bitcast<u32>(scene[m+14u].x),u32(scene[hit.tri+15u].x),front,1.0,authored_ior);
 }
 fn basis(n:vec3<f32>, q:vec3<f32>) -> vec3<f32> {
     let a=select(vec3<f32>(0,1,0),vec3<f32>(1,0,0),abs(n.y)>0.95);
@@ -155,17 +171,107 @@ fn basis(n:vec3<f32>, q:vec3<f32>) -> vec3<f32> {
 }
 fn cosine(n:vec3<f32>) -> vec3<f32> { let r=sqrt(random()); let a=2.0*PI*random(); return basis(n,vec3<f32>(r*cos(a),r*sin(a),sqrt(max(0.0,1.0-r*r)))); }
 fn g1(c:f32,a2:f32)->f32 { return 2.0*c/max(c+sqrt(a2+(1.0-a2)*c*c),1e-8); }
-fn probability(s:Surface)->f32 { return clamp(0.25+0.5*s.metal,0.1,0.9); }
+// Exact unpolarized dielectric Fresnel includes total internal reflection.
+fn dielectric_fresnel(cosine:f32, eta_i:f32, eta_t:f32)->f32 {
+    let c=clamp(abs(cosine),0.0,1.0); let ratio=eta_i/max(eta_t,1e-6);
+    let sin2_t=ratio*ratio*max(0.0,1.0-c*c); if sin2_t>=1.0 { return 1.0; }
+    let ct=sqrt(max(0.0,1.0-sin2_t));
+    let rs=(eta_i*c-eta_t*ct)/max(eta_i*c+eta_t*ct,1e-8);
+    let rp=(eta_t*c-eta_i*ct)/max(eta_t*c+eta_i*ct,1e-8);
+    return clamp(0.5*(rs*rs+rp*rp),0.0,1.0);
+}
+// Parallel-interface slab sums every internal round trip, including its
+// extra absorption path. Without absorption R=2F/(1+F), T=(1-F)/(1+F).
+fn slab_attenuation(s:Surface,cosine:f32)->vec3<f32> {
+    let ratio=s.eta_i/s.eta_t;let c=clamp(abs(cosine),0.0,1.0);
+    let ct=sqrt(max(0.0,1.0-ratio*ratio*(1.0-c*c)));
+    return exp(-s.sigma*s.thickness/max(ct,1e-4));
+}
+fn slab_transmission(s:Surface,cosine:f32)->vec3<f32> {
+    let f=dielectric_fresnel(cosine,s.eta_i,s.eta_t);let a=slab_attenuation(s,cosine);
+    return (1.0-f)*(1.0-f)*a/max(vec3<f32>(1.0)-f*f*a*a,vec3<f32>(1e-8));
+}
+fn slab_reflection(s:Surface,cosine:f32)->vec3<f32> {
+    let f=dielectric_fresnel(cosine,s.eta_i,s.eta_t);let a=slab_attenuation(s,cosine);
+    return vec3<f32>(f)+(1.0-f)*(1.0-f)*f*a*a/max(vec3<f32>(1.0)-f*f*a*a,vec3<f32>(1e-8));
+}
+fn coat_fresnel(c:f32)->f32 { let q=1.0-clamp(c,0.0,1.0); return 0.04+0.96*q*q*q*q*q; }
+fn max_channel(c:vec3<f32>)->f32 { return max(c.x,max(c.y,c.z)); }
+fn sheen_albedo(s:Surface, cosine:f32)->f32 {
+    let q=clamp(vec2<f32>(cosine,s.sheen_rough)*64.0-0.5,vec2<f32>(0),vec2<f32>(63));
+    let xy=vec2<u32>(q); let hi=min(xy+vec2<u32>(1u),vec2<u32>(63u)); let f=fract(q);
+    let a=scene[s.sheen_table+xy.y*64u+xy.x].x; let b=scene[s.sheen_table+xy.y*64u+hi.x].x;
+    let c=scene[s.sheen_table+hi.y*64u+xy.x].x; let d=scene[s.sheen_table+hi.y*64u+hi.x].x;
+    return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+fn charlie(nv:f32,nl:f32,nh:f32,rough:f32)->f32 {
+    let inverse=1.0/(rough*rough);
+    let dist=(2.0+inverse)*pow(max(0.0,1.0-nh*nh),0.5*inverse)/(2.0*PI);
+    return dist/max(4.0*(nv+nl-nv*nl),1e-8);
+}
+fn layer_scale(s:Surface,nv:f32,nl:f32)->f32 {
+    let cloth=1.0-max_channel(s.sheen)*max(sheen_albedo(s,nv),sheen_albedo(s,nl));
+    return max(cloth,0.0)*(1.0-s.coat*coat_fresnel(nv))*(1.0-s.coat*coat_fresnel(nl));
+}
+fn surface_emission(s:Surface,v:vec3<f32>)->vec3<f32> {
+    let nv=max(dot(s.n,v),0.0);let cnv=max(dot(s.cn,v),0.0);
+    let scale=(1.0-max_channel(s.sheen)*sheen_albedo(s,nv))*(1.0-s.coat*coat_fresnel(cnv));
+    return s.emission*max(scale,0.0);
+}
+struct Lobes { diffuse:f32, reflection:f32, transmission:f32, sheen:f32, coat:f32 }
+fn lobes(s:Surface,v:vec3<f32>)->Lobes {
+    let nv=max(dot(s.n,v),1e-6); let f=dielectric_fresnel(nv,s.eta_i,s.eta_t);
+    let glass_f=select(max_channel(slab_reflection(s,nv)),f,s.solid);
+    let old_spec=clamp(0.25+0.5*s.metal,0.1,0.9);
+    let diffuse=(1.0-s.transmission)*(1.0-old_spec);
+    let reflection=mix(old_spec,glass_f,s.transmission);
+    // A macrosurface above its critical angle can still transmit through a
+    // tilted rough microfacet. Keep that proposal alive; TIR samples reflect.
+    let transmission=s.transmission*select(max_channel(slab_transmission(s,nv)),max(1.0-f,0.05),s.solid);
+    let sheen=max_channel(s.sheen)*sheen_albedo(s,nv);
+    let coat=s.coat*coat_fresnel(max(dot(s.cn,v),0.0));
+    let total=max(diffuse+reflection+transmission+sheen+coat,1e-8);
+    return Lobes(diffuse/total,reflection/total,transmission/total,sheen/total,coat/total);
+}
+fn probability(s:Surface)->f32 { let l=lobes(s,s.n);return l.reflection+l.transmission+l.sheen+l.coat; }
+fn ggx_distribution(nh:f32,rough:f32)->f32 {let a2=pow(rough,4.0);let den=nh*nh*(a2-1.0)+1.0;return a2/max(PI*den*den,1e-20);}
+fn ggx_half(n:vec3<f32>,rough:f32)->vec3<f32> {
+    let u=random();let a2=pow(rough,4.0);let c=sqrt((1.0-u)/max(1.0+(a2-1.0)*u,1e-9));let phi=2.0*PI*random();let r=sqrt(max(0.0,1.0-c*c));
+    return basis(n,vec3<f32>(r*cos(phi),r*sin(phi),c));
+}
 fn bsdf(s:Surface, v:vec3<f32>, l:vec3<f32>)->vec4<f32> {
-    let nl=dot(s.n,l); let nv=dot(s.n,v); if nl<=0.0 || nv<=0.0 || dot(s.gn,l)<=0.0 { return vec4<f32>(0); }
-    let h=unit(v+l,s.n); let nh=clamp(dot(s.n,h),0.0,1.0); let vh=clamp(dot(v,h),1e-8,1.0);
-    let a2=pow(s.rough,4.0); let den=nh*nh*(a2-1.0)+1.0; let dist=a2/(PI*den*den);
-    // Schlick's cosine is bounded: pow on a negative roundoff is undefined.
-    let one_minus=1.0-vh;let fresnel=s.f0+(1.0-s.f0)*one_minus*one_minus*one_minus*one_minus*one_minus;
-    let spec=dist*g1(nv,a2)*g1(nl,a2)*fresnel/max(4.0*nv*nl,1e-8);
-    let diffuse=(1.0-s.metal)*s.base*(1.0-fresnel)/PI;
-    let pdf=mix(nl/PI,dist*nh/(4.0*vh),probability(s));
-    return vec4<f32>(diffuse+spec,pdf);
+    let nl=dot(s.n,l);let nv=dot(s.n,v);if nv<=0.0 {return vec4<f32>(0);}
+    let weights=lobes(s,v);let a2=pow(s.rough,4.0);
+    if nl>0.0 && dot(s.gn,l)>0.0 {
+        let h=unit(v+l,s.n);let nh=clamp(dot(s.n,h),0.0,1.0);let vh=clamp(dot(v,h),1e-8,1.0);
+        let dist=ggx_distribution(nh,s.rough);let q=1.0-vh;let schlick=s.f0+(1.0-s.f0)*q*q*q*q*q;
+        let glass_f=dielectric_fresnel(vh,s.eta_i,s.eta_t);
+        let fresnel=mix(schlick,select(slab_reflection(s,vh),vec3<f32>(glass_f),s.solid),s.transmission);
+        let spec=dist*g1(nv,a2)*g1(nl,a2)*fresnel/max(4.0*nv*nl,1e-8);
+        let diffuse=(1.0-s.metal)*(1.0-s.transmission)*s.base*(1.0-fresnel)/PI;
+        let base_scale=layer_scale(s,nv,nl);
+        let sheath=charlie(nv,nl,nh,s.sheen_rough)*s.sheen*(1.0-s.coat*coat_fresnel(nv))*(1.0-s.coat*coat_fresnel(nl));
+        let cnv=max(dot(s.cn,v),0.0);let cnl=max(dot(s.cn,l),0.0);let cnh=max(dot(s.cn,h),0.0);
+        let coat_dist=ggx_distribution(cnh,s.coat_rough);let coat_a2=pow(s.coat_rough,4.0);
+        let coat=s.coat*coat_dist*g1(cnv,coat_a2)*g1(cnl,coat_a2)*coat_fresnel(vh)/max(4.0*cnv*cnl,1e-8);
+        // Refraction samples that encounter TIR turn into reflection samples.
+        let tir=select(0.0,weights.transmission,s.solid && glass_f>=1.0);
+        let pdf=weights.diffuse*nl/PI+(weights.reflection+tir)*dist*nh/(4.0*vh)+weights.sheen/(2.0*PI)+weights.coat*coat_dist*cnh/(4.0*vh);
+        return vec4<f32>((diffuse+spec)*base_scale+sheath+vec3<f32>(coat),pdf);
+    }
+    // Slab transmission is a paired parallel-interface delta event, sampled
+    // separately below. Solid glass uses the Walter GGX transmission Jacobian.
+    if !s.solid || s.transmission<=0.0 || nl>=0.0 || dot(s.gn,l)>=0.0 { return vec4<f32>(0); }
+    var h=unit(s.eta_i*v+s.eta_t*l,s.n);if dot(h,s.n)<0.0 {h=-h;}
+    let vh=dot(v,h);let lh=dot(l,h);if vh<=0.0 || lh>=0.0 {return vec4<f32>(0);}
+    let nh=max(dot(s.n,h),0.0);let dist=ggx_distribution(nh,s.rough);
+    let denominator=s.eta_i*vh+s.eta_t*lh;let denominator2=max(denominator*denominator,1e-12);
+    let f=dielectric_fresnel(vh,s.eta_i,s.eta_t);
+    let pdf=weights.transmission*dist*nh*abs(lh)*s.eta_t*s.eta_t/denominator2;
+    // Radiance transport has eta_i^2 here (the adjoint eta_t^2 Jacobian is in
+    // the PDF). Enter/exit factors cancel through an unabsorbing closed object.
+    let value=s.transmission*(1.0-f)*dist*g1(nv,a2)*g1(abs(nl),a2)*abs(vh*lh)*s.eta_i*s.eta_i/max(nv*abs(nl)*denominator2,1e-12);
+    return vec4<f32>(sqrt(max(s.base,vec3<f32>(0)))*value*layer_scale(s,nv,abs(nl)),pdf);
 }
 fn env_uv(d:vec3<f32>)->vec2<f32> {
     // At a sampled pole, sin(theta) can round to zero: atan2(0,0) is undefined.
@@ -240,18 +346,35 @@ fn phase_sample(d:vec3<f32>)->vec3<f32> {
     if abs(g)>0.001 {let s=(1.0-g*g)/(1.0-g+2.0*g*u);c=(1.0+g*g-s*s)/(2.0*g);}
     c=clamp(c,-1.0,1.0);let angle=2.0*PI*random();let r=sqrt(max(0.0,1.0-c*c));return basis(d,vec3<f32>(r*cos(angle),r*sin(angle),c));
 }
-fn visible(o:vec3<f32>, d:vec3<f32>, distance:f32)->f32 {
-    var origin=o; var remain=distance;
+fn visible(o:vec3<f32>, d:vec3<f32>, distance:f32)->vec3<f32> {
+    var origin=o;var remain=distance;var sigma=vec3<f32>(0);var ids:array<u32,8>;var media:array<vec3<f32>,8>;var depth=0u;
     let atmosphere_distance=select(0.0,distance,distance<INF*0.5 || p.v[15].z>0.5);
-    let segment=medium_segment(o,d,atmosphere_distance);
-    let midpoint=o+d*(segment.x+segment.y*0.5);
-    var trans=exp(-medium_density(midpoint)*segment.y);
+    let segment=medium_segment(o,d,atmosphere_distance);let midpoint=o+d*(segment.x+segment.y*0.5);
+    var trans=vec3<f32>(exp(-medium_density(midpoint)*segment.y));
     for(var i=0u;i<u32(p.v[9].w);i++) {
-        let h=intersect(origin,d,remain,false); if h.tri==0xffffffffu { return trans; }
-        let s=surface(h,d); trans*=1.0-s.alpha; if trans<1e-4 { return 0.0; }
-        origin+=d*(h.t+0.0002); remain-=h.t+0.0002;
+        let h=intersect(origin,d,remain,false);if h.tri==0xffffffffu {return trans;}
+        let s=surface(h,d);trans*=exp(-sigma*h.t);
+        if s.transmission>0.0 {
+            let f=dielectric_fresnel(abs(dot(s.gn,-d)),1.0,s.ior);
+            var glass=vec3<f32>(s.transmission*(1.0-f));
+            if s.solid {
+                if s.front {
+                    if depth>=MEDIUM_LIMIT {return vec3<f32>(0);}
+                    ids[depth]=s.material;media[depth]=s.sigma;depth++;sigma=s.sigma;
+                } else {
+                    var found=depth;for(var j=0u;j<depth;j++){if ids[j]==s.material{found=j;}}
+                    if found<depth {for(var j=found;j+1u<depth;j++){ids[j]=ids[j+1u];media[j]=media[j+1u];}depth--;}
+                    sigma=vec3<f32>(0);if depth>0u{sigma=media[depth-1u];}
+                }
+            } else {
+                glass=vec3<f32>(s.transmission)*slab_transmission(s,abs(dot(s.gn,-d)));
+            }
+            trans*=vec3<f32>(1.0-s.alpha)+s.alpha*glass;
+        } else {trans*=1.0-s.alpha;}
+        if max_channel(trans)<1e-4{return vec3<f32>(0);}
+        origin+=d*(h.t+0.0002);remain-=h.t+0.0002;
     }
-    return 0.0;
+    return vec3<f32>(0);
 }
 // Sample authored rectangular emitters in solid angle. The authored direction
 // is the emitting face normal; width and height are physical scene units.
@@ -275,10 +398,14 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
     var o=origin; var d=direction; var throughput=vec3<f32>(1); var radiance=vec3<f32>(0);
     var first=Sample(vec3<f32>(0),vec3<f32>(0),vec3<f32>(0),vec3<f32>(0),0.0);
     var prev_pdf=0.0; var diffuse=0u; var glossy=0u; var transparent=0u; var bounce=0u;var volume_bounces=0u;var prev_emitter_nee=false;
-    var prev_diffuse=true; var prev_ao=1.0;
+    var prev_diffuse=true;var prev_ao=1.0;var prev_no_nee=false;var transmission_bounces=0u;
+    var medium_ids:array<u32,8>;var medium_ior:array<f32,8>;var medium_sigma:array<vec3<f32>,8>;var medium_depth=0u;
     loop {
         if bounce>=u32(p.v[8].x) { break; }
         let h=intersect(o,d,INF,bounce==0u);
+        var optical_sigma=vec3<f32>(0);if medium_depth>0u {optical_sigma=medium_sigma[medium_depth-1u];}
+        // A camera starting inside a single closed object has no entry event.
+        if bounce==0u && h.tri!=0xffffffffu {let initial=surface(h,d);if initial.solid && initial.transmission>0.0 && !initial.front {optical_sigma=initial.sigma;}}
         let atmosphere_distance=select(0.0,h.t,h.tri!=0xffffffffu || p.v[15].z>0.5);
         let segment=medium_segment(o,d,atmosphere_distance);
         if segment.y>0.0 {
@@ -286,7 +413,7 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
             let free_path=-log(max(1.0-random(),1e-7))/max(segment_density,1e-8);
             if free_path<segment.y {
                 volume_bounces++;if volume_bounces>u32(p.v[18].w) {break;}
-                let point=o+d*(segment.x+free_path);throughput*=p.v[18].rgb;
+                let point=o+d*(segment.x+free_path);throughput*=p.v[18].rgb*exp(-optical_sigma*(segment.x+free_path));
                 for(var li=0u;li<u32(p.v[1].w);li++) {
                     let at=bitcast<u32>(p.v[1].z)+li*4u;let light=scene[at];let settings=scene[at+1u];
                     var l=normalize(-settings.xyz);var distance=INF;var energy=settings.w;
@@ -305,7 +432,7 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
                 if (u32(p.v[21].w)&1u)!=0u {radiance+=throughput*caustic_radiance(point);}
                 let l=env_sample();let pdf=env_pdf(l);let f=phase(dot(d,l));
                 radiance+=throughput*env(l)*env_diffuse_scale()*f*visible(point,l,INF)*power(pdf,f)/pdf;
-                let next=phase_sample(d);prev_pdf=phase(dot(d,next));prev_emitter_nee=false;prev_diffuse=true;prev_ao=1.0;o=point;d=next;bounce++;
+                let next=phase_sample(d);prev_pdf=phase(dot(d,next));prev_emitter_nee=false;prev_diffuse=true;prev_no_nee=false;prev_ao=1.0;o=point;d=next;bounce++;
                 if bounce>=u32(p.v[8].w) {let survive=clamp(max(throughput.r,max(throughput.g,throughput.b)),0.05,0.95);if random()>survive {break;}throughput/=survive;}
                 continue;
             }
@@ -314,7 +441,7 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
             if bounce==0u {
                 radiance+=throughput*env_radiance(d)*p.v[11].y;
             } else {
-                let weight=power(prev_pdf,env_pdf(d));
+                let weight=select(power(prev_pdf,env_pdf(d)),1.0,prev_no_nee);
                 let scale=select(env_specular_scale(),env_diffuse_scale()*prev_ao,prev_diffuse);
                 radiance+=throughput*env_radiance(d)*weight*p.v[11].x*scale;
             }
@@ -324,13 +451,23 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
                 for(var li=0u;li<u32(p.v[1].w);li++) {
                     let at=bitcast<u32>(p.v[1].z)+li*4u;
                     if scene[at].w==0.0 && dot(d,normalize(-scene[at+1u].xyz))>=cos_radius {
-                        radiance+=throughput*scene[at+2u].rgb*scene[at+1u].w*pdf*select(power(prev_pdf,pdf),1.0,bounce==0u);
+                        radiance+=throughput*scene[at+2u].rgb*scene[at+1u].w*pdf*select(power(prev_pdf,pdf),1.0,bounce==0u || prev_no_nee);
                     }
                 }
             }
             break;
         }
-        let s=surface(h,d); let point=o+d*h.t;
+        var s=surface(h,d);let point=o+d*h.t;throughput*=exp(-optical_sigma*h.t);
+        var exit_index=medium_depth;
+        s.eta_i=1.0;if medium_depth>0u{s.eta_i=medium_ior[medium_depth-1u];}
+        if s.solid && s.transmission>0.0 {
+            if s.front{s.eta_t=s.ior;}else{
+                for(var j=0u;j<medium_depth;j++){if medium_ids[j]==s.material{exit_index=j;}}
+                s.eta_t=1.0;
+                if exit_index<medium_depth {if exit_index>0u{s.eta_t=medium_ior[exit_index-1u];}}
+                else {s.eta_i=s.ior;}
+            }
+        }
         if !finite3(s.n) || !finite3(s.gn) {return Sample(vec3<f32>(bitcast<f32>(0x7fc00000u)),vec3<f32>(10),s.n,point,f32(h.tri));}
         if random()>s.alpha {
             transparent++; if transparent>=u32(p.v[9].w) { break; }
@@ -342,7 +479,7 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
             let emitter_pdf=h.t*h.t/max(abs(dot(s.gn,-d))*p.v[14].z,1e-10);
             emission_weight=power(prev_pdf,emitter_pdf);
         }
-        radiance+=throughput*s.emission*emission_weight;
+        radiance+=throughput*surface_emission(s,-d)*emission_weight;
         if u32(p.v[21].w)>=2u && s.receive_caustics>0.5 {
             radiance+=throughput*s.base*caustic_radiance(point)*max(s.n.y,0.0);
         }
@@ -355,7 +492,7 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
             let emitter=surface(Hit(distance,tri,uv),l);
             let pdf=distance*distance/max(abs(dot(emitter.gn,-l))*p.v[14].z,1e-10);
             let f=bsdf(s,-d,l);
-            if f.a>0.0 {radiance+=throughput*f.rgb*max(dot(s.n,l),0.0)*emitter.emission*emitter.alpha*visible(point+s.gn*0.0002,l,distance-0.0006)*power(pdf,f.a)/pdf;}
+            if f.a>0.0 {radiance+=throughput*f.rgb*max(dot(s.n,l),0.0)*surface_emission(emitter,-l)*emitter.alpha*visible(point+s.gn*0.0002,l,distance-0.0006)*power(pdf,f.a)/pdf;}
             if !finite3(radiance) {return Sample(radiance,vec3<f32>(30),vec3<f32>(pdf,f.a,distance),point,f32(tri));}
         }
         // Delta lights have no competing BSDF sampling strategy.
@@ -380,22 +517,60 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Sample {
         let env_scale=mix(env_diffuse_scale()*s.ao,env_specular_scale(),probability(s));
         if ef.a>0.0 { radiance+=throughput*ef.rgb*max(dot(s.n,light_dir),0.0)*env(light_dir)*env_scale*visible(point+s.gn*0.0002,light_dir,INF)*power(light_pdf,ef.a)/light_pdf; }
         if !finite3(radiance) {return Sample(radiance,vec3<f32>(50),vec3<f32>(light_pdf,ef.a,f32(bounce)),point,f32(h.tri));}
-        var next=vec3<f32>(0);
-        if random()<probability(s) {
-            glossy++; if glossy>u32(p.v[8].z) { break; }
-            let u=random(); let a2=pow(s.rough,4.0); let c=sqrt((1.0-u)/(1.0+(a2-1.0)*u)); let phi=2.0*PI*random();
-            let hh=basis(s.n,vec3<f32>(sqrt(max(0.0,1.0-c*c))*cos(phi),sqrt(max(0.0,1.0-c*c))*sin(phi),c));
-            next=reflect(d,hh); prev_diffuse=false;
-        } else { diffuse++; if diffuse>u32(p.v[8].y) { break; } next=cosine(s.n); prev_diffuse=true; }
-        let f=bsdf(s,-d,next); if f.a<1e-10 { break; }
-        throughput*=f.rgb*max(dot(s.n,next),0.0)/f.a; prev_pdf=f.a;prev_emitter_nee=true;prev_ao=s.ao;
-        if !finite3(throughput) {return Sample(throughput,vec3<f32>(60),f.rgb,point,f.a);}
-        bounce++;
-        if bounce>=u32(p.v[8].w) {
-            let survive=clamp(max(throughput.r,max(throughput.g,throughput.b)),0.05,0.95);
-            if random()>survive { break; } throughput/=survive;
+        var next=vec3<f32>(0);var next_origin=point;var sampled_transmission=false;
+        let weights=lobes(s,-d);let choice=random();var delta=false;
+        if choice<weights.diffuse {
+            diffuse++;if diffuse>u32(p.v[8].y){break;}next=cosine(s.n);prev_diffuse=true;
+        } else if choice<weights.diffuse+weights.reflection {
+            glossy++;if glossy>u32(p.v[8].z){break;}next=reflect(d,ggx_half(s.n,s.rough));prev_diffuse=false;
+        } else if choice<weights.diffuse+weights.reflection+weights.transmission {
+            prev_diffuse=false;
+            if s.solid {
+                if abs(s.eta_i-s.eta_t)<1e-6 {
+                    next=d;throughput*=sqrt(max(s.base,vec3<f32>(0)))*s.transmission*layer_scale(s,max(dot(s.n,-d),0.0),max(dot(s.n,-d),0.0))/max(weights.transmission,1e-8);
+                    sampled_transmission=true;delta=true;
+                } else {
+                    let hh=ggx_half(s.n,s.rough);next=refract(d,hh,s.eta_i/s.eta_t);
+                    if dot(next,next)<1e-12 {next=reflect(d,hh);}else{sampled_transmission=true;}
+                }
+            } else {
+                // A parallel thin sheet includes both interfaces and the entire
+                // geometric series of internal reflections in its delta weight.
+                let internal=refract(d,s.gn,s.eta_i/s.eta_t);
+                if dot(internal,internal)<1e-12 {break;}
+                let path=s.thickness/max(abs(dot(internal,s.gn)),1e-4);
+                let trans=s.transmission*slab_transmission(s,dot(s.n,-d));
+                throughput*=s.base*trans*layer_scale(s,max(dot(s.n,-d),0.0),max(dot(s.n,-d),0.0))/max(weights.transmission,1e-8);
+                next=d;next_origin=point+internal*path;delta=true;
+            }
+            if sampled_transmission || delta {transmission_bounces++;if transmission_bounces>u32(p.v[7].w){break;}}
+            else {glossy++;if glossy>u32(p.v[8].z){break;}}
+        } else if choice<weights.diffuse+weights.reflection+weights.transmission+weights.sheen {
+            glossy++;if glossy>u32(p.v[8].z){break;}let z=random();let phi=2.0*PI*random();let r=sqrt(max(0.0,1.0-z*z));next=basis(s.n,vec3<f32>(r*cos(phi),r*sin(phi),z));prev_diffuse=false;
+        } else {
+            glossy++;if glossy>u32(p.v[8].z){break;}next=reflect(d,ggx_half(s.cn,s.coat_rough));prev_diffuse=false;
         }
-        o=point+s.gn*0.0002; d=next;
+        if !delta {
+            let f=bsdf(s,-d,next);if f.a<1e-10 {break;}
+            throughput*=f.rgb*abs(dot(s.n,next))/f.a;prev_pdf=f.a;
+        } else {prev_pdf=0.0;}
+        if sampled_transmission && dot(next,s.gn)<0.0 {
+                if s.front {
+                    if medium_depth>=MEDIUM_LIMIT {break;}
+                    medium_ids[medium_depth]=s.material;medium_ior[medium_depth]=s.ior;medium_sigma[medium_depth]=s.sigma;medium_depth++;
+                } else if exit_index<medium_depth {
+                    for(var j=exit_index;j+1u<medium_depth;j++){medium_ids[j]=medium_ids[j+1u];medium_ior[j]=medium_ior[j+1u];medium_sigma[j]=medium_sigma[j+1u];}medium_depth--;
+                }
+            }
+        // Rough transmission is BSDF-sampled only: a straight shadow connector
+        // cannot represent a bent multi-interface refractive path. Its emitter
+        // and environment hits therefore retain weight one (no competing NEE).
+        prev_no_nee=delta || sampled_transmission;prev_emitter_nee=!prev_no_nee;prev_ao=s.ao;
+        if !finite3(throughput){return Sample(throughput,vec3<f32>(60),s.base,point,prev_pdf);}
+        bounce++;
+        if bounce>=u32(p.v[8].w){let survive=clamp(max_channel(throughput),0.05,0.95);if random()>survive{break;}throughput/=survive;}
+        let offset=select(-s.gn,s.gn,dot(next,s.gn)>0.0);o=next_origin+offset*0.0002;d=unit(next,d);
+
     }
     first.color=radiance; return first;
 }
